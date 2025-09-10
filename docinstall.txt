@@ -11,3 +11,12 @@ cp -f /opt/adcs_python/nginx-conf.conf /etc/nginx/sites-enabled/default
 openssl dhparam -out /etc/ssl/certs/dhparam.pem  2048
 kinit administor
 msktutil --server srvads.mydomain.lan --create --host testadcs  --computer-name testadcs --service HTTP/testadcs.mydomain.lan --keytab /etc/krb5.keytab --no-reverse-lookups --dont-update-dnshostname
+
+Windows:
+Install CA on windows client.
+Edit GPO → Computer/users Configuration → Policies → Windows Settings → Security Settings → Public Key Policies.
+Open Certificate Services Client – Certificate Enrollment Policy → Enabled → Configure Enrollment Policy Servers…
+Remove Active Directory Enrollment Policy to force CEP.
+Add URL: https://testadcs.mydomain.lan/ADPolicyProvider_CEP_Kerberos/service.svc/CEP
+Authentication: Kerberos (Integrated)
+
