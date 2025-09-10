@@ -1,0 +1,137 @@
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:a="http://www.w3.org/2005/08/addressing">
+  <s:Header>
+    <a:Action s:mustUnderstand="1">http://schemas.microsoft.com/windows/pki/2009/01/enrollmentpolicy/IPolicy/GetPoliciesResponse</a:Action>
+    <a:RelatesTo>urn:uuid:{{ uuid_request }}</a:RelatesTo>
+    <ActivityId CorrelationId="{{ uuid_random }}" xmlns="http://schemas.microsoft.com/2004/09/ServiceModel/Diagnostics">00000000-0000-0000-0000-000000000000</ActivityId>
+  </s:Header>
+  <s:Body xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+    <GetPoliciesResponse xmlns="http://schemas.microsoft.com/windows/pki/2009/01/enrollmentpolicy">
+      <response>
+        <policyID>{{ policyid }}</policyID>
+        <policyFriendlyName/>
+        <nextUpdateHours>8</nextUpdateHours>
+        <policiesNotChanged xsi:nil="true"/>
+        <policies>
+          <policy>
+            <policyOIDReference>33</policyOIDReference>
+            <cAs><cAReference>0</cAReference></cAs>
+            <attributes>
+              <commonName>adcswebuser</commonName>
+              <policySchema>2</policySchema>
+              <certificateValidity>
+                <validityPeriodSeconds>31536000</validityPeriodSeconds>
+                <renewalPeriodSeconds>3628800</renewalPeriodSeconds>
+              </certificateValidity>
+              <permission>
+                <enroll>true</enroll>
+                <autoEnroll>true</autoEnroll>
+              </permission>
+              <privateKeyAttributes>
+                <minimalKeyLength>2048</minimalKeyLength>
+                <keySpec>1</keySpec>
+                <keyUsageProperty xsi:nil="true"/>
+                <permissions xsi:nil="true"/>
+                <algorithmOIDReference xsi:nil="true"/>
+                <cryptoProviders>
+                  <provider>Microsoft Enhanced Cryptographic Provider v1.0</provider>
+                  <provider>Microsoft Base Cryptographic Provider v1.0</provider>
+                </cryptoProviders>
+              </privateKeyAttributes>
+              <revision>
+                <majorRevision>100</majorRevision>
+                <minorRevision>3</minorRevision>
+              </revision>
+              <supersededPolicies xsi:nil="true"/>
+              <privateKeyFlags>16842768</privateKeyFlags>
+              <subjectNameFlags>2793406464</subjectNameFlags>
+              <enrollmentFlags>9</enrollmentFlags>
+              <generalFlags>131642</generalFlags>
+              <hashAlgorithmOIDReference xsi:nil="true"/>
+              <rARequirements xsi:nil="true"/>
+              <keyArchivalAttributes xsi:nil="true"/>
+              <extensions>
+                <extension><oIDReference>18</oIDReference><critical>false</critical><value>MC4GJisGAQQBgjcVCIKL5n3W1DOF0Zk9hYaMd4LbmTCBTITW8XyBvv4dAgFkAgED</value></extension>
+                <extension><oIDReference>6</oIDReference><critical>false</critical><value>MCAGCCsGAQUFBwMCBggrBgEFBQcDBAYKKwYBBAGCNwoDBA==</value></extension>
+                <extension><oIDReference>7</oIDReference><critical>true</critical><value>AwIFoA==</value></extension>
+                <extension><oIDReference>19</oIDReference><critical>false</critical><value>MCYwCgYIKwYBBQUHAwIwCgYIKwYBBQUHAwQwDAYKKwYBBAGCNwoDBA==</value></extension>
+              </extensions>
+            </attributes>
+          </policy>
+          <policy>
+            <policyOIDReference>34</policyOIDReference>
+            <cAs><cAReference>0</cAReference></cAs>
+            <attributes>
+              <commonName>adcswebcomputer</commonName>
+              <policySchema>2</policySchema>
+              <certificateValidity>
+                <validityPeriodSeconds>31536000</validityPeriodSeconds>
+                <renewalPeriodSeconds>3628800</renewalPeriodSeconds>
+              </certificateValidity>
+              <permission>
+                <enroll>true</enroll>
+                <autoEnroll>true</autoEnroll>
+              </permission>
+              <privateKeyAttributes>
+                <minimalKeyLength>2048</minimalKeyLength>
+                <keySpec>1</keySpec>
+                <keyUsageProperty xsi:nil="true"/>
+                <permissions xsi:nil="true"/>
+                <algorithmOIDReference xsi:nil="true"/>
+                <cryptoProviders>
+                  <provider>Microsoft Enhanced Cryptographic Provider v1.0</provider>
+                  <provider>Microsoft Base Cryptographic Provider v1.0</provider>
+                </cryptoProviders>
+              </privateKeyAttributes>
+              <revision>
+                <majorRevision>100</majorRevision>
+                <minorRevision>3</minorRevision>
+              </revision>
+              <supersededPolicies xsi:nil="true"/>
+              <privateKeyFlags>16842768</privateKeyFlags>
+              <subjectNameFlags>402653184</subjectNameFlags>
+              <enrollmentFlags>9</enrollmentFlags>
+              <generalFlags>131706</generalFlags>
+              <hashAlgorithmOIDReference xsi:nil="true"/>
+              <rARequirements xsi:nil="true"/>
+              <keyArchivalAttributes xsi:nil="true"/>
+              <extensions>
+                <extension><oIDReference>18</oIDReference><critical>false</critical><value>MC4GJisGAQQBgjcVCIKL5n3W1DOF0Zk9hYaMd4LbmTCBTITW8XyBvv4dAgFkAgED</value></extension>
+                <extension><oIDReference>6</oIDReference><critical>false</critical><value>MCAGCCsGAQUFBwMCBggrBgEFBQcDBAYKKwYBBAGCNwoDBA==</value></extension>
+                <extension><oIDReference>7</oIDReference><critical>true</critical><value>AwIFoA==</value></extension>
+                <extension><oIDReference>19</oIDReference><critical>false</critical><value>MCYwCgYIKwYBBQUHAwIwCgYIKwYBBQUHAwQwDAYKKwYBBAGCNwoDBA==</value></extension>
+              </extensions>
+            </attributes>
+          </policy>
+ 
+        </policies>
+      </response>
+      <cAs>
+        <cA>
+          <uris>
+            <cAURI>
+              <clientAuthentication>2</clientAuthentication>
+              <uri>{{ hosturl }}/caflask-ADCS-CA_CES_Kerberos/service.svc/CES</uri>
+              <priority>1</priority>
+              <renewalOnly>false</renewalOnly>
+            </cAURI>
+          </uris>
+          <certificate>{{ ca_certificate }}</certificate>
+          <enrollPermission>true</enrollPermission>
+          <cAReferenceID>0</cAReferenceID>
+        </cA>
+      </cAs>
+      <oIDs>
+        <oID><value>1.3.6.1.4.1.311.10.3.4</value><group>7</group><oIDReferenceID>2</oIDReferenceID><defaultName>Systme de fichiers EFS (Encrypting File System)</defaultName></oID>
+        <oID><value>1.3.6.1.5.5.7.3.4</value><group>7</group><oIDReferenceID>3</oIDReferenceID><defaultName>Messagerie lectronique scurise</defaultName></oID>
+        <oID><value>1.3.6.1.5.5.7.3.2</value><group>7</group><oIDReferenceID>4</oIDReferenceID><defaultName>Authentification du client</defaultName></oID>
+        <oID><value>1.3.6.1.4.1.311.20.2</value><group>6</group><oIDReferenceID>5</oIDReferenceID><defaultName>Nom du Modle de certificat</defaultName></oID>
+        <oID><value>2.5.29.37</value><group>6</group><oIDReferenceID>6</oIDReferenceID><defaultName>Utilisation avance de la cl</defaultName></oID>
+        <oID><value>2.5.29.15</value><group>6</group><oIDReferenceID>7</oIDReferenceID><defaultName>Utilisation de la cl</defaultName></oID>
+        <oID><value>1.3.6.1.4.1.311.21.7</value><group>6</group><oIDReferenceID>18</oIDReferenceID><defaultName>Informations du modle de certificat</defaultName></oID>
+        <oID><value>1.3.6.1.4.1.311.21.10</value><group>6</group><oIDReferenceID>19</oIDReferenceID><defaultName>Stgies dapplication</defaultName></oID>
+        <oID><value>1.3.6.1.4.1.311.21.8.4387709.1419827.11816125.10585719.5688496.204.9812220.3129117</value><group>9</group><oIDReferenceID>33</oIDReferenceID><defaultName>adcswebuseruser</defaultName></oID>
+        <oID><value>1.3.6.1.4.1.311.21.8.4387709.1419827.11816125.10585719.5688496.204.9812220.3129118</value><group>9</group><oIDReferenceID>34</oIDReferenceID><defaultName>adcswebcomputer</defaultName></oID>
+      </oIDs>
+    </GetPoliciesResponse>
+  </s:Body>
+</s:Envelope>

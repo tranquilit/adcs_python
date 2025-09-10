@@ -1,0 +1,24 @@
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:a="http://www.w3.org/2005/08/addressing">
+  <s:Header>
+    <a:Action s:mustUnderstand="1">http://schemas.microsoft.com/windows/pki/2009/01/enrollment/RSTRC/wstep</a:Action>
+    <a:RelatesTo>urn:uuid:{{ uuid_request }}</a:RelatesTo>
+    <ActivityId CorrelationId="{{ uuid_random }}" xmlns="http://schemas.microsoft.com/2004/09/ServiceModel/Diagnostics">00000000-0000-0000-0000-000000000000</ActivityId>
+  </s:Header>
+  <s:Body>
+    <RequestSecurityTokenResponseCollection xmlns="http://docs.oasis-open.org/ws-sx/ws-trust/200512">
+      <RequestSecurityTokenResponse>
+        <TokenType>http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#X509v3</TokenType>
+        <DispositionMessage xml:lang="en-US" xmlns="http://schemas.microsoft.com/windows/pki/2009/01/enrollment">Issued</DispositionMessage>
+        <BinarySecurityToken ValueType="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd#PKCS7"
+                             EncodingType="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd#base64binary"
+                             xmlns="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd">{{ p7b_der }}</BinarySecurityToken>
+        <RequestedSecurityToken>
+          <BinarySecurityToken ValueType="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#X509v3"
+                               EncodingType="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd#base64binary"
+                               xmlns="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd">{{ leaf_der }}</BinarySecurityToken>
+        </RequestedSecurityToken>
+       <RequestID xmlns="http://schemas.microsoft.com/windows/pki/2009/01/enrollment">{{ body_part_id }}</RequestID> 
+      </RequestSecurityTokenResponse>
+    </RequestSecurityTokenResponseCollection>
+  </s:Body>
+</s:Envelope>

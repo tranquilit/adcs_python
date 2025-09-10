@@ -1,0 +1,9 @@
+[global]
+
+ca_certificate_path = /opt/adcs_python/pki/certs/ca.crt.pem
+ca_key_path = /opt/adcs_python/pki/private/ca.key.pem
+
+crl_http_url        = http://testadcs.mydomain.lan/crl/ca.crl.pem
+ca_issuers_http_url = http://testadcs.mydomain.lan/certs/ca.crt.pem
+
+policyid = {8958087D-44BE-436A-897B-EA76BA39CF5F}
