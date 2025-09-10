@@ -1,6 +1,4 @@
-## 🚨 WARNING — DO NOT USE IN PRODUCTION This is an **experimental proof of concept**. The code is **unstable**, **unaudited**, and **not security-hardened**. **Production use is strictly discouraged** (risk of bugs, data loss, and security issues). ## Purpose A small POC exploring: - CSR parsing/validation, - SignedData (including detached) handling, - optional Active Directory lookups via samdb. ## Status - **POC / unstable** - Minimal tests - Many TODOs and rough edgesProject Name (POC)
-==================
-
+## 🚨 WARNING — DO NOT USE IN PRODUCTION 
 DO NOT USE IN PRODUCTION
 --------------------------------------
 
