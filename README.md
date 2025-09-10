@@ -1,5 +1,4 @@
-## 🚨 WARNING — DO NOT USE IN PRODUCTION 
-DO NOT USE IN PRODUCTION
+## 🚨 WARNING — DO NOT USE IN PRODUCTION
 --------------------------------------
 
 This is an **experimental proof of concept**. The code is **unstable**, **unaudited**, and **not security-hardened**.
