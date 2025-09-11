@@ -6,7 +6,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from jinja2 import Template
 from utils import CertificateTemplate,SMIMECapabilities,SMIMECapability,NtdsAttr,NtdsCASecurityExt,build_adcs_bst_certrep,format_b64_for_soap
-from utils import exct_csr_from_cmc
+from utils import exct_csr_from_cmc,search_user
 
 from asn1crypto import x509 as a_x509, core as a_core
 
@@ -67,18 +67,17 @@ def ces_service():
 
     csr_der, body_part_id, info = exct_csr_from_cmc(p7_der)
 
-
-    print("TODO verify that the requests in the CSR are OK")
-
     ca_cert_pem = base64.b64decode(app.confadcs['ca_certificate'])
     ca_key_pem  = base64.b64decode(app.confadcs['ca_pem'])
 
-    print("TODO retrieve the SID and other info from AD using samdb")
+    samdbr,entry = search_user(g.kerberos_user)
+    sid = samdbr.schema_format_value("objectSID", entry["objectSID"][0])
+
     leaf = issue_cert(csr_der, 
                       ca_cert_pem, ca_key_pem,cn=g.kerberos_user,
                       crl_http_url = app.confadcs['crl_http_url'],
                       ca_issuers_http_url = app.confadcs['ca_issuers_http_url'],
-                      sid_bytes = b"S-1-5-21-4065038523-172981886-1017972661-21903",
+                      sid_bytes = sid,
                       info_csr=info)
 
     leaf_der = leaf.public_bytes(serialization.Encoding.DER)
@@ -96,7 +95,7 @@ def ces_service():
 
     return Response(response_xml, content_type='application/soap+xml')
 
-def issue_cert(csr_der: bytes, ca_cert_der: bytes, ca_key_der: bytes, cn: str, crl_http_url: str,ca_issuers_http_url: str,sid_bytes: bytes, info_csr=None) -> cx509.Certificate:
+def issue_cert(csr_der: bytes, ca_cert_der: bytes, ca_key_der: bytes, cn: str, crl_http_url: str,ca_issuers_http_url: str,sid_bytes: bytes, info_csr=None, entry_ad = None) -> cx509.Certificate:
     csr_obj  = cx509.load_der_x509_csr(csr_der)
     ca_cert  = cx509.load_der_x509_certificate(ca_cert_der)
     ca_key   = serialization.load_der_private_key(ca_key_der, password=None)
@@ -109,6 +108,10 @@ def issue_cert(csr_der: bytes, ca_cert_der: bytes, ca_key_der: bytes, cn: str, c
     san_ext = None
     eku_ext = None
     ku_ext  = None
+
+    #TODO SECURITY check if the values allow
+    #TODO retrieve values from the ad, depending on the template define the authorized values.
+
     for ext in csr_obj.extensions:
         if isinstance(ext.value, cx509.SubjectAlternativeName):
             san_ext = ext.value

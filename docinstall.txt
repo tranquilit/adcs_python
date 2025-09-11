@@ -1,4 +1,4 @@
-apt-get install msktutil nginx python3-jinja2 python3-flask python3-asn1crypto python3-kerberos krb5-user git
+apt-get install samba msktutil nginx python3-jinja2 python3-flask python3-asn1crypto python3-kerberos krb5-user git
 apt-get install  
 cd /opt
 git clone https://github.com/sfonteneau/adcs_python.git
@@ -9,14 +9,14 @@ cp -f /opt/adcs_python/pki/private/testadcs.mydomain.lan.key.pem /etc/nginx/key.
 cp -f /opt/adcs_python/pki/certs/testadcs.mydomain.lan.crt.pem /etc/nginx/crt.pem
 cp -f /opt/adcs_python/nginx-conf.conf /etc/nginx/sites-enabled/default
 openssl dhparam -out /etc/ssl/certs/dhparam.pem  2048
-kinit administor
-msktutil --server srvads.mydomain.lan --create --host testadcs  --computer-name testadcs --service HTTP/testadcs.mydomain.lan --keytab /etc/krb5.keytab --no-reverse-lookups --dont-update-dnshostname
 
-Windows:
-Install CA on windows client.
-Edit GPO → Computer/users Configuration → Policies → Windows Settings → Security Settings → Public Key Policies.
-Open Certificate Services Client – Certificate Enrollment Policy → Enabled → Configure Enrollment Policy Servers…
-Remove Active Directory Enrollment Policy to force CEP.
-Add URL: https://testadcs.mydomain.lan/ADPolicyProvider_CEP_Kerberos/service.svc/CEP
-Authentication: Kerberos (Integrated)
+
+####### JOIN MACHINE #######
+net ads join
+
+set SPN HTTP on computer account
+add "kerberos method = secrets and keytab" in smb.conf
+
+net ads keytab create
+
 

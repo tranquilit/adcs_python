@@ -4,6 +4,13 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import hashes
 import hashlib
 import base64
+from samba.auth import system_session
+from samba.credentials import Credentials
+from samba.param import LoadParm
+from samba.samdb import SamDB
+from samba.net import Net
+from samba.dcerpc import nbt
+
 
 OID_MS_CERT_TEMPLATE_NAME = '1.3.6.1.4.1.311.20.2'
 OID_MS_CERT_TEMPLATE_INFO = '1.3.6.1.4.1.311.21.7'
@@ -292,4 +299,33 @@ def build_adcs_bst_certrep(child_der: bytes, ca_der: bytes, ca_key, cert_req_id:
 def format_b64_for_soap(data: bytes) -> str:
     b64 = base64.b64encode(data).decode()
     return b64
+
+def search_user(userauth):
+    lp = LoadParm()
+    lp.load_default()
+
+    creds = Credentials()
+    creds.guess(lp)
+    creds.set_kerberos_state(True)
+    creds.set_machine_account(lp)
+
+    realm = lp.get('realm')
+    net = Net(creds=creds, lp=lp)
+    flags = nbt.NBT_SERVER_LDAP
+    dc_info = net.finddc(domain=realm, flags=flags)
+    dc_fqdn = str(dc_info.pdc_dns_name)
+
+    ldap_url = f"ldap://{dc_fqdn}"
+
+    samdbr = SamDB(url=ldap_url, credentials=creds, lp=lp)
+
+    res = samdbr.search(
+        base= 'DC=' + userauth.split('@')[1].replace('.',',DC='),
+        scope=2,
+        expression="(samAccountName=%s)" % userauth.split('@')[0]
+    )
+
+    for entry in res:
+        return samdbr,entry
+
 
