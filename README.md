@@ -44,12 +44,9 @@ Limitations
 Intended Use
 ----------------------------------------------------------
 
-✅ For research and educational purposes  
-✅ To better understand ADCS web enrollment protocols  
 ✅ For lab experiments and prototype testing  
-
 ❌ **Not for production**  
-❌ Not for sensitive environments  
+
 
 TODO / Roadmap
 ----------------------------------------------------------
