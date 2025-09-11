@@ -1,4 +1,4 @@
-==========================================================
+
 🚨 WARNING — EXPERIMENTAL ONLY
 ==========================================================
 
@@ -6,7 +6,7 @@ This project is an **experimental proof of concept**.
 **Do not use in production** — it is unstable, unaudited, and not security-hardened.  
 You risk **bugs, data loss, and security issues**.
 
-----------------------------------------------------------
+
 Purpose
 ----------------------------------------------------------
 
@@ -22,8 +22,8 @@ The goal is to emulate an ADCS web enrollment server that:
 - Serves CEP policy (templates, CAs, etc.) to requesting clients.
 - Receives and validates PKCS#10 CSRs.
 - Processes submissions via CES and returns signed responses (mocked).
-- 
-----------------------------------------------------------
+  
+
 Status
 ----------------------------------------------------------
 
@@ -32,7 +32,7 @@ Status
 - Many missing features (TODOs)
 - Not designed or safe for real-world deployment
 
-----------------------------------------------------------
+
 Limitations
 ----------------------------------------------------------
 
@@ -41,7 +41,6 @@ Limitations
 - Only tested in isolated **lab environments**
 - No guarantees of correctness or compatibility
 
-----------------------------------------------------------
 Intended Use
 ----------------------------------------------------------
 
@@ -52,7 +51,6 @@ Intended Use
 ❌ **Not for production**  
 ❌ Not for sensitive environments  
 
-----------------------------------------------------------
 TODO / Roadmap
 ----------------------------------------------------------
 
