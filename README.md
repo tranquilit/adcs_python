@@ -21,7 +21,7 @@ The goal is to emulate an ADCS web enrollment server that:
 
 - Serves CEP policy (templates, CAs, etc.) to requesting clients.
 - Receives and validates PKCS#10 CSRs.
-- Processes submissions via CES and returns signed responses (mocked).
+- Processes submissions via CES and returns signed responses.
   
 
 Status
