@@ -48,11 +48,3 @@ Intended Use
 ❌ **Not for production**  
 
 
-TODO / Roadmap
-----------------------------------------------------------
-
-- Add security hardening and authentication (Kerberos, NTLM, etc.)
-- Improve PKCS#10 CSR handling
-- Expand test coverage (unit + integration)
-- Provide detailed technical documentation
-- Support more advanced enrollment scenarios
