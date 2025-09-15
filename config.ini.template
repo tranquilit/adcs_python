@@ -3,6 +3,9 @@
 ca_certificate_path = /opt/adcs_python/pki/certs/ca.crt.pem
 ca_key_path = /opt/adcs_python/pki/private/ca.key.pem
 
+path_cert = /opt/adcs-webkerberos/pki/certs
+path_csr  = /opt/adcs-webkerberos/pki/csr
+
 crl_http_url        = http://testadcs.mydomain.lan/crl/ca.crl.pem
 ca_issuers_http_url = http://testadcs.mydomain.lan/certs/ca.crt.pem
 
