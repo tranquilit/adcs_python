@@ -1,5 +1,4 @@
 apt-get install samba msktutil nginx python3-jinja2 python3-flask python3-asn1crypto python3-kerberos krb5-user git
-apt-get install  
 cd /opt
 git clone https://github.com/sfonteneau/adcs_python.git
 cd adcs_python
@@ -14,9 +13,11 @@ openssl dhparam -out /etc/ssl/certs/dhparam.pem  2048
 ####### JOIN MACHINE #######
 net ads join
 
-set SPN HTTP on computer account
+set SPN HTTP on computer account (HTTP/testadcs.mydomain.lan)
 add "kerberos method = secrets and keytab" in smb.conf
-
 net ads keytab create
+
+don't forget add fqdn and ip in /etc/hosts
+
 
 
