@@ -17,7 +17,7 @@ chmod 600 "$CA_DIR/private/ca.key.pem"
 openssl req -x509 -new -sha256 -days 3650 \
   -subj "/C=$COUNTRY/O=$ORG/CN=$CA_CN" \
   -key "$CA_DIR/private/ca.key.pem" \
-  -addext "basicConsints=critical,CA:true,pathlen:0" \
+  -addext "basicConstraints=critical,CA:true,pathlen:0" \
   -addext "keyUsage=critical,keyCertSign,cRLSign" \
   -addext "subjectKeyIdentifier=hash" \
   -addext "authorityKeyIdentifier=keyid" \
@@ -70,7 +70,7 @@ openssl x509 -req -sha256 -days 825 \
   -CAserial "$CA_DIR/serial" \
   -out "$CA_DIR/certs/$LEAF_FQDN.crt.pem" \
   -extfile <(printf "%s\n" \
-    "basicConsints=CA:FALSE" \
+    "basicConstraints=CA:FALSE" \
     "keyUsage=critical,digitalSignature,keyEncipherment" \
     "extendedKeyUsage=serverAuth,clientAuth" \
     "subjectKeyIdentifier=hash" \
@@ -81,4 +81,3 @@ openssl x509 -req -sha256 -days 825 \
 
 
 openssl x509 -in "$CA_DIR/certs/$LEAF_FQDN.crt.pem" -noout -text | sed -n '/X509v3 extensions:/,/Signature Algorithm/p'
-
