@@ -11,6 +11,8 @@ openssl dhparam -out /etc/ssl/certs/dhparam.pem  2048
 
 
 ####### JOIN MACHINE #######
+configure krb5.conf
+try kinit
 net ads join
 
 set SPN HTTP on computer account (HTTP/testadcs.mydomain.lan)
@@ -18,6 +20,7 @@ add "kerberos method = secrets and keytab" in smb.conf
 net ads keytab create
 
 don't forget add fqdn and ip in /etc/hosts
+
 
 
 
