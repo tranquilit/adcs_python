@@ -184,60 +184,66 @@ def _parse_template_from_csr_bytes(csr_der: bytes) -> dict:
     return tpl
 
 def exct_csr_from_cmc(p7_der: bytes) -> tuple[bytes, int, dict]:
-    ci = a_cms.ContentInfo.load(p7_der)
-    if ci["content_type"].native != "signed_data":
-        raise ValueError("ContentInfo.content_type != signed_data")
-
-    sd = ci["content"] 
-    eci = sd["encap_content_info"]
-
-    if eci["content"] is None:
-        raise ValueError("SignedData without encapsulated content (detached)")
-
-    pki_octets: bytes = eci["content"].native
-
     try:
-        pkidata_relax = _PKIDataRelax.load(pki_octets)
-        if pkidata_relax['reqSequence'] is not None:
-            for any_item in pkidata_relax['reqSequence']:
-                try:
-                    wrapped = _der_wrap_sequence(any_item.contents)
-                    tcr = _TCRRelax.load(wrapped)
-                    csr_obj = tcr['certificationRequest']
-                    body_part_id = int(tcr['bodyPartID'].native)
-                    csr_bytes = csr_obj.dump()
-                    template_info = _parse_template_from_csr_bytes(csr_bytes)
-                    return csr_bytes, body_part_id, template_info
-                except Exception:
-                    continue
-    except Exception:
-        pass
-
-    try:
-        seq = _SeqOfCSR.load(pki_octets)
-        if len(seq) >= 1:
-            csr_bytes = seq[0].dump()
+        ci = a_cms.ContentInfo.load(p7_der)
+        if ci["content_type"].native != "signed_data":
+            raise ValueError("ContentInfo.content_type != signed_data")
+    
+        sd = ci["content"] 
+        eci = sd["encap_content_info"]
+    
+        if eci["content"] is None:
+            raise ValueError("SignedData without encapsulated content (detached)")
+    
+        pki_octets: bytes = eci["content"].native
+    
+        try:
+            pkidata_relax = _PKIDataRelax.load(pki_octets)
+            if pkidata_relax['reqSequence'] is not None:
+                for any_item in pkidata_relax['reqSequence']:
+                    try:
+                        wrapped = _der_wrap_sequence(any_item.contents)
+                        tcr = _TCRRelax.load(wrapped)
+                        csr_obj = tcr['certificationRequest']
+                        body_part_id = int(tcr['bodyPartID'].native)
+                        csr_bytes = csr_obj.dump()
+                        template_info = _parse_template_from_csr_bytes(csr_bytes)
+                        return csr_bytes, body_part_id, template_info
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+    
+        try:
+            seq = _SeqOfCSR.load(pki_octets)
+            if len(seq) >= 1:
+                csr_bytes = seq[0].dump()
+                body_part_id = 0
+                template_info = _parse_template_from_csr_bytes(csr_bytes)
+                return csr_bytes, body_part_id, template_info
+        except Exception:
+            pass
+    
+        try:
+            csr_obj = csr.CertificationRequest.load(pki_octets)
+            csr_bytes = csr_obj.dump()
             body_part_id = 0
             template_info = _parse_template_from_csr_bytes(csr_bytes)
             return csr_bytes, body_part_id, template_info
-    except Exception:
-        pass
+        except Exception:
+            pass
+    
+        ct = eci['content_type'].dotted if eci['content_type'] is not None else 'unknown'
+        raise ValueError(
+        f"Unable to extract a CSR: no TCR, no simplePKIRequest, nor a direct CSR. "
+        f"EncapContentInfo.content_type={ct}"
+        )
+    except Exception as e:
+        direct = csr.CertificationRequest.load(p7_der)
+        csr_bytes = direct.dump()
+        return csr_bytes, 0, _parse_template_from_csr_bytes(csr_bytes)
 
-    try:
-        csr_obj = csr.CertificationRequest.load(pki_octets)
-        csr_bytes = csr_obj.dump()
-        body_part_id = 0
-        template_info = _parse_template_from_csr_bytes(csr_bytes)
-        return csr_bytes, body_part_id, template_info
-    except Exception:
-        pass
-
-    ct = eci['content_type'].dotted if eci['content_type'] is not None else 'unknown'
-    raise ValueError(
-    f"Unable to extract a CSR: no TCR, no simplePKIRequest, nor a direct CSR. "
-    f"EncapContentInfo.content_type={ct}"
-    )
-
+    
 def _tbs_signed_attrs(attrs: a_cms.CMSAttributes) -> bytes:
     der = attrs.dump()
     return (b"\x31" + der[1:]) if der and der[0] == 0xA0 else der
