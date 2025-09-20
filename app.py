@@ -7,6 +7,7 @@ import uuid
 import base64
 import textwrap
 import hashlib
+import datetime
 from defusedxml import ElementTree as ET  # anti-XXE / billion-laughs
 
 from cryptography import x509 as cx509
@@ -137,6 +138,8 @@ def ces_service(CANAME):
     except Exception as e:
         return Response(f"Cannot extract CSR from CMC: {e}", status=400, content_type="text/plain; charset=utf-8")
 
+    body_part_id =  int(str(int(datetime.datetime.utcnow().timestamp())) + str(int(hashlib.sha256(csr_der).hexdigest(), 16)))
+
     # --- CSR validation (signature algo, key, etc.)
     try:
         csr_obj = cx509.load_der_x509_csr(csr_der)
@@ -184,7 +187,7 @@ def ces_service(CANAME):
         "\n".join(textwrap.wrap(format_b64_for_soap(csr_der), 64)) +
         "\n-----END CERTIFICATE REQUEST-----"
     )
-    with open(os.path.join(ca['__path_csr'], f"{sha256_hex}.pem"), 'w') as f:
+    with open(os.path.join(ca['__path_csr'], f"{body_part_id}.pem"), 'w') as f:
         f.write(pem_csr)
 
     # --- Call emission callback (mandatory in 100% callback mode)
@@ -217,7 +220,32 @@ def ces_service(CANAME):
     else:
         return Response("Callback must return x509.Certificate or DER bytes", status=500, content_type="text/plain; charset=utf-8")
 
+#    from utils import build_adcs_bst_pkiresponse_pending  # ← au lieu de build_adcs_cmc_pending
+#    from utils import build_ws_trust_pending_response
+#    
+#    pkcs7_der = build_adcs_bst_pkiresponse_pending(
+#        ca_der=ca["__certificate_der"],         # cert DER qui signe (CA/service)
+#        ca_key=ca["__key_obj"],                  # clé privée correspondante
+#        request_id=82,                           # même ID que dans la réponse SOAP
+#        status_text="En attente de traitement",  # message affiché par Windows
+#        body_part_id=1,                          # par défaut 1 (ok)
+#    )
+#    
+#    xml_rstrc = build_ws_trust_pending_response(
+#        pkcs7_der=pkcs7_der,
+#        relates_to=f"urn:uuid:{uuid_request}",
+#        request_id=82,  # doit matcher le pendToken / request_id du PKIResponse
+#        ces_uri="https://testadcs.ad.tranquil.it/Test%20Intermediate%20CA-ADCS-CA_CES_Kerberos/service.svc/CES",
+#    )
+#     
+#
+#    # 3) Retourner/servir le XML (bytes UTF-8)
+#    print(xml_rstrc.decode("utf-8"))
+#    return Response(xml_rstrc.decode("utf-8"), content_type='application/soap+xml')
+#
+
     # --- Build PKCS#7 (BST) signed by the CA (behavior "like ADCS")
+
     p7b_der = build_adcs_bst_certrep(
         cert_der,
         ca["__certificate_der"],
@@ -229,9 +257,8 @@ def ces_service(CANAME):
     b64_leaf = format_b64_for_soap(cert_der)
 
     # --- Save cert
-    sr_hex = hex(cert_obj.serial_number)[2:]
     os.makedirs(ca['__path_cert'], exist_ok=True)
-    with open(os.path.join(ca['__path_cert'], f"{sr_hex}.pem"), 'w') as f:
+    with open(os.path.join(ca['__path_cert'], f"{body_part_id}.pem"), 'w') as f:
         f.write(
             "-----BEGIN CERTIFICATE-----\n" +
             "\n".join(textwrap.wrap(b64_leaf, 64)) +

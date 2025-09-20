@@ -4,6 +4,8 @@
 import base64
 import hashlib
 from typing import Tuple
+from datetime import datetime, timezone
+import xml.etree.ElementTree as ET
 
 from asn1crypto import csr
 from asn1crypto import cms as a_cms, x509 as a_x509, core as a_core
@@ -26,12 +28,20 @@ from samba.samdb import SamDB
 from samba.net import Net
 from samba.dcerpc import nbt
 
+# pyasn1 for minimal CMC/PKIResponse structures
+from pyasn1.type import univ, namedtype, namedval, char, useful, constraint
+from pyasn1.codec.der.encoder import encode as der_encode
+
 
 # -----------------------------------------------------------------------------
 # Useful OIDs
 # -----------------------------------------------------------------------------
 OID_MS_CERT_TEMPLATE_NAME = "1.3.6.1.4.1.311.20.2"
 OID_MS_CERT_TEMPLATE_INFO = "1.3.6.1.4.1.311.21.7"
+
+# For pending response (PKIResponse + CMCStatusInfo)
+OID_ID_CCT_PKI_RESPONSE = "1.3.6.1.5.5.7.12.3"  # eContentType for PKIResponse
+OID_ID_CMC_STATUS_INFO  = "1.3.6.1.5.5.7.7.1"    # id-cmc-statusInfo
 
 
 # -----------------------------------------------------------------------------
@@ -370,15 +380,15 @@ def validate_csr(csr_obj: cx509.CertificateSigningRequest) -> None:
         raise CSRValidationError(f"CSR signature verification failed: {e}")
 
     # 2) Constraints on hash algo (not applicable to EdDSA)
-#    if not isinstance(pub, (ed25519.Ed25519PublicKey, ed448.Ed448PublicKey)):
-#        try:
-#            hash_name = csr_obj.signature_hash_algorithm.name.lower()
-#        except Exception:
-#            hash_name = ""
-#        if hash_name not in ("sha256", "sha384", "sha512"):
-#            raise CSRValidationError(
-#                f"Disallowed signature hash: {hash_name or 'unknown'} (require SHA-256/384/512)"
-#            )
+    # if not isinstance(pub, (ed25519.Ed25519PublicKey, ed448.Ed448PublicKey)):
+    #     try:
+    #         hash_name = csr_obj.signature_hash_algorithm.name.lower()
+    #     except Exception:
+    #         hash_name = ""
+    #     if hash_name not in ("sha256", "sha384", "sha512"):
+    #         raise CSRValidationError(
+    #             f"Disallowed signature hash: {hash_name or 'unknown'} (require SHA-256/384/512)"
+    #         )
 
     # 3) Constraints on public key
     if isinstance(pub, rsa.RSAPublicKey):
@@ -400,7 +410,7 @@ def validate_csr(csr_obj: cx509.CertificateSigningRequest) -> None:
 
 
 # -----------------------------------------------------------------------------
-# Build the BST / PKCS#7 (CES response like ADCS)
+# Build the BST / PKCS#7 (CES responses like ADCS)
 # -----------------------------------------------------------------------------
 
 def _tbs_signed_attrs(attrs: a_cms.CMSAttributes) -> bytes:
@@ -477,11 +487,271 @@ def build_adcs_bst_certrep(child_der: bytes, ca_der: bytes, ca_key, cert_req_id:
 
 
 # -----------------------------------------------------------------------------
+# Pending response (Windows expects PKIResponse + CMCStatusInfo)
+# -----------------------------------------------------------------------------
+
+class BodyPartID(univ.Integer):
+    """BodyPartID ::= INTEGER (0..4294967295)"""
+    subtypeSpec = univ.Integer.subtypeSpec + constraint.ValueRangeConstraint(0, 4294967295)
+
+class BodyPartList(univ.SequenceOf):
+    componentType = BodyPartID()
+
+class CMCStatus(univ.Integer):
+    namedValues = namedval.NamedValues(
+        ('success', 0), ('failed', 2), ('pending', 3), ('noSupport', 4),
+        ('confirmRequired', 5), ('popRequired', 6), ('partial', 7),
+    )
+
+class CMCFailInfo(univ.Integer):
+    pass
+
+class PendInfo(univ.Sequence):
+    componentType = namedtype.NamedTypes(
+        namedtype.NamedType('pendToken', univ.OctetString()),
+        namedtype.NamedType('pendTime', useful.GeneralizedTime()),
+    )
+
+class OtherInfo(univ.Choice):
+    componentType = namedtype.NamedTypes(
+        namedtype.NamedType('failInfo', CMCFailInfo()),
+        namedtype.NamedType('pendInfo', PendInfo()),
+    )
+
+class CMCStatusInfo(univ.Sequence):
+    componentType = namedtype.NamedTypes(
+        namedtype.NamedType('cMCStatus', CMCStatus()),
+        namedtype.NamedType('bodyList', BodyPartList()),
+        namedtype.OptionalNamedType('statusString', char.UTF8String()),
+        namedtype.OptionalNamedType('otherInfo', OtherInfo()),
+    )
+
+class AttributeValue(univ.Any):
+    pass
+
+class AttributeValues(univ.SetOf):
+    componentType = AttributeValue()
+
+class TaggedAttribute(univ.Sequence):
+    componentType = namedtype.NamedTypes(
+        namedtype.NamedType('bodyPartID', BodyPartID()),
+        namedtype.NamedType('attrType', univ.ObjectIdentifier()),
+        namedtype.NamedType('attrValues', AttributeValues()),
+    )
+
+class TaggedAttributeSeq(univ.SequenceOf):
+    componentType = TaggedAttribute()
+
+class TaggedContentInfo(univ.Sequence):
+    pass  # not used
+
+class TaggedContentInfoSeq(univ.SequenceOf):
+    componentType = TaggedContentInfo()
+
+class OtherMsg(univ.Sequence):
+    pass
+
+class OtherMsgSeq(univ.SequenceOf):
+    componentType = OtherMsg()
+
+class PKIResponse(univ.Sequence):
+    componentType = namedtype.NamedTypes(
+        namedtype.NamedType('controlSequence', TaggedAttributeSeq()),
+        namedtype.NamedType('cmsSequence', TaggedContentInfoSeq()),
+        namedtype.NamedType('otherMsgSequence', OtherMsgSeq()),
+    )
+
+
+def _build_pkiresponse_pending_der(request_id: int,
+                                   status_text: str = "En attente de traitement",
+                                   body_part_id: int = 1) -> bytes:
+    """Construit un PKIResponse minimal avec CMCStatusInfo(pending)."""
+    # CMCStatusInfo
+    csi = CMCStatusInfo()
+    csi.setComponentByName('cMCStatus', 3)  # pending
+
+    bl = BodyPartList()
+    bl.append(BodyPartID(body_part_id))
+    csi.setComponentByName('bodyList', bl)
+
+    if status_text:
+        csi.setComponentByName('statusString', char.UTF8String(status_text))
+
+    # pendInfo
+    pend = PendInfo()
+    pend.setComponentByName('pendToken', univ.OctetString(str(request_id).encode('ascii')))
+    pend.setComponentByName('pendTime', useful.GeneralizedTime(datetime.now(timezone.utc).strftime('%Y%m%d%H%M%SZ')))
+    oi = OtherInfo(); oi.setComponentByName('pendInfo', pend)
+    csi.setComponentByName('otherInfo', oi)
+
+    # TaggedAttribute id-cmc-statusInfo
+    ta = TaggedAttribute()
+    ta.setComponentByName('bodyPartID', BodyPartID(body_part_id))
+    ta.setComponentByName('attrType', univ.ObjectIdentifier(OID_ID_CMC_STATUS_INFO))
+    avs = AttributeValues(); avs.append(AttributeValue(der_encode(csi)))
+    ta.setComponentByName('attrValues', avs)
+
+    controls = TaggedAttributeSeq(); controls.append(ta)
+
+    resp = PKIResponse()
+    resp.setComponentByName('controlSequence', controls)
+    resp.setComponentByName('cmsSequence', TaggedContentInfoSeq())
+    resp.setComponentByName('otherMsgSequence', OtherMsgSeq())
+
+    return der_encode(resp)
+
+
+def build_adcs_bst_pkiresponse_pending(ca_der: bytes,
+                                       ca_key,
+                                       request_id: int,
+                                       status_text: str = "En attente de traitement",
+                                       body_part_id: int = 1) -> bytes:
+    """
+    Build a CMS SignedData containing a PKIResponse(pending) (Windows/ADCS-ready).
+    eContentType = 1.3.6.1.5.5.7.12.3 ; SignedAttributes = content-type(12.3) + message-digest(SHA256(PKIResponse))
+    """
+    signer_cert = a_x509.Certificate.load(ca_der)
+
+    pkiresp_der = _build_pkiresponse_pending_der(
+        request_id=request_id,
+        status_text=status_text,
+        body_part_id=body_part_id,
+    )
+
+    encap_content_info = a_cms.EncapsulatedContentInfo(
+        {
+            "content_type": a_cms.ContentType(OID_ID_CCT_PKI_RESPONSE),
+            "content": a_cms.ParsableOctetString(pkiresp_der),
+        }
+    )
+
+    signed_attrs = a_cms.CMSAttributes(
+        [
+            a_cms.CMSAttribute({"type": "1.2.840.113549.1.9.3", "values": [a_cms.ContentType(OID_ID_CCT_PKI_RESPONSE)]}),
+            a_cms.CMSAttribute({"type": "1.2.840.113549.1.9.4", "values": [hashlib.sha256(pkiresp_der).digest()]}),
+        ]
+    )
+    to_be_signed = _tbs_signed_attrs(signed_attrs)
+
+    signer_info = a_cms.SignerInfo(
+        {
+            "version": "v1",
+            "sid": a_cms.SignerIdentifier(
+                {
+                    "issuer_and_serial_number": a_cms.IssuerAndSerialNumber(
+                        {"issuer": signer_cert.issuer, "serial_number": signer_cert.serial_number}
+                    )
+                }
+            ),
+            "digest_algorithm": a_cms.DigestAlgorithm({"algorithm": "sha256"}),
+            "signed_attrs": signed_attrs,
+            "signature_algorithm": a_cms.SignedDigestAlgorithm({"algorithm": "sha256_rsa"}),
+            "signature": b"",
+        }
+    )
+    sig = ca_key.sign(to_be_signed, padding.PKCS1v15(), hashes.SHA256())
+    signer_info["signature"] = sig
+
+    sd = a_cms.SignedData(
+        {
+            "version": 3,
+            "digest_algorithms": [a_cms.DigestAlgorithm({"algorithm": "sha256"})],
+            "encap_content_info": encap_content_info,
+            "certificates": [signer_cert],
+            "signer_infos": [signer_info],
+        }
+    )
+    ci = a_cms.ContentInfo({"content_type": "signed_data", "content": sd})
+    return ci.dump()
+
+
+# -----------------------------------------------------------------------------
 # Utility encoding
 # -----------------------------------------------------------------------------
 
 def format_b64_for_soap(data: bytes) -> str:
     return base64.b64encode(data).decode("ascii")
+
+
+def _wrap_b64(data: bytes, line_len: int = 64, with_crlf: bool = True) -> str:
+    s = base64.b64encode(data).decode("ascii")
+    if not line_len:
+        return s
+    lines = [s[i:i + line_len] for i in range(0, len(s), line_len)]
+    sep = "\r\n" if with_crlf else "\n"
+    return sep.join(lines)
+
+
+# -----------------------------------------------------------------------------
+# WS-Trust SOAP envelope (pending)
+# -----------------------------------------------------------------------------
+
+def build_ws_trust_pending_response(
+    pkcs7_der: bytes,
+    relates_to: str,
+    request_id: int,
+    ces_uri: str,
+    *,
+    disposition_message: str = "En attente de traitement",
+    lang: str = "fr-FR",
+    token_type: str = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#X509v3",
+    action: str = "http://schemas.microsoft.com/windows/pki/2009/01/enrollment/RSTRC/wstep",
+    activity_id: str = "00000000-0000-0000-0000-000000000000",
+    wrap_b64_lines: bool = True,
+) -> bytes:
+    """Build a WS-Trust RequestSecurityTokenResponseCollection with a PKCS#7 BST."""
+
+    NS = {
+        "s":  "http://www.w3.org/2003/05/soap-envelope",
+        "a":  "http://www.w3.org/2005/08/addressing",
+        "wst":"http://docs.oasis-open.org/ws-sx/ws-trust/200512",
+        "wss":"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd",
+        "msdiag": "http://schemas.microsoft.com/2004/09/ServiceModel/Diagnostics",
+        "msenroll": "http://schemas.microsoft.com/windows/pki/2009/01/enrollment",
+    }
+
+    for p, uri in NS.items():
+        ET.register_namespace(p, uri)
+
+    senv = ET.Element(f"{{{NS['s']}}}Envelope")
+
+    header = ET.SubElement(senv, f"{{{NS['s']}}}Header")
+    a_action = ET.SubElement(header, f"{{{NS['a']}}}Action", {f"{{{NS['s']}}}mustUnderstand": "1"})
+    a_action.text = action
+    a_rel = ET.SubElement(header, f"{{{NS['a']}}}RelatesTo")
+    a_rel.text = relates_to
+    activity = ET.SubElement(header, f"{{{NS['msdiag']}}}ActivityId",
+                             {"CorrelationId": "3fd81603-cf85-48d8-945d-990e2a7a5673"})
+    activity.text = activity_id
+
+    body = ET.SubElement(senv, f"{{{NS['s']}}}Body")
+    rstrc = ET.SubElement(body, f"{{{NS['wst']}}}RequestSecurityTokenResponseCollection")
+    rstr  = ET.SubElement(rstrc, f"{{{NS['wst']}}}RequestSecurityTokenResponse")
+
+    tokentype = ET.SubElement(rstr, f"{{{NS['wst']}}}TokenType")
+    tokentype.text = token_type
+
+    disp = ET.SubElement(rstr, f"{{{NS['msenroll']}}}DispositionMessage", {"{http://www.w3.org/XML/1998/namespace}lang": lang})
+    disp.text = disposition_message
+
+    bst = ET.SubElement(
+        rstr,
+        f"{{{NS['wss']}}}BinarySecurityToken",
+        {
+            "ValueType": f"{NS['wss']}#PKCS7",
+            "EncodingType": f"{NS['wss']}#base64binary",
+        },
+    )
+    bst.text = _wrap_b64(pkcs7_der, 64, True) if wrap_b64_lines else base64.b64encode(pkcs7_der).decode("ascii")
+
+    req_tok = ET.SubElement(rstr, f"{{{NS['wst']}}}RequestedSecurityToken")
+    str_el  = ET.SubElement(req_tok, f"{{{NS['wss']}}}SecurityTokenReference")
+    ET.SubElement(str_el, f"{{{NS['wss']}}}Reference", {"URI": ces_uri})
+
+    req_id = ET.SubElement(rstr, f"{{{NS['msenroll']}}}RequestID")
+    req_id.text = str(request_id)
+
+    return ET.tostring(senv, encoding="utf-8", xml_declaration=True, method="xml")
 
 
 # -----------------------------------------------------------------------------
