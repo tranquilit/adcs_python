@@ -1,6 +1,5 @@
-import requests
 import kerberos
-from flask import Flask, request, Response, g
+from flask import request, Response, g
 from functools import wraps
 
 
@@ -9,7 +8,8 @@ def kerberos_authenticate(auth_header):
         return None, None
 
     token = auth_header[len("Negotiate "):]
-    try:    
+    context = None
+    try:
         service = "HTTP@" + request.host.split(":")[0]
         rc, context = kerberos.authGSSServerInit(service)
         if rc != kerberos.AUTH_GSS_COMPLETE:
@@ -21,9 +21,15 @@ def kerberos_authenticate(auth_header):
             response_token = kerberos.authGSSServerResponse(context)
             return user, response_token
         return None, None
-    except kerberos.GSSError as e:
-        raise
+    except kerberos.GSSError:
         return None, None
+    finally:
+        if context is not None:
+            try:
+                kerberos.authGSSServerClean(context)
+            except Exception:
+                pass
+
 
 def kerberos_auth_required(f):
     @wraps(f)
@@ -31,17 +37,17 @@ def kerberos_auth_required(f):
         auth_header = request.headers.get('Authorization')
         if not auth_header:
             return Response("Unauthorized", 401, {'WWW-Authenticate': 'Negotiate'})
+
         user, response_token = kerberos_authenticate(auth_header)
         if not user:
             return Response("Unauthorized", 401, {'WWW-Authenticate': 'Negotiate'})
 
         g.kerberos_user = user
         headers = {'WWW-Authenticate': 'Negotiate ' + response_token} if response_token else {}
-        response = f(*args, **kwargs)
-        if isinstance(response, Response):
-            response.headers.update(headers)
-            return response
-        return Response(response, headers=headers)
+        resp = f(*args, **kwargs)
+        if isinstance(resp, Response):
+            resp.headers.update(headers)
+            return resp
+        return Response(resp, headers=headers)
     return decorated_function
-
 

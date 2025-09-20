@@ -1,0 +1,45 @@
+# adcs.yaml — "all via callback" version
+# Each template is defined and issued via an external Python file
+# exposing two functions: `define_template(app_conf)` and `emit_certificate(...)`.
+
+global:
+  policy_provider:
+    policy_id: "{1158087D-44BE-436A-897B-EA76BA39CF5F}"
+    next_update_hours: 8
+
+  # Jinja templates for CEP/CES
+  templates_dir:
+    cep_response: template/GetPoliciesResponse.xml
+    ces_response: template/ADCS-CA_CES_Kerberos_service.svc_CES.xml
+
+cas:
+  - id: "ca-1"
+    display_name: "Test Intermediate CA"
+    urls:
+      crl_http:        "http://testadcs.mydomain.lan/crl/intermediate.crl.pem"
+      ca_issuers_http: "http://testadcs.mydomain.lan/certs/ica.crt.pem"
+    pem:
+      certificate_path_pem: /opt/adcs_python/pki/certs/ica.crt.pem
+      key_path_pem:        /opt/adcs_python/pki/private/ica.key.pem
+      key_passphrase: null
+    enroll_permission: true
+    default: true
+    storage_paths:
+      cert_dir: /opt/adcs_python/ca-1/certs
+      csr_dir:  /opt/adcs_python/ca-1/csr
+
+# NOTE: no more "oids" registry needed in 100% callback mode.
+# Template callbacks directly return static extensions
+# (for CEP display) and add the rest dynamically at issuance.
+
+templates:
+  # ===================== EFS TEMPLATE (user) =====================
+  - callback:
+      path: "callbacks/user_template.py"     # must expose define_template() and emit_certificate()
+      define: "define_template"
+      issue:  "emit_certificate"
+  - callback:
+      path: "callbacks/computer_template.py"     # must expose define_template() and emit_certificate()
+      define: "define_template"
+      issue:  "emit_certificate"
+
