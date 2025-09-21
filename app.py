@@ -121,6 +121,14 @@ def ces_service(CANAME):
     message_id_elem = root.find('.//a:MessageID', namespaces)
     uuid_request = message_id_elem.text.replace("urn:uuid:", "") if message_id_elem is not None else ''
 
+    # --- If pending request
+    request_id = None
+    root = ET.fromstring(rst_xml)
+    request_id_elem = root.find(".//enr:RequestID", { "enr": "http://schemas.microsoft.com/windows/pki/2009/01/enrollment"})
+    if request_id_elem is not None:
+        request_id = request_id_elem.text
+        print('pending request %s' % str(request_id))
+    
     # --- Retrieve PKCS#7 (BinarySecurityToken)
     ns_wsse = {'wsse': "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"}
     bst_node = root.find('.//wsse:BinarySecurityToken', ns_wsse)
@@ -281,4 +289,5 @@ if __name__ == '__main__':
     decls = app.confadcs.get("__template_decls__") or []
     print("Loaded config with", len(decls), "template declaration(s).")
     app.run(host='127.0.0.1', port=8080)
+
 
