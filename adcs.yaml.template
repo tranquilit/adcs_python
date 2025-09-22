@@ -3,15 +3,12 @@
 # exposing two functions: `define_template(app_conf)` and `emit_certificate(...)`.
 
 global:
-  path_list_request_id : /opt/adcs_python/list_request_id
+
   policy_provider:
     policy_id: "{1158087D-44BE-436A-897B-EA76BA39CF5F}"
     next_update_hours: 8
 
-  # Jinja templates for CEP/CES
-  templates_dir:
-    cep_response: template/GetPoliciesResponse.xml
-    ces_response: template/ADCS-CA_CES_Kerberos_service.svc_CES.xml
+  path_list_request_id : list_request_id
 
 cas:
   - id: "ca-1"
@@ -29,9 +26,11 @@ cas:
       cert_dir: /opt/adcs_python/ca-1/certs
       csr_dir:  /opt/adcs_python/ca-1/csr
 
-# NOTE: no more "oids" registry needed in 100% callback mode.
-# Template callbacks directly return static extensions
-# (for CEP display) and add the rest dynamically at issuance.
+auth:
+  - kerberos: true
+  - callback:
+      path: "callbacks/auth_basic_template.py"
+      func: "check_auth"
 
 templates:
   # ===================== EFS TEMPLATE (user) =====================
