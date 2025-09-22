@@ -13,6 +13,11 @@ global:
     cep_response: template/GetPoliciesResponse.xml
     ces_response: template/ADCS-CA_CES_Kerberos_service.svc_CES.xml
 
+auth:
+  - callback:
+      path: "callbacks/auth_basic_template.py"
+      func: "check_auth"
+
 cas:
   - id: "ca-1"
     display_name: "Test Intermediate CA"

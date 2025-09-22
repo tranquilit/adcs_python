@@ -243,9 +243,18 @@ def load_yaml_conf(path="adcs.yaml"):
     policy_provider = gbl.get("policy_provider", {})
     storage_paths_global = gbl.get("storage_paths", {}) or {}
     templates_dir = gbl.get("templates_dir", {})
-    conf["path_list_request_id"] = gbl.get("path_list_request_id, "/opt/adcs_python/list_request_id")
+    conf["path_list_request_id"] = gbl.get("path_list_request_id", "/opt/adcs_python/list_request_id")
     conf["policyid"] = policy_provider.get("policy_id")
     conf["next_update_hours"] = policy_provider.get("next_update_hours", 8)
+
+    conf["auth_callbacks"] = []
+    for adecl in (cfg.get("auth") or []):
+        cb = adecl.get("callback") or {}
+        cb_path = cb.get("path")
+        cb_func = cb.get("func")
+        if not (cb_path and cb_func):
+            raise ValueError("Each auth entry must define callback.path and callback.func")
+        conf["auth_callbacks"] = {"path": cb_path, "func": cb_func}
 
     # Global fallbacks for storage
     conf["path_cert_fallback"] = storage_paths_global.get("cert_dir", "/tmp/certs")
@@ -337,8 +346,6 @@ def build_templates_for_policy_response(
     conf: dict,
     *,
     kerberos_user: str | None = None,
-    samdb=None,
-    sam_entry: dict | None = None,
 ) -> Tuple[list[dict], list[dict]]:
     """
     Build **local** templates for THIS request and a **local** OIDs registry.
@@ -379,8 +386,6 @@ def build_templates_for_policy_response(
         tpl = define_template(
             app_conf=conf,                 # conf remains read-only
             kerberos_user=kerberos_user,
-            samdb=samdb,
-            sam_entry=sam_entry or {},
         )
         if not isinstance(tpl, dict):
             raise TypeError(f"{cb['path']}:{cb['define']} must return a dict")

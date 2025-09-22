@@ -11,7 +11,7 @@ from cryptography.x509.oid import (
 )
 
 # helpers/structs already present in your project
-from utils import NtdsAttr, NtdsCASecurityExt
+from utils import NtdsAttr, NtdsCASecurityExt, search_user
 from utils import _apply_static_extensions
 import hashlib
 
@@ -28,11 +28,12 @@ def _b(entry: dict, attr: str, default: str = "") -> str:
 # ============================================================
 # 1) Template definition for CEP (dynamic per user)
 # ============================================================
-def define_template(*, app_conf, kerberos_user=None, samdb=None, sam_entry=None):
+def define_template(*, app_conf, kerberos_user=None ):
     validity_seconds = 31536000       # 1 year
     renewal_seconds = 3628800         # 42 days
     auto_enroll = True
 
+    samdbr, sam_entry = search_user(kerberos_user)
 
     return {
         "common_name": "adcswebcomputer (CB)",
@@ -164,8 +165,6 @@ def emit_certificate(
     csr_der: Optional[bytes],
     request_id: Optional[int],
     kerberos_user: str,
-    samdb,
-    sam_entry: dict,
     ca: dict,
     template: Optional[dict],
     info: dict,
@@ -173,16 +172,14 @@ def emit_certificate(
     CANAME: Optional[str],
 ) -> Dict[str, Any]:
 
-    must_pending = False
+    samdbr, sam_entry = search_user(kerberos_user)
 
-    if request_id is None:
-        request_id = int(str(int(datetime.utcnow().timestamp())) + str(int(hashlib.sha256(csr_der).hexdigest(), 16)))
+    must_pending = False
 
     #must_pending =  False
     if must_pending:
         return {
             "status": "pending",
-            "request_id": request_id,
             "status_text": "Awaiting manual validation",
         }
 
@@ -244,20 +241,17 @@ def emit_certificate(
         builder = builder.add_extension(cx509.SubjectAlternativeName(names), critical=False)
 
     # ➕ dynamic NTDS (SID) (1.3.6.1.4.1.311.25.2 / ...2.1)
-    try:
-        sid_bytes = samdb.schema_format_value("objectSID", sam_entry["objectSID"][0])
-        ntds_der = NtdsCASecurityExt([
-            NtdsAttr({
-                "attr_id": "1.3.6.1.4.1.311.25.2.1",  # ObjectSid
-                "attr_values": [a_core.OctetString(sid_bytes)],
-            })
-        ]).dump()
-        builder = builder.add_extension(
-            cx509.UnrecognizedExtension(CObjectIdentifier("1.3.6.1.4.1.311.25.2"), ntds_der),
-            critical=False
-        )
-    except Exception as e:
-        print(f"[emit_certificate: NTDS build failed: {e!r}")
+    sid_bytes = samdbr.schema_format_value("objectSID", sam_entry["objectSID"][0])
+    ntds_der = NtdsCASecurityExt([
+        NtdsAttr({
+            "attr_id": "1.3.6.1.4.1.311.25.2.1",  # ObjectSid
+            "attr_values": [a_core.OctetString(sid_bytes)],
+        })
+    ]).dump()
+    builder = builder.add_extension(
+        cx509.UnrecognizedExtension(CObjectIdentifier("1.3.6.1.4.1.311.25.2"), ntds_der),
+        critical=False
+    )
 
     # (2) sign according to CA key type
     priv = ca["__key_obj"]
@@ -269,7 +263,6 @@ def emit_certificate(
 
     return {
         "status": "issued",
-        "request_id": request_id,
         "cert": cert,
     }
 

@@ -1,7 +1,9 @@
 import kerberos
 from flask import request, Response, g
+from flask import current_app
 from functools import wraps
-
+from callback_loader import load_func
+import xml.etree.ElementTree as ET
 
 def kerberos_authenticate(auth_header):
     if not auth_header or not auth_header.startswith("Negotiate "):
@@ -31,14 +33,38 @@ def kerberos_authenticate(auth_header):
                 pass
 
 
-def kerberos_auth_required(f):
+def auth_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         auth_header = request.headers.get('Authorization')
-        if not auth_header:
+
+        xml_text = request.data.decode('utf-8')
+        NS = {
+            'o': 'http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd'
+        }
+        root = ET.fromstring(xml_text)
+        
+        username_el = root.find('.//o:Username', NS)
+        password_el = root.find('.//o:Password', NS)
+
+        if username_el:    
+            username_xml = username_el.text
+        else: 
+            username_xml = ''
+
+        if password_el:
+            password_xml = password_el.text
+        else: 
+            password_xml = ''
+
+        if not auth_header and (not username_xml):
             return Response("Unauthorized", 401, {'WWW-Authenticate': 'Negotiate'})
 
         user, response_token = kerberos_authenticate(auth_header)
+        if not user:
+            auth_func = load_func(current_app.confadcs["auth_callbacks"]['path'], current_app.confadcs["auth_callbacks"]['func'])
+            r = auth_func(username=username_xml,password=password_xml) 
+            user = r
         if not user:
             return Response("Unauthorized", 401, {'WWW-Authenticate': 'Negotiate'})
 

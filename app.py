@@ -13,7 +13,7 @@ from defusedxml import ElementTree as ET  # anti-XXE / billion-laughs
 from cryptography import x509 as cx509
 from cryptography.hazmat.primitives import serialization
 
-from decoratorkrb import kerberos_auth_required
+from decoratorauth import auth_required
 
 from utils import (
     build_adcs_bst_certrep,
@@ -42,7 +42,7 @@ def _https_base_url():
 # ---------------- Endpoints ----------------
 
 @app.route('/ADPolicyProvider_CEP_Kerberos/service.svc/CEP', methods=['POST', 'GET'])
-@kerberos_auth_required
+@auth_required
 def cep_service():
     host_url = request.host_url.rsplit('/', 1)[0]
     raw = request.data or b""
@@ -74,17 +74,11 @@ def cep_service():
 
     # User resolution for CEP (same as for CES)
     kerberos_user = g.kerberos_user
-    try:
-        samdbr, entry = search_user(kerberos_user)
-    except Exception:
-        samdbr, entry = None, {}
 
     # Build templates + OIDs for THIS CEP response (user-dependent)
     templates_for_user, oids_for_user = build_templates_for_policy_response(
         app.confadcs,
-        kerberos_user=kerberos_user,
-        samdb=samdbr,
-        sam_entry=entry,
+        kerberos_user=kerberos_user
     )
 
     # Keep an in-memory index (optional, no longer required by CES)
@@ -106,7 +100,7 @@ def cep_service():
 
 
 @app.route('/<CANAME>-ADCS-CA_CES_Kerberos/service.svc/CES', methods=['POST'])
-@kerberos_auth_required
+@auth_required
 def ces_service(CANAME):
     raw = request.data or b""
     if len(raw) > MAX_SOAP_BYTES:
@@ -133,29 +127,26 @@ def ces_service(CANAME):
     req_id_elem = root.find(".//enr:RequestID", {"enr": "http://schemas.microsoft.com/windows/pki/2009/01/enrollment"})
     if req_id_elem is not None and (req_id_elem.text or "").strip():
         request_id = int(req_id_elem.text.strip())
-        with open (app.confadcs['path_list_request_id'] ,'rb') as f:
+        with open (os.path.join(app.confadcs['path_list_request_id'],str(request_id)) ,'rb') as f:
             p7_der = f.read()
     else:
         ns_wsse = {'wsse': "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"}
         bst_node = root.find('.//wsse:BinarySecurityToken', ns_wsse)
         p7_der = base64.b64decode(bst_node.text)
         request_id = uuid.uuid4().int
-        with open (app.confadcs['path_list_request_id'] ,'wb') as f:
+        with open (os.path.join(app.confadcs['path_list_request_id'],str(request_id)) ,'wb') as f:
             f.write(p7_der)
-
 
     csr_der, body_part_id, info = exct_csr_from_cmc(p7_der)
 
     kerberos_user = g.kerberos_user
-    samdbr, entry = search_user(kerberos_user)
 
     # --- IMPORTANT: (re)build templates FOR THIS CES request
     templates_for_user, _ = build_templates_for_policy_response(
         app.confadcs,
-        kerberos_user=kerberos_user,
-        samdb=samdbr,
-        sam_entry=entry,
+        kerberos_user=kerberos_user
     )
+
     tmap = { (t.get("template_oid") or {}).get("value"): t for t in templates_for_user }
     tpl = tmap.get(info.get('oid'))
 
@@ -174,8 +165,6 @@ def ces_service(CANAME):
         csr_der=csr_der,
         request_id=request_id,
         kerberos_user=kerberos_user,
-        samdb=samdbr,
-        sam_entry=entry,
         ca=ca,
         template=tpl,
         info=info,
@@ -183,7 +172,7 @@ def ces_service(CANAME):
         CANAME=CANAME,
     )
 
-    csr_path = os.path.join(ca['__path_csr'], f"{result.get('request_id')}.pem")
+    csr_path = os.path.join(ca['__path_csr'], f"{request_id}.pem")
     if not os.path.isfile(csr_path) :
         os.makedirs(ca['__path_csr'], exist_ok=True)
         pem_csr = (
@@ -201,19 +190,13 @@ def ces_service(CANAME):
     ces_uri = f"{_https_base_url()}/{CANAME}-ADCS-CA_CES_Kerberos/service.svc/CES"
     if status == "pending":
 
-        req_id = result.get("request_id")
-        if not isinstance(req_id, int):
-            return Response("Callback returned PENDING but no valid 'request_id'", status=500, content_type="text/plain; charset=utf-8")
-
-        req_id = int(str(tpl['template_oid']['value']).replace('.','') + '999' + str(result.get("request_id")))
-
         status_text = result.get("status_text") or "En attente de traitement"
 
 
         pkcs7_der = build_adcs_bst_pkiresponse_pending(
             ca_der=ca["__certificate_der"],
             ca_key=ca["__key_obj"],
-            request_id=req_id,
+            request_id=request_id,
             status_text=status_text,
             body_part_id=body_part_id  # par défaut
         )
@@ -222,7 +205,7 @@ def ces_service(CANAME):
         xml_rstrc = build_ws_trust_pending_response(
             pkcs7_der=pkcs7_der,
             relates_to=f"urn:uuid:{uuid_request}",
-            request_id=req_id,
+            request_id=request_id,
             ces_uri=ces_uri,
         )
 
