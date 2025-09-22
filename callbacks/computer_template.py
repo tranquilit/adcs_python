@@ -1,6 +1,5 @@
 from datetime import datetime, timedelta
-from typing import Iterable
-
+from typing import Iterable, Optional, Dict, Any
 from asn1crypto import core as a_core
 from cryptography import x509 as cx509
 from cryptography.hazmat.primitives import hashes
@@ -14,43 +13,19 @@ from cryptography.x509.oid import (
 # helpers/structs already present in your project
 from utils import NtdsAttr, NtdsCASecurityExt
 from utils import _apply_static_extensions
+import hashlib
 
 
-# ---------- small helpers ----------
-def _is_member_of(entry: dict, groups: Iterable[str]) -> bool:
-    member_of = entry.get("memberOf") or []
-    for raw in member_of:
-        dn = raw.decode("utf-8", "ignore") if isinstance(raw, (bytes, bytearray)) else str(raw)
-        for frag in groups:
-            if frag.lower() in dn.lower():
-                return True
-    return False
 
 
-def _b(entry: dict, attr: str, default: str = "") -> str:
-    vals = entry.get(attr) or []
-    if not vals:
-        return default
-    v = vals[0]
-    return v.decode("utf-8", "ignore") if isinstance(v, (bytes, bytearray)) else str(v)
-
-
-# =========================
-# 1) Definition for CEP
-# =========================
+# ============================================================
+# 1) Template definition for CEP (dynamic per user)
+# ============================================================
 def define_template(*, app_conf, kerberos_user=None, samdb=None, sam_entry=None):
-    """
-    Return the description of the "computer" template for CEP.
-    Flags are booleans only (compiled to integers by the app via FLAG_CATALOG).
-    Dynamic extensions (e.g., SAN, NTDS) will be added at issuance time.
-    """
+    validity_seconds = 31536000       # 1 year
+    renewal_seconds = 3628800         # 42 days
+    auto_enroll = True
 
-    # Default validity: 1 year (e.g., double if member of a group)
-    validity_seconds = 31536000
-    renewal_seconds = 3628800
-    if _is_member_of(sam_entry or {}, ["CN=PKI-ServersLong"]):
-        validity_seconds *= 2
-        renewal_seconds *= 2
 
     return {
         "common_name": "adcswebcomputer (CB)",
@@ -179,38 +154,39 @@ def define_template(*, app_conf, kerberos_user=None, samdb=None, sam_entry=None)
 # ======================
 def emit_certificate(
     *,
-    csr_der: bytes,
+    csr_der: Optional[bytes],
+    request_id: Optional[int],
     kerberos_user: str,
     samdb,
     sam_entry: dict,
     ca: dict,
-    template: dict,
+    template: Optional[dict],
     info: dict,
     app_conf: dict,
-    CANAME: str | None,
-):
-    """
-    Issue a machine certificate.
-    - CN = dNSHostName (fallback sAMAccountName without '$')
-    - SAN DNS = {dNSHostName, hostname}
-    - Re-apply EKU/KU/AppPolicies/TemplateInfo from template
-    - AIA/CDP from CA
-    - Add dynamic NTDS CA Security (ObjectSid)
-    """
+    CANAME: Optional[str],
+) -> Dict[str, Any]:
+
+    must_pending = False
+
+    if request_id is None:
+        request_id = int(str(int(datetime.utcnow().timestamp())) + str(int(hashlib.sha256(csr_der).hexdigest(), 16)))
+
+    #must_pending =  False
+    if must_pending:
+        return {
+            "status": "pending",
+            "request_id": request_id,
+            "status_text": "Awaiting manual validation",
+        }
+
     csr = cx509.load_der_x509_csr(csr_der)
     ca_cert = cx509.load_der_x509_certificate(ca["__certificate_der"])
-
     now = datetime.utcnow() - timedelta(minutes=5)
-    v = (template.get("validity") or {}).get("validity_seconds") or 31536000
-    not_after = now + timedelta(seconds=int(v))
 
-    # ----- AD machine attributes -----
-    dns_host = _b(sam_entry or {}, "dNSHostName", "")
-    raw_sam = _b(sam_entry or {}, "sAMAccountName", "")
-    hostname = raw_sam[:-1] if raw_sam.endswith("$") else raw_sam
-    cn = dns_host or hostname or "computer"
+    # CN = sAMAccountName
+    cn = (sam_entry.get("sAMAccountName") or [b"user"])[0].decode("utf-8", "ignore")
+    validity_seconds = (template or {}).get("validity", {}).get("validity_seconds") or 31536000
 
-    # ----- builder -----
     builder = (
         cx509.CertificateBuilder()
         .subject_name(cx509.Name([cx509.NameAttribute(NameOID.COMMON_NAME, cn)]))
@@ -218,27 +194,23 @@ def emit_certificate(
         .public_key(csr.public_key())
         .serial_number(cx509.random_serial_number())
         .not_valid_before(now)
-        .not_valid_after(not_after)
+        .not_valid_after(now + timedelta(seconds=int(validity_seconds)))
         .add_extension(cx509.SubjectKeyIdentifier.from_public_key(csr.public_key()), critical=False)
     )
 
-    # AIA
-    ca_issuers_http = ca.get("urls", {}).get("ca_issuers_http")
-    if ca_issuers_http:
+    # AIA/CDP from CA
+    if ca.get("urls", {}).get("ca_issuers_http"):
         aia = cx509.AuthorityInformationAccess([
             cx509.AccessDescription(
                 AuthorityInformationAccessOID.CA_ISSUERS,
-                cx509.UniformResourceIdentifier(ca_issuers_http)
+                cx509.UniformResourceIdentifier(ca["urls"]["ca_issuers_http"])
             )
         ])
         builder = builder.add_extension(aia, critical=False)
-
-    # CDP
-    crl_http = ca.get("urls", {}).get("crl_http")
-    if crl_http:
+    if ca.get("urls", {}).get("crl_http"):
         cdp = cx509.CRLDistributionPoints([
             cx509.DistributionPoint(
-                full_name=[cx509.UniformResourceIdentifier(crl_http)],
+                full_name=[cx509.UniformResourceIdentifier(ca["urls"]["crl_http"])],
                 relative_name=None, reasons=None, crl_issuer=None
             )
         ])
@@ -271,7 +243,7 @@ def emit_certificate(
             critical=False
         )
     except Exception as e:
-        print(f"[computer_cb] NTDS build failed: {e!r}")
+        print(f"[emit_certificate: NTDS build failed: {e!r}")
 
     # (2) sign according to CA key type
     priv = ca["__key_obj"]
@@ -280,5 +252,10 @@ def emit_certificate(
     else:
         cert = builder.sign(private_key=priv, algorithm=hashes.SHA256())
 
-    return cert
+
+    return {
+        "status": "issued",
+        "request_id": request_id,
+        "cert": cert,
+    }
 
