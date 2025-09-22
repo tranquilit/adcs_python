@@ -20,7 +20,9 @@ from utils import (
     format_b64_for_soap,
     exct_csr_from_cmc,
     search_user,
-    validate_csr,              # CSR validation
+    validate_csr,
+    build_adcs_bst_pkiresponse_pending,
+    build_ws_trust_pending_response,
 )
 
 from adcs_config import load_yaml_conf, build_templates_for_policy_response
@@ -30,6 +32,12 @@ from callback_loader import load_func
 MAX_SOAP_BYTES = 2 * 1024 * 1024  # 2 MiB: hard limit to avoid OOM
 
 app = Flask(__name__)
+
+def _https_base_url():
+
+    host_url = request.host_url.rsplit('/', 1)[0]
+    return host_url.replace("http://", "https://")
+
 
 # ---------------- Endpoints ----------------
 
@@ -121,50 +129,26 @@ def ces_service(CANAME):
     message_id_elem = root.find('.//a:MessageID', namespaces)
     uuid_request = message_id_elem.text.replace("urn:uuid:", "") if message_id_elem is not None else ''
 
-    # --- If pending request
     request_id = None
-    root = ET.fromstring(rst_xml)
-    request_id_elem = root.find(".//enr:RequestID", { "enr": "http://schemas.microsoft.com/windows/pki/2009/01/enrollment"})
-    if request_id_elem is not None:
-        request_id = request_id_elem.text
-        print('pending request %s' % str(request_id))
-    
-    # --- Retrieve PKCS#7 (BinarySecurityToken)
+    req_id_elem = root.find(".//enr:RequestID", {"enr": "http://schemas.microsoft.com/windows/pki/2009/01/enrollment"})
+    if req_id_elem is not None and (req_id_elem.text or "").strip():
+        request_id = int(req_id_elem.text.strip())
+
+
+    body_part_id = 1
+    csr_der = None
+    info = {}
     ns_wsse = {'wsse': "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"}
     bst_node = root.find('.//wsse:BinarySecurityToken', ns_wsse)
-    if bst_node is None or not (bst_node.text or '').strip():
-        return Response("Missing BinarySecurityToken", status=400, content_type="text/plain; charset=utf-8")
-
-    try:
+    if bst_node is not None and (bst_node.text or '').strip():
         p7_der = base64.b64decode(bst_node.text)
-    except Exception:
-        return Response("BinarySecurityToken is not base64", status=400, content_type="text/plain; charset=utf-8")
-
-    # --- CMC -> extract CSR + info (incl. template OID)
-    try:
         csr_der, body_part_id, info = exct_csr_from_cmc(p7_der)
-    except Exception as e:
-        return Response(f"Cannot extract CSR from CMC: {e}", status=400, content_type="text/plain; charset=utf-8")
 
-    body_part_id =  int(str(int(datetime.datetime.utcnow().timestamp())) + str(int(hashlib.sha256(csr_der).hexdigest(), 16)))
+    if csr_der is None and request_id is None:
+        return Response("Missing CSR and RequestID", status=400, content_type="text/plain; charset=utf-8")
 
-    # --- CSR validation (signature algo, key, etc.)
-    try:
-        csr_obj = cx509.load_der_x509_csr(csr_der)
-    except Exception:
-        return Response("Invalid CSR: cannot decode DER", status=400, content_type="text/plain; charset=utf-8")
-
-    try:
-        validate_csr(csr_obj)
-    except Exception as e:
-        return Response(f"Invalid CSR: {e}", status=400, content_type="text/plain; charset=utf-8")
-
-    # --- User resolution (for callbacks)
     kerberos_user = g.kerberos_user
-    try:
-        samdbr, entry = search_user(kerberos_user)
-    except Exception:
-        samdbr, entry = None, {}
+    samdbr, entry = search_user(kerberos_user)
 
     # --- IMPORTANT: (re)build templates FOR THIS CES request
     templates_for_user, _ = build_templates_for_policy_response(
@@ -174,40 +158,39 @@ def ces_service(CANAME):
         sam_entry=entry,
     )
     tmap = { (t.get("template_oid") or {}).get("value"): t for t in templates_for_user }
-
-    # --- Resolve template from OID found in CSR
-    tpl = tmap.get(info.get('oid'))
-    if tpl is None:
-        return Response("Unknown template OID", status=400, content_type="text/plain; charset=utf-8")
-
-    # --- Pick target CA referenced by template (first in list), else default CA
-    ca_ref_ids = tpl.get("__ca_refids", [])
-    if ca_ref_ids:
-        ca = app.confadcs["cas_by_refid"].get(ca_ref_ids[0], app.confadcs['default_ca'])
+    if request_id :
+        for testoid in tmap : 
+            startoid_for_template = '%s999' % testoid.replace('.','')
+            if str(request_id).startswith(startoid_for_template): 
+                request_id = int(str(request_id)[len(startoid_for_template):])
+                tpl = tmap.get(testoid) 
+                break
     else:
-        ca = app.confadcs['default_ca']
+        tpl = tmap.get(info.get('oid')) 
 
-    # --- Save CSR (optional, handy for debug/forensics)
-    sha256_hex = hashlib.sha256(csr_der).hexdigest()
-    os.makedirs(ca['__path_csr'], exist_ok=True)
-    pem_csr = (
-        "-----BEGIN CERTIFICATE REQUEST-----\n" +
-        "\n".join(textwrap.wrap(format_b64_for_soap(csr_der), 64)) +
-        "\n-----END CERTIFICATE REQUEST-----"
-    )
-    with open(os.path.join(ca['__path_csr'], f"{body_part_id}.pem"), 'w') as f:
-        f.write(pem_csr)
+    ca_ref_ids = tpl["__ca_refids"]
+    ca = app.confadcs["cas_by_refid"][ca_ref_ids[0]]
 
-    # --- Call emission callback (mandatory in 100% callback mode)
-    cb = tpl.get("__callback") or {}
+
+    cb = (tpl.get("__callback") if tpl else (app.confadcs.get("__default_callback"))) or {}
     cb_path = cb.get("path")
     cb_issue = cb.get("issue")
-    if not (cb_path and cb_issue):
-        return Response("Template callback missing 'path'/'issue'", status=500, content_type="text/plain; charset=utf-8")
 
     emit_certificate = load_func(cb_path, cb_issue)
+
+
+    if request_id and (not csr_der) :
+
+        with open(os.path.join(ca['__path_csr'], f"{request_id}.pem"), 'rb') as f:
+            pem_data = f.read()
+
+        # Charge le certificat PEM
+        cert_obj = cx509.load_pem_x509_csr(pem_data)
+        csr_der = cert_obj.public_bytes(serialization.Encoding.DER)
+
     result = emit_certificate(
         csr_der=csr_der,
+        request_id=request_id,
         kerberos_user=kerberos_user,
         samdb=samdbr,
         sam_entry=entry,
@@ -218,69 +201,93 @@ def ces_service(CANAME):
         CANAME=CANAME,
     )
 
-    # --- Result: x509.Certificate or DER bytes
-    if isinstance(result, cx509.Certificate):
-        cert_obj = result
-        cert_der = result.public_bytes(serialization.Encoding.DER)
-    elif isinstance(result, (bytes, bytearray, memoryview)):
-        cert_der = bytes(result)
-        cert_obj = cx509.load_der_x509_certificate(cert_der)
-    else:
-        return Response("Callback must return x509.Certificate or DER bytes", status=500, content_type="text/plain; charset=utf-8")
 
-#    from utils import build_adcs_bst_pkiresponse_pending  # ← au lieu de build_adcs_cmc_pending
-#    from utils import build_ws_trust_pending_response
-#    
-#    pkcs7_der = build_adcs_bst_pkiresponse_pending(
-#        ca_der=ca["__certificate_der"],         # cert DER qui signe (CA/service)
-#        ca_key=ca["__key_obj"],                  # clé privée correspondante
-#        request_id=82,                           # même ID que dans la réponse SOAP
-#        status_text="En attente de traitement",  # message affiché par Windows
-#        body_part_id=1,                          # par défaut 1 (ok)
-#    )
-#    
-#    xml_rstrc = build_ws_trust_pending_response(
-#        pkcs7_der=pkcs7_der,
-#        relates_to=f"urn:uuid:{uuid_request}",
-#        request_id=82,  # doit matcher le pendToken / request_id du PKIResponse
-#        ces_uri="https://testadcs.ad.tranquil.it/Test%20Intermediate%20CA-ADCS-CA_CES_Kerberos/service.svc/CES",
-#    )
-#     
-#
-#    # 3) Retourner/servir le XML (bytes UTF-8)
-#    print(xml_rstrc.decode("utf-8"))
-#    return Response(xml_rstrc.decode("utf-8"), content_type='application/soap+xml')
-#
+    if not request_id:
+        os.makedirs(ca['__path_csr'], exist_ok=True)
+        pem_csr = (
+            "-----BEGIN CERTIFICATE REQUEST-----\n" +
+            "\n".join(textwrap.wrap(format_b64_for_soap(csr_der), 64)) +
+            "\n-----END CERTIFICATE REQUEST-----"
+        )
+        with open(os.path.join(ca['__path_csr'], f"{result.get('request_id')}.pem"), 'w') as f:
+            f.write(pem_csr)
+    
+    status = str(result["status"]).lower()
 
-    # --- Build PKCS#7 (BST) signed by the CA (behavior "like ADCS")
 
-    p7b_der = build_adcs_bst_certrep(
-        cert_der,
-        ca["__certificate_der"],
-        ca["__key_obj"],
-        body_part_id
-    )
+    ces_uri = f"{_https_base_url()}/{CANAME}-ADCS-CA_CES_Kerberos/service.svc/CES"
+    if status == "pending":
 
-    b64_p7 = format_b64_for_soap(p7b_der)
-    b64_leaf = format_b64_for_soap(cert_der)
+        req_id = result.get("request_id")
+        if not isinstance(req_id, int):
+            return Response("Callback returned PENDING but no valid 'request_id'", status=500, content_type="text/plain; charset=utf-8")
 
-    # --- Save cert
-    os.makedirs(ca['__path_cert'], exist_ok=True)
-    with open(os.path.join(ca['__path_cert'], f"{body_part_id}.pem"), 'w') as f:
-        f.write(
-            "-----BEGIN CERTIFICATE-----\n" +
-            "\n".join(textwrap.wrap(b64_leaf, 64)) +
-            "\n-----END CERTIFICATE-----"
+        req_id = int(str(tpl['template_oid']['value']).replace('.','') + '999' + str(result.get("request_id")))
+
+        status_text = result.get("status_text") or "En attente de traitement"
+
+
+        pkcs7_der = build_adcs_bst_pkiresponse_pending(
+            ca_der=ca["__certificate_der"],
+            ca_key=ca["__key_obj"],
+            request_id=req_id,
+            status_text=status_text,
+            body_part_id=body_part_id  # par défaut
         )
 
-    response_xml = app.confadcs['tpl_ces'].render(
-        uuid_request=uuid_request or str(uuid.uuid4()),
-        uuid_random=str(uuid.uuid4()),
-        p7b_der=b64_p7,
-        leaf_der=b64_leaf,
-        body_part_id=body_part_id
-    )
-    return Response(response_xml, content_type='application/soap+xml')
+
+        xml_rstrc = build_ws_trust_pending_response(
+            pkcs7_der=pkcs7_der,
+            relates_to=f"urn:uuid:{uuid_request or str(uuid.uuid4())}",
+            request_id=req_id,
+            ces_uri=ces_uri,
+        )
+
+        return Response(xml_rstrc.decode("utf-8"), content_type='application/soap+xml')
+
+    elif status == "issued":
+        cert_val = result.get("cert")
+        if isinstance(cert_val, cx509.Certificate):
+            cert_obj = cert_val
+            cert_der = cert_val.public_bytes(serialization.Encoding.DER)
+        elif isinstance(cert_val, (bytes, bytearray, memoryview)):
+            cert_der = bytes(cert_val)
+            cert_obj = cx509.load_der_x509_certificate(cert_der)
+        else:
+            return Response("Callback(issued) must return 'cert' (x509 or DER bytes)", status=500, content_type="text/plain; charset=utf-8")
+
+
+        p7b_der = build_adcs_bst_certrep(
+            cert_der,
+            ca["__certificate_der"],
+            ca["__key_obj"],
+            body_part_id
+        )
+
+        b64_p7 = format_b64_for_soap(p7b_der)
+        b64_leaf = format_b64_for_soap(cert_der)
+
+
+        os.makedirs(ca['__path_cert'], exist_ok=True)
+        with open(os.path.join(ca['__path_cert'], f"{result.get('request_id')}.pem"), 'w') as f:
+            f.write(
+                "-----BEGIN CERTIFICATE-----\n" +
+                "\n".join(textwrap.wrap(b64_leaf, 64)) +
+                "\n-----END CERTIFICATE-----"
+            )
+
+        response_xml = app.confadcs['tpl_ces'].render(
+            uuid_request=uuid_request or str(uuid.uuid4()),
+            uuid_random=str(uuid.uuid4()),
+            p7b_der=b64_p7,
+            leaf_der=b64_leaf,
+            body_part_id=body_part_id
+        )
+        return Response(response_xml, content_type='application/soap+xml')
+
+    else:
+        return Response(f"Unknown callback status '{status}'", status=500, content_type="text/plain; charset=utf-8")
+
 
 # ---------------- Main ----------------
 

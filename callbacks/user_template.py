@@ -1,10 +1,9 @@
 from datetime import datetime, timedelta
-from typing import Iterable
-
+from typing import Iterable, Optional, Dict, Any
 from asn1crypto import core as a_core
 from cryptography import x509 as cx509
 from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import rsa, ec, ed25519, ed448  # (2)
+from cryptography.hazmat.primitives.asymmetric import rsa, ec, ed25519, ed448
 from cryptography.x509.oid import (
     NameOID,
     AuthorityInformationAccessOID,
@@ -14,6 +13,7 @@ from cryptography.x509.oid import (
 # As before
 from utils import NtdsAttr, NtdsCASecurityExt
 from utils import _apply_static_extensions
+import hashlib
 
 
 # ---------- helpers (optional) ----------
@@ -158,25 +158,38 @@ def define_template(*, app_conf, kerberos_user=None, samdb=None, sam_entry=None)
 # =======================================
 def emit_certificate(
     *,
-    csr_der: bytes,
+    csr_der: Optional[bytes],
+    request_id: Optional[int],
     kerberos_user: str,
     samdb,
     sam_entry: dict,
     ca: dict,
-    template: dict,
+    template: Optional[dict],
     info: dict,
     app_conf: dict,
-    CANAME: str | None,
-):
+    CANAME: Optional[str],
+) -> Dict[str, Any]:
+
+    must_pending = False
+
+    if request_id is None:
+        request_id = int(str(int(datetime.utcnow().timestamp())) + str(int(hashlib.sha256(csr_der).hexdigest(), 16)))
+
+    #must_pending =  False
+    if must_pending:
+        return {
+            "status": "pending",
+            "request_id": request_id,
+            "status_text": "Awaiting manual validation",
+        }
+
     csr = cx509.load_der_x509_csr(csr_der)
     ca_cert = cx509.load_der_x509_certificate(ca["__certificate_der"])
     now = datetime.utcnow() - timedelta(minutes=5)
 
     # CN = sAMAccountName
     cn = (sam_entry.get("sAMAccountName") or [b"user"])[0].decode("utf-8", "ignore")
-
-    # (1) validity from template
-    v = (template.get("validity") or {}).get("validity_seconds") or 31536000
+    validity_seconds = (template or {}).get("validity", {}).get("validity_seconds") or 31536000
 
     builder = (
         cx509.CertificateBuilder()
@@ -185,7 +198,7 @@ def emit_certificate(
         .public_key(csr.public_key())
         .serial_number(cx509.random_serial_number())
         .not_valid_before(now)
-        .not_valid_after(now + timedelta(seconds=int(v)))  # (1)
+        .not_valid_after(now + timedelta(seconds=int(validity_seconds)))
         .add_extension(cx509.SubjectKeyIdentifier.from_public_key(csr.public_key()), critical=False)
     )
 
@@ -233,5 +246,10 @@ def emit_certificate(
     else:
         cert = builder.sign(private_key=priv, algorithm=hashes.SHA256())
 
-    return cert
+
+    return {
+        "status": "issued",
+        "request_id": request_id,
+        "cert": cert,
+    }
 
