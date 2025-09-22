@@ -3,7 +3,7 @@
 # exposing two functions: `define_template(app_conf)` and `emit_certificate(...)`.
 
 global:
-  path_list_request_id : list_request_id
+  path_list_request_id : /opt/adcs_python/list_request_id
   policy_provider:
     policy_id: "{1158087D-44BE-436A-897B-EA76BA39CF5F}"
     next_update_hours: 8
@@ -12,12 +12,6 @@ global:
   templates_dir:
     cep_response: template/GetPoliciesResponse.xml
     ces_response: template/ADCS-CA_CES_Kerberos_service.svc_CES.xml
-
-auth:
-  - kerberos: true
-  - callback:
-      path: "callbacks/auth_basic_template.py"
-      func: "check_auth"
 
 cas:
   - id: "ca-1"

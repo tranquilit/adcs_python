@@ -72,6 +72,7 @@ def auth_required(f):
             auth_func = load_func(current_app.confadcs["auth_callbacks"]['path'], current_app.confadcs["auth_callbacks"]['func'])
             r = auth_func(username=username_xml,password=password_xml) 
             user = r
+
         if not user:
             return Response("Unauthorized", 401, {'WWW-Authenticate': 'Negotiate'})
 

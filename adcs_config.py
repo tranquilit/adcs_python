@@ -4,7 +4,6 @@
 import base64
 import yaml
 from urllib.parse import quote
-from jinja2 import Template
 from typing import Tuple
 
 from asn1crypto import x509 as a_x509, core as a_core
@@ -242,7 +241,6 @@ def load_yaml_conf(path="adcs.yaml"):
     gbl = cfg.get("global", {})
     policy_provider = gbl.get("policy_provider", {})
     storage_paths_global = gbl.get("storage_paths", {}) or {}
-    templates_dir = gbl.get("templates_dir", {})
     conf["path_list_request_id"] = gbl.get("path_list_request_id", "/opt/adcs_python/list_request_id")
     conf["policyid"] = policy_provider.get("policy_id")
     conf["next_update_hours"] = policy_provider.get("next_update_hours", 8)
@@ -265,12 +263,6 @@ def load_yaml_conf(path="adcs.yaml"):
     # Global fallbacks for storage
     conf["path_cert_fallback"] = storage_paths_global.get("cert_dir", "/tmp/certs")
     conf["path_csr_fallback"]  = storage_paths_global.get("csr_dir",  "/tmp/csr")
-
-    # Jinja templates for CEP/CES
-    with open(templates_dir["cep_response"], "r", encoding="utf-8") as f:
-        conf["tpl_cep"] = Template(f.read())
-    with open(templates_dir["ces_response"], "r", encoding="utf-8") as f:
-        conf["tpl_ces"] = Template(f.read())
 
     # ---- CAs
     conf["cas_list"] = []

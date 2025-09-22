@@ -23,6 +23,8 @@ from utils import (
     validate_csr,
     build_adcs_bst_pkiresponse_pending,
     build_ws_trust_pending_response,
+    build_get_policies_response,
+    build_ces_response
 )
 
 from adcs_config import load_yaml_conf, build_templates_for_policy_response
@@ -86,7 +88,7 @@ def cep_service():
         (t.get("template_oid") or {}).get("value"): t for t in templates_for_user
     }
 
-    response_xml = app.confadcs['tpl_cep'].render(
+    response_xml = build_get_policies_response(
         uuid_request=relates_to,
         uuid_random=uuid_random,
         hosturl=host_url.replace('http://', 'https://'),
@@ -96,6 +98,7 @@ def cep_service():
         templates=templates_for_user,   # static extensions already materialized
         oids=oids_for_user,             # OIDs registry for policyOIDReference / oIDReference
     )
+    
     return Response(response_xml, content_type='application/soap+xml')
 
 
@@ -242,13 +245,14 @@ def ces_service(CANAME):
                 "\n-----END CERTIFICATE-----"
             )
 
-        response_xml = app.confadcs['tpl_ces'].render(
+        response_xml = build_ces_response(
             uuid_request=uuid_request,
             uuid_random=str(uuid.uuid4()),
             p7b_der=b64_p7,
             leaf_der=b64_leaf,
-            body_part_id=body_part_id
+            body_part_id=body_part_id,
         )
+        
         return Response(response_xml, content_type='application/soap+xml')
 
     else:

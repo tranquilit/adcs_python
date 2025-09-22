@@ -6,6 +6,7 @@ import hashlib
 from typing import Tuple
 from datetime import datetime, timezone
 import xml.etree.ElementTree as ET
+from xml.dom import minidom
 
 from asn1crypto import csr
 from asn1crypto import cms as a_cms, x509 as a_x509, core as a_core
@@ -701,7 +702,7 @@ def build_ws_trust_pending_response(
 ) -> bytes:
     """Build a WS-Trust RequestSecurityTokenResponseCollection with a PKCS#7 BST."""
 
-    NS = {
+    NS_WST = {
         "s":  "http://www.w3.org/2003/05/soap-envelope",
         "a":  "http://www.w3.org/2005/08/addressing",
         "wst":"http://docs.oasis-open.org/ws-sx/ws-trust/200512",
@@ -710,45 +711,45 @@ def build_ws_trust_pending_response(
         "msenroll": "http://schemas.microsoft.com/windows/pki/2009/01/enrollment",
     }
 
-    for p, uri in NS.items():
+    for p, uri in NS_WST.items():
         ET.register_namespace(p, uri)
 
-    senv = ET.Element(f"{{{NS['s']}}}Envelope")
+    senv = ET.Element(f"{{{NS_WST['s']}}}Envelope")
 
-    header = ET.SubElement(senv, f"{{{NS['s']}}}Header")
-    a_action = ET.SubElement(header, f"{{{NS['a']}}}Action", {f"{{{NS['s']}}}mustUnderstand": "1"})
+    header = ET.SubElement(senv, f"{{{NS_WST['s']}}}Header")
+    a_action = ET.SubElement(header, f"{{{NS_WST['a']}}}Action", {f"{{{NS_WST['s']}}}mustUnderstand": "1"})
     a_action.text = action
-    a_rel = ET.SubElement(header, f"{{{NS['a']}}}RelatesTo")
+    a_rel = ET.SubElement(header, f"{{{NS_WST['a']}}}RelatesTo")
     a_rel.text = relates_to
-    activity = ET.SubElement(header, f"{{{NS['msdiag']}}}ActivityId",
+    activity = ET.SubElement(header, f"{{{NS_WST['msdiag']}}}ActivityId",
                              {"CorrelationId": "3fd81603-cf85-48d8-945d-990e2a7a5673"})
     activity.text = activity_id
 
-    body = ET.SubElement(senv, f"{{{NS['s']}}}Body")
-    rstrc = ET.SubElement(body, f"{{{NS['wst']}}}RequestSecurityTokenResponseCollection")
-    rstr  = ET.SubElement(rstrc, f"{{{NS['wst']}}}RequestSecurityTokenResponse")
+    body = ET.SubElement(senv, f"{{{NS_WST['s']}}}Body")
+    rstrc = ET.SubElement(body, f"{{{NS_WST['wst']}}}RequestSecurityTokenResponseCollection")
+    rstr  = ET.SubElement(rstrc, f"{{{NS_WST['wst']}}}RequestSecurityTokenResponse")
 
-    tokentype = ET.SubElement(rstr, f"{{{NS['wst']}}}TokenType")
+    tokentype = ET.SubElement(rstr, f"{{{NS_WST['wst']}}}TokenType")
     tokentype.text = token_type
 
-    disp = ET.SubElement(rstr, f"{{{NS['msenroll']}}}DispositionMessage", {"{http://www.w3.org/XML/1998/namespace}lang": lang})
+    disp = ET.SubElement(rstr, f"{{{NS_WST['msenroll']}}}DispositionMessage", {"{http://www.w3.org/XML/1998/namespace}lang": lang})
     disp.text = disposition_message
 
     bst = ET.SubElement(
         rstr,
-        f"{{{NS['wss']}}}BinarySecurityToken",
+        f"{{{NS_WST['wss']}}}BinarySecurityToken",
         {
-            "ValueType": f"{NS['wss']}#PKCS7",
-            "EncodingType": f"{NS['wss']}#base64binary",
+            "ValueType": f"{NS_WST['wss']}#PKCS7",
+            "EncodingType": f"{NS_WST['wss']}#base64binary",
         },
     )
     bst.text = _wrap_b64(pkcs7_der, 64, True) if wrap_b64_lines else base64.b64encode(pkcs7_der).decode("ascii")
 
-    req_tok = ET.SubElement(rstr, f"{{{NS['wst']}}}RequestedSecurityToken")
-    str_el  = ET.SubElement(req_tok, f"{{{NS['wss']}}}SecurityTokenReference")
-    ET.SubElement(str_el, f"{{{NS['wss']}}}Reference", {"URI": ces_uri})
+    req_tok = ET.SubElement(rstr, f"{{{NS_WST['wst']}}}RequestedSecurityToken")
+    str_el  = ET.SubElement(req_tok, f"{{{NS_WST['wss']}}}SecurityTokenReference")
+    ET.SubElement(str_el, f"{{{NS_WST['wss']}}}Reference", {"URI": ces_uri})
 
-    req_id = ET.SubElement(rstr, f"{{{NS['msenroll']}}}RequestID")
+    req_id = ET.SubElement(rstr, f"{{{NS_WST['msenroll']}}}RequestID")
     req_id.text = str(request_id)
 
     return ET.tostring(senv, encoding="utf-8", xml_declaration=True, method="xml")
@@ -853,4 +854,270 @@ def _apply_static_extensions(builder: cx509.CertificateBuilder, template: dict) 
             )
 
     return builder
+
+
+# -----------------------------------------------------------------------------
+# Enrollment Policy (GetPolicies) XML helpers and response
+# -----------------------------------------------------------------------------
+
+NS_EP = {
+    "s":   "http://www.w3.org/2003/05/soap-envelope",
+    "a":   "http://www.w3.org/2005/08/addressing",
+    "xsi": "http://www.w3.org/2001/XMLSchema-instance",
+    "xsd": "http://www.w3.org/2001/XMLSchema",
+    "ep":  "http://schemas.microsoft.com/windows/pki/2009/01/enrollmentpolicy",
+    "diag":"http://schemas.microsoft.com/2004/09/ServiceModel/Diagnostics",
+}
+# Register once
+ET.register_namespace('s',   NS_EP["s"])
+ET.register_namespace('a',   NS_EP["a"])
+ET.register_namespace('xsi', NS_EP["xsi"])
+ET.register_namespace('xsd', NS_EP["xsd"])
+ET.register_namespace('ep',  NS_EP["ep"])
+ET.register_namespace('',    NS_EP["diag"])  # optional: limit prefix creation on ActivityId
+
+_TRUE  = "true"
+_FALSE = "false"
+
+def tbool(v: bool) -> str:
+    return _TRUE if bool(v) else _FALSE
+
+def text(elem, value):
+    elem.text = "" if value is None else str(value)
+    return elem
+
+def set_xsi_nil(elem, is_nil: bool):
+    elem.set(f"{{{NS_EP['xsi']}}}nil", _TRUE if is_nil else _FALSE)
+    return elem
+
+def prettify(xml_bytes: bytes) -> str:
+    parsed = minidom.parseString(xml_bytes)
+    return parsed.toprettyxml(indent="  ", encoding="utf-8").decode("utf-8")
+
+def build_get_policies_response(
+    uuid_request: str,
+    uuid_random: str,
+    hosturl: str,
+    policyid: str,
+    next_update_hours: int,
+    cas: list,
+    templates: list,
+    oids: list,
+) -> str:
+    # <s:Envelope>
+    env = ET.Element(ET.QName(NS_EP['s'], 'Envelope'))
+
+    # <s:Header>
+    hdr = ET.SubElement(env, ET.QName(NS_EP['s'], 'Header'))
+    action = ET.SubElement(hdr, ET.QName(NS_EP['a'], 'Action'), {ET.QName(NS_EP['s'], 'mustUnderstand'): "1"})
+    action.text = "http://schemas.microsoft.com/windows/pki/2009/01/enrollmentpolicy/IPolicy/GetPoliciesResponse"
+
+    relates = ET.SubElement(hdr, ET.QName(NS_EP['a'], 'RelatesTo'))
+    relates.text = f"urn:uuid:{uuid_request}"
+
+    # ActivityId (Diagnostics ns)
+    act = ET.SubElement(hdr, ET.QName(NS_EP['diag'], 'ActivityId'), {"CorrelationId": str(uuid_random)})
+    act.text = "00000000-0000-0000-0000-000000000000"
+
+    # <s:Body>
+    body = ET.SubElement(env, ET.QName(NS_EP['s'], 'Body'))
+    body.set('xmlns:xsi', NS_EP['xsi'])
+    body.set('xmlns:xsd', NS_EP['xsd'])
+
+    # <ep:GetPoliciesResponse>
+    gpr = ET.SubElement(body, ET.QName(NS_EP['ep'], 'GetPoliciesResponse'))
+
+    # <response>
+    response = ET.SubElement(gpr, ET.QName(NS_EP['ep'], 'response'))
+
+    text(ET.SubElement(response, ET.QName(NS_EP['ep'], 'policyID')), policyid)
+    ET.SubElement(response, ET.QName(NS_EP['ep'], 'policyFriendlyName'))
+    text(ET.SubElement(response, ET.QName(NS_EP['ep'], 'nextUpdateHours')), next_update_hours)
+
+    pol_not_changed = ET.SubElement(response, ET.QName(NS_EP['ep'], 'policiesNotChanged'))
+    set_xsi_nil(pol_not_changed, True)
+
+    policies = ET.SubElement(response, ET.QName(NS_EP['ep'], 'policies'))
+
+    # --- templates -> policies/policy ---
+    for t in templates:
+        policy = ET.SubElement(policies, ET.QName(NS_EP['ep'], 'policy'))
+        text(ET.SubElement(policy, ET.QName(NS_EP['ep'], 'policyOIDReference')), t["__policy_oid_reference"])
+
+        cAs = ET.SubElement(policy, ET.QName(NS_EP['ep'], 'cAs'))
+        ca_refids = t.get("__ca_refids") or []
+        if ca_refids:
+            for refid in ca_refids:
+                text(ET.SubElement(cAs, ET.QName(NS_EP['ep'], 'cAReference')), refid)
+        else:
+            text(ET.SubElement(cAs, ET.QName(NS_EP['ep'], 'cAReference')), cas[0]["__refid"])
+
+        attrs = ET.SubElement(policy, ET.QName(NS_EP['ep'], 'attributes'))
+        text(ET.SubElement(attrs, ET.QName(NS_EP['ep'], 'commonName')), t["common_name"])
+        text(ET.SubElement(attrs, ET.QName(NS_EP['ep'], 'policySchema')), t["policy_schema"])
+
+        cert_valid = ET.SubElement(attrs, ET.QName(NS_EP['ep'], 'certificateValidity'))
+        text(ET.SubElement(cert_valid, ET.QName(NS_EP['ep'], 'validityPeriodSeconds')), t["validity"]["validity_seconds"])
+        text(ET.SubElement(cert_valid, ET.QName(NS_EP['ep'], 'renewalPeriodSeconds')), t["validity"]["renewal_seconds"])
+
+        perm = ET.SubElement(attrs, ET.QName(NS_EP['ep'], 'permission'))
+        text(ET.SubElement(perm, ET.QName(NS_EP['ep'], 'enroll')), tbool(t["permissions"]["enroll"]))
+        text(ET.SubElement(perm, ET.QName(NS_EP['ep'], 'autoEnroll')), tbool(t["permissions"]["auto_enroll"]))
+
+        pka = ET.SubElement(attrs, ET.QName(NS_EP['ep'], 'privateKeyAttributes'))
+        text(ET.SubElement(pka, ET.QName(NS_EP['ep'], 'minimalKeyLength')), t["private_key_attributes"]["minimal_key_length"])
+        text(ET.SubElement(pka, ET.QName(NS_EP['ep'], 'keySpec')), t["private_key_attributes"]["key_spec"])
+
+        kup = ET.SubElement(pka, ET.QName(NS_EP['ep'], 'keyUsageProperty'))
+        set_xsi_nil(kup, True)
+
+        pk_perms = ET.SubElement(pka, ET.QName(NS_EP['ep'], 'permissions'))
+        set_xsi_nil(pk_perms, True)
+
+        alg = ET.SubElement(pka, ET.QName(NS_EP['ep'], 'algorithmOIDReference'))
+        alg_ref = t["private_key_attributes"].get("algorithm_oid_reference")
+        set_xsi_nil(alg, False if alg_ref else True)
+        if alg_ref:
+            alg.text = str(alg_ref)
+
+        cp = ET.SubElement(pka, ET.QName(NS_EP['ep'], 'cryptoProviders'))
+        for prov in t["private_key_attributes"].get("crypto_providers", []):
+            text(ET.SubElement(cp, ET.QName(NS_EP['ep'], 'provider')), prov)
+
+        rev = ET.SubElement(attrs, ET.QName(NS_EP['ep'], 'revision'))
+        text(ET.SubElement(rev, ET.QName(NS_EP['ep'], 'majorRevision')), t["revision"]["major"])
+        text(ET.SubElement(rev, ET.QName(NS_EP['ep'], 'minorRevision')), t["revision"]["minor"])
+
+        sup = ET.SubElement(attrs, ET.QName(NS_EP['ep'], 'supersededPolicies'))
+        set_xsi_nil(sup, True)
+
+        text(ET.SubElement(attrs, ET.QName(NS_EP['ep'], 'privateKeyFlags')), t["flags"]["private_key_flags"])
+        text(ET.SubElement(attrs, ET.QName(NS_EP['ep'], 'subjectNameFlags')), t["flags"]["subject_name_flags"])
+        text(ET.SubElement(attrs, ET.QName(NS_EP['ep'], 'enrollmentFlags')), t["flags"]["enrollment_flags"])
+        text(ET.SubElement(attrs, ET.QName(NS_EP['ep'], 'generalFlags')), t["flags"]["general_flags"])
+
+        hash_alg = ET.SubElement(attrs, ET.QName(NS_EP['ep'], 'hashAlgorithmOIDReference'))
+        hash_ref = t["flags"].get("hash_algorithm_oid_reference")
+        set_xsi_nil(hash_alg, False if hash_ref else True)
+        if hash_ref:
+            hash_alg.text = str(hash_ref)
+
+        ra_req = ET.SubElement(attrs, ET.QName(NS_EP['ep'], 'rARequirements'))
+        set_xsi_nil(ra_req, True)
+
+        kaa = ET.SubElement(attrs, ET.QName(NS_EP['ep'], 'keyArchivalAttributes'))
+        set_xsi_nil(kaa, True)
+
+        exts = ET.SubElement(attrs, ET.QName(NS_EP['ep'], 'extensions'))
+        for ext in t.get("required_extensions", []):
+            e = ET.SubElement(exts, ET.QName(NS_EP['ep'], 'extension'))
+            text(ET.SubElement(e, ET.QName(NS_EP['ep'], 'oIDReference')), ext["__oid_reference"])
+            text(ET.SubElement(e, ET.QName(NS_EP['ep'], 'critical')), tbool(ext["critical"]))
+            text(ET.SubElement(e, ET.QName(NS_EP['ep'], 'value')), ext["value_b64"])
+
+    # --- cAs (réponse) ---
+    ep_cas = ET.SubElement(gpr, ET.QName(NS_EP['ep'], 'cAs'))
+    for i, ca in enumerate(cas, start=1):
+        ca_el = ET.SubElement(ep_cas, ET.QName(NS_EP['ep'], 'cA'))
+        uris = ET.SubElement(ca_el, ET.QName(NS_EP['ep'], 'uris'))
+        cauri = ET.SubElement(uris, ET.QName(NS_EP['ep'], 'cAURI'))
+        text(ET.SubElement(cauri, ET.QName(NS_EP['ep'], 'clientAuthentication')), 2)
+        text(ET.SubElement(cauri, ET.QName(NS_EP['ep'], 'uri')), f"{hosturl}{ca['__ces_path']}")
+        text(ET.SubElement(cauri, ET.QName(NS_EP['ep'], 'priority')), i)
+        text(ET.SubElement(cauri, ET.QName(NS_EP['ep'], 'renewalOnly')), "false")
+
+        text(ET.SubElement(ca_el, ET.QName(NS_EP['ep'], 'certificate')), ca["__certificate_b64"])
+        text(ET.SubElement(ca_el, ET.QName(NS_EP['ep'], 'enrollPermission')), tbool(ca["enroll_permission"]))
+        text(ET.SubElement(ca_el, ET.QName(NS_EP['ep'], 'cAReferenceID')), ca["__refid"])
+
+    # --- oIDs ---
+    ep_oids = ET.SubElement(gpr, ET.QName(NS_EP['ep'], 'oIDs'))
+    for o in oids:
+        oe = ET.SubElement(ep_oids, ET.QName(NS_EP['ep'], 'oID'))
+        text(ET.SubElement(oe, ET.QName(NS_EP['ep'], 'value')), o["value"])
+        text(ET.SubElement(oe, ET.QName(NS_EP['ep'], 'group')), o["group"])
+        text(ET.SubElement(oe, ET.QName(NS_EP['ep'], 'oIDReferenceID')), o["__refid"])
+        text(ET.SubElement(oe, ET.QName(NS_EP['ep'], 'defaultName')), o["default_name"])
+
+    # Serialize pretty
+    raw = ET.tostring(env, encoding="utf-8", xml_declaration=True)
+    return prettify(raw)
+
+
+# -----------------------------------------------------------------------------
+# CES response (Issued) helpers and response
+# -----------------------------------------------------------------------------
+
+NS_CES = {
+    "s":    "http://www.w3.org/2003/05/soap-envelope",
+    "a":    "http://www.w3.org/2005/08/addressing",
+    "diag": "http://schemas.microsoft.com/2004/09/ServiceModel/Diagnostics",
+    "wst":  "http://docs.oasis-open.org/ws-sx/ws-trust/200512",
+    "wsse": "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd",
+    "ep":   "http://schemas.microsoft.com/windows/pki/2009/01/enrollment",
+}
+# Register once
+ET.register_namespace('s',    NS_CES['s'])
+ET.register_namespace('a',    NS_CES['a'])
+ET.register_namespace('wst',  NS_CES['wst'])
+ET.register_namespace('wsse', NS_CES['wsse'])
+ET.register_namespace('ep',   NS_CES['ep'])
+
+def _txt(elem, value):
+    elem.text = "" if value is None else str(value)
+    return elem
+
+def _prettify(xml_bytes: bytes) -> str:
+    return minidom.parseString(xml_bytes).toprettyxml(indent="  ", encoding="utf-8").decode("utf-8")
+
+def build_ces_response(uuid_request: str, uuid_random: str, p7b_der: str, leaf_der: str, body_part_id: str) -> str:
+    env = ET.Element(ET.QName(NS_CES['s'], 'Envelope'))
+
+    hdr = ET.SubElement(env, ET.QName(NS_CES['s'], 'Header'))
+    action = ET.SubElement(hdr, ET.QName(NS_CES['a'], 'Action'), {ET.QName(NS_CES['s'], 'mustUnderstand'): "1"})
+    _txt(action, "http://schemas.microsoft.com/windows/pki/2009/01/enrollment/RSTRC/wstep")
+
+    relates = ET.SubElement(hdr, ET.QName(NS_CES['a'], 'RelatesTo'))
+    _txt(relates, f"urn:uuid:{uuid_request}")
+
+    act = ET.SubElement(hdr, ET.QName(NS_CES['diag'], 'ActivityId'), {"CorrelationId": str(uuid_random)})
+    _txt(act, "00000000-0000-0000-0000-000000000000")
+
+    body = ET.SubElement(env, ET.QName(NS_CES['s'], 'Body'))
+
+    rstrc = ET.SubElement(body, ET.QName(NS_CES['wst'], 'RequestSecurityTokenResponseCollection'))
+    rstr  = ET.SubElement(rstrc, ET.QName(NS_CES['wst'], 'RequestSecurityTokenResponse'))
+
+    tok_type = ET.SubElement(rstr, ET.QName(NS_CES['wst'], 'TokenType'))
+    _txt(tok_type, "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#X509v3")
+
+    disp = ET.SubElement(rstr, ET.QName(NS_CES['ep'], 'DispositionMessage'))
+    disp.set('xml:lang', 'en-US')
+    _txt(disp, "Issued")
+
+    bst_p7b = ET.SubElement(
+        rstr, ET.QName(NS_CES['wsse'], 'BinarySecurityToken'),
+        {
+            "ValueType":    "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd#PKCS7",
+            "EncodingType": "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd#base64binary",
+        }
+    )
+    _txt(bst_p7b, p7b_der)
+
+    req_tok = ET.SubElement(rstr, ET.QName(NS_CES['wst'], 'RequestedSecurityToken'))
+
+    bst_leaf = ET.SubElement(
+        req_tok, ET.QName(NS_CES['wsse'], 'BinarySecurityToken'),
+        {
+            "ValueType":    "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#X509v3",
+            "EncodingType": "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd#base64binary",
+        }
+    )
+    _txt(bst_leaf, leaf_der)
+
+    req_id = ET.SubElement(rstr, ET.QName(NS_CES['ep'], 'RequestID'))
+    _txt(req_id, body_part_id)
+
+    raw = ET.tostring(env, encoding="utf-8", xml_declaration=True)
+    return _prettify(raw)
 
