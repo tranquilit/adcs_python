@@ -38,6 +38,11 @@ def auth_required(f):
     def decorated_function(*args, **kwargs):
         auth_header = request.headers.get('Authorization')
 
+        MAX_SOAP_BYTES = 2 * 1024 * 1024  
+        raw = request.data or b""
+        if len(raw) > MAX_SOAP_BYTES: 
+            return Response("Unauthorized", 401, {'WWW-Authenticate': 'Negotiate'})
+
         xml_text = request.data.decode('utf-8')
         NS = {
             'o': 'http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd'
