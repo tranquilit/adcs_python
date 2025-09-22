@@ -24,6 +24,7 @@ def _b(entry: dict, attr: str, default: str = "") -> str:
 
 
 
+
 # ============================================================
 # 1) Template definition for CEP (dynamic per user)
 # ============================================================

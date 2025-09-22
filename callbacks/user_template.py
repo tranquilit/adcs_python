@@ -172,9 +172,6 @@ def emit_certificate(
 
     must_pending = False
 
-    if request_id is None:
-        request_id = int(str(int(datetime.utcnow().timestamp())) + str(int(hashlib.sha256(csr_der).hexdigest(), 16)))
-
     #must_pending =  False
     if must_pending:
         return {
@@ -249,7 +246,6 @@ def emit_certificate(
 
     return {
         "status": "issued",
-        "request_id": request_id,
         "cert": cert,
     }
 

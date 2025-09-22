@@ -127,25 +127,24 @@ def ces_service(CANAME):
         'a': 'http://www.w3.org/2005/08/addressing'
     }
     message_id_elem = root.find('.//a:MessageID', namespaces)
-    uuid_request = message_id_elem.text.replace("urn:uuid:", "") if message_id_elem is not None else ''
+    uuid_request = message_id_elem.text.replace("urn:uuid:", "")
 
-    request_id = None
+
     req_id_elem = root.find(".//enr:RequestID", {"enr": "http://schemas.microsoft.com/windows/pki/2009/01/enrollment"})
     if req_id_elem is not None and (req_id_elem.text or "").strip():
         request_id = int(req_id_elem.text.strip())
-
-
-    body_part_id = 1
-    csr_der = None
-    info = {}
-    ns_wsse = {'wsse': "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"}
-    bst_node = root.find('.//wsse:BinarySecurityToken', ns_wsse)
-    if bst_node is not None and (bst_node.text or '').strip():
+        with open (app.confadcs['path_list_request_id'] ,'rb') as f:
+            p7_der = f.read()
+    else:
+        ns_wsse = {'wsse': "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"}
+        bst_node = root.find('.//wsse:BinarySecurityToken', ns_wsse)
         p7_der = base64.b64decode(bst_node.text)
-        csr_der, body_part_id, info = exct_csr_from_cmc(p7_der)
+        request_id = uuid.uuid4().int
+        with open (app.confadcs['path_list_request_id'] ,'wb') as f:
+            f.write(p7_der)
 
-    if csr_der is None and request_id is None:
-        return Response("Missing CSR and RequestID", status=400, content_type="text/plain; charset=utf-8")
+
+    csr_der, body_part_id, info = exct_csr_from_cmc(p7_der)
 
     kerberos_user = g.kerberos_user
     samdbr, entry = search_user(kerberos_user)
@@ -158,15 +157,7 @@ def ces_service(CANAME):
         sam_entry=entry,
     )
     tmap = { (t.get("template_oid") or {}).get("value"): t for t in templates_for_user }
-    if request_id :
-        for testoid in tmap : 
-            startoid_for_template = '%s999' % testoid.replace('.','')
-            if str(request_id).startswith(startoid_for_template): 
-                request_id = int(str(request_id)[len(startoid_for_template):])
-                tpl = tmap.get(testoid) 
-                break
-    else:
-        tpl = tmap.get(info.get('oid')) 
+    tpl = tmap.get(info.get('oid'))
 
     ca_ref_ids = tpl["__ca_refids"]
     ca = app.confadcs["cas_by_refid"][ca_ref_ids[0]]
@@ -178,15 +169,6 @@ def ces_service(CANAME):
 
     emit_certificate = load_func(cb_path, cb_issue)
 
-
-    if request_id and (not csr_der) :
-
-        with open(os.path.join(ca['__path_csr'], f"{request_id}.pem"), 'rb') as f:
-            pem_data = f.read()
-
-        # Charge le certificat PEM
-        cert_obj = cx509.load_pem_x509_csr(pem_data)
-        csr_der = cert_obj.public_bytes(serialization.Encoding.DER)
 
     result = emit_certificate(
         csr_der=csr_der,
@@ -201,15 +183,16 @@ def ces_service(CANAME):
         CANAME=CANAME,
     )
 
-
-    if not request_id:
+    csr_path = os.path.join(ca['__path_csr'], f"{result.get('request_id')}.pem")
+    if not os.path.isfile(csr_path) :
         os.makedirs(ca['__path_csr'], exist_ok=True)
         pem_csr = (
             "-----BEGIN CERTIFICATE REQUEST-----\n" +
             "\n".join(textwrap.wrap(format_b64_for_soap(csr_der), 64)) +
             "\n-----END CERTIFICATE REQUEST-----"
         )
-        with open(os.path.join(ca['__path_csr'], f"{result.get('request_id')}.pem"), 'w') as f:
+
+        with open(csr_path, 'w') as f:
             f.write(pem_csr)
     
     status = str(result["status"]).lower()
@@ -238,7 +221,7 @@ def ces_service(CANAME):
 
         xml_rstrc = build_ws_trust_pending_response(
             pkcs7_der=pkcs7_der,
-            relates_to=f"urn:uuid:{uuid_request or str(uuid.uuid4())}",
+            relates_to=f"urn:uuid:{uuid_request}",
             request_id=req_id,
             ces_uri=ces_uri,
         )
@@ -277,7 +260,7 @@ def ces_service(CANAME):
             )
 
         response_xml = app.confadcs['tpl_ces'].render(
-            uuid_request=uuid_request or str(uuid.uuid4()),
+            uuid_request=uuid_request,
             uuid_random=str(uuid.uuid4()),
             p7b_der=b64_p7,
             leaf_der=b64_leaf,
