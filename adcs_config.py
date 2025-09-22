@@ -248,12 +248,18 @@ def load_yaml_conf(path="adcs.yaml"):
     conf["next_update_hours"] = policy_provider.get("next_update_hours", 8)
 
     conf["auth_callbacks"] = []
+
+    conf['auth_kerberos'] = True
     for adecl in (cfg.get("auth") or []):
+
+        if adecl.get("kerberos") != None :
+            conf['auth_kerberos'] = adecl["kerberos"]
+
         cb = adecl.get("callback") or {}
         cb_path = cb.get("path")
+        if not cb_path :
+            continue
         cb_func = cb.get("func")
-        if not (cb_path and cb_func):
-            raise ValueError("Each auth entry must define callback.path and callback.func")
         conf["auth_callbacks"] = {"path": cb_path, "func": cb_func}
 
     # Global fallbacks for storage

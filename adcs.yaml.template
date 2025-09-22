@@ -14,6 +14,7 @@ global:
     ces_response: template/ADCS-CA_CES_Kerberos_service.svc_CES.xml
 
 auth:
+  - kerberos: true
   - callback:
       path: "callbacks/auth_basic_template.py"
       func: "check_auth"
