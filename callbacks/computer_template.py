@@ -15,6 +15,12 @@ from utils import NtdsAttr, NtdsCASecurityExt
 from utils import _apply_static_extensions
 import hashlib
 
+def _b(entry: dict, attr: str, default: str = "") -> str:
+    vals = entry.get(attr) or []
+    if not vals:
+        return default
+    v = vals[0]
+    return v.decode("utf-8", "ignore") if isinstance(v, (bytes, bytearray)) else str(v)
 
 
 
@@ -218,6 +224,13 @@ def emit_certificate(
 
     # ✅ static template extensions (EKU/KU/AppPolicies/TemplateInfo)
     builder = _apply_static_extensions(builder, template)
+
+    dns_host = _b(sam_entry or {}, "dNSHostName", "")
+    raw_sam = _b(sam_entry or {}, "sAMAccountName", "")
+    hostname = raw_sam[:-1] if raw_sam.endswith("$") else raw_sam
+
+
+    cn = dns_host or hostname or "computer"
 
     # Dynamic SAN DNS (de-dup)
     names = []
