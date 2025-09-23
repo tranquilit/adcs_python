@@ -255,7 +255,7 @@ def ces_service(CANAME):
 
 
         os.makedirs(ca['__path_cert'], exist_ok=True)
-        with open(os.path.join(ca['__path_cert'], f"{result.get('request_id')}.pem"), 'w') as f:
+        with open(os.path.join(ca['__path_cert'], f"{request_id}.pem"), 'w') as f:
             f.write(
                 "-----BEGIN CERTIFICATE-----\n" +
                 "\n".join(textwrap.wrap(b64_leaf, 64)) +
@@ -284,4 +284,5 @@ if __name__ == '__main__':
     print("Loaded config with", len(decls), "template declaration(s).")
     #app.run(host='127.0.0.1', port=8080)
     serve(app, host="127.0.0.1", port=8080)
+
 
