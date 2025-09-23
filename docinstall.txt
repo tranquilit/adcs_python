@@ -1,4 +1,4 @@
-apt-get install samba msktutil nginx python3-flask python3-asn1crypto python3-kerberos krb5-user git python3-defusedxml python3-pyasn1
+apt-get install samba msktutil nginx python3-flask python3-asn1crypto python3-kerberos krb5-user git python3-defusedxml python3-pyasn1 python3-waitress
 cd /opt
 git clone https://github.com/sfonteneau/adcs_python.git
 cd adcs_python

@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 from flask import Flask, request, Response, g
+from waitress import serve
 import os
 import uuid
 import base64
@@ -281,6 +282,6 @@ if __name__ == '__main__':
     app.confadcs = load_yaml_conf("adcs.yaml")
     decls = app.confadcs.get("__template_decls__") or []
     print("Loaded config with", len(decls), "template declaration(s).")
-    app.run(host='127.0.0.1', port=8080)
-
+    #app.run(host='127.0.0.1', port=8080)
+    serve(app, host="127.0.0.1", port=8080)
 
