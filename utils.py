@@ -305,7 +305,7 @@ def extract_ms_template_from_csr_der(csr_der: bytes) -> dict:
       - oid  : OID 1.3.6.1.4.1.311.21.7 (template v2) si présent
     Cherche à la fois dans les attributs directs et dans extensionRequest.
     """
-    req = a_csr.CertificationRequest.load(csr_der)
+    req = csr.CertificationRequest.load(csr_der)
     cri = req["certification_request_info"]
     attrs = cri["attributes"]
 

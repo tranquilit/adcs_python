@@ -43,7 +43,7 @@ def _https_base_url():
 
 # ---------------- Endpoints ----------------
 
-@app.route('/ADPolicyProvider_CEP_Kerberos/service.svc/CEP', methods=['POST', 'GET'])
+@app.route('/CEP', methods=['POST', 'GET'])
 @auth_required
 def cep_service():
     host_url = request.host_url.rsplit('/', 1)[0]
@@ -102,7 +102,7 @@ def cep_service():
     return Response(response_xml, content_type='application/soap+xml')
 
 
-@app.route('/<CANAME>-ADCS-CA_CES_Kerberos/service.svc/CES', methods=['POST'])
+@app.route('/CES/<CANAME>', methods=['POST'])
 @auth_required
 def ces_service(CANAME):
     raw = request.data or b""
@@ -157,7 +157,6 @@ def ces_service(CANAME):
         tpl = tmap.get(info.get('oid'))
     else:
         tpl = tmap_name.get(info.get('name'))
-
     ca_ref_ids = tpl["__ca_refids"]
     ca = app.confadcs["cas_by_refid"][ca_ref_ids[0]]
 
@@ -195,7 +194,7 @@ def ces_service(CANAME):
     status = str(result["status"]).lower()
 
 
-    ces_uri = f"{_https_base_url()}/{CANAME}-ADCS-CA_CES_Kerberos/service.svc/CES"
+    ces_uri = f"{_https_base_url()}/CES/{CANAME}"
     if status in ("pending", "denied"):
 
         status_text = (result.get("status_text") or
