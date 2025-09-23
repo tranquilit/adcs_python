@@ -43,7 +43,7 @@ def define_template(*, app_conf, kerberos_user=None ):
             "major_version": 100,
             "minor_version": 3,
         },
-        "ca_references": ["Test Intermediate CA"],
+        "ca_references": ["ca-1"],
 
         "policy_schema": 2,
         "revision": {"major": 100, "minor": 3},
