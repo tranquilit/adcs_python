@@ -36,10 +36,10 @@ def define_template(*, app_conf, kerberos_user=None ):
     samdbr, sam_entry = search_user(kerberos_user)
 
     return {
-        "common_name": "adcswebcomputer (CB)",
+        "common_name": "adcswebcomputer",
         "template_oid": {
             "value": "1.3.6.1.4.1.311.21.8.999.3",
-            "name":  "adcswebcomputer_cb",
+            "name":  "adcswebcomputer",
             "major_version": 100,
             "minor_version": 3,
         },
