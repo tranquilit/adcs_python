@@ -92,9 +92,7 @@ cd adcs_python
 
 Create a local CA (for testing)
 ---------------------------------------------------------
-
-- Edit ``create_ca.sh`` to match your needs.
-  
+ 
 ```
 bash create_ca.sh
 ```
