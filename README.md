@@ -1,14 +1,5 @@
-
-🚨 WARNING — EXPERIMENTAL ONLY
-==========================================================
-
-This project is an **experimental proof of concept**.  
-**Do not use in production** — it is unstable, unaudited, and not security-hardened.  
-You risk **bugs, data loss, and security issues**.
-
-
 Purpose
-----------------------------------------------------------
+==========================================================
 
 This project emulates an ADCS enrollment server (not a client). It mimics the behavior of Microsoft ADCS Web Enrollment endpoints (CEP/CES) to handle certificate requests.
 
@@ -23,29 +14,14 @@ The goal is to emulate an ADCS web enrollment server that:
 - Receives and validates PKCS#10 CSRs.
 - Processes submissions via CES and returns signed responses.
   
-
-Status
+Limitations/Status
 ----------------------------------------------------------
 
-- 🚧 **POC / unstable**
 - Minimal testing
-- Many missing features (TODOs)
-- Not designed or safe for real-world deployment
-
-
-Limitations
-----------------------------------------------------------
-
 - Not audited for security
-- Protocol implementation incomplete
 - Only tested in isolated **lab environments**
 - No guarantees of correctness or compatibility
-
-Intended Use
-----------------------------------------------------------
-
-✅ For lab experiments and prototype testing  
-❌ **Not for production**  
+- Much of the code was created using AI.
 
 
 ## 🔧 Certificate Templates via Callback
