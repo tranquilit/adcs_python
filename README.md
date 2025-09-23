@@ -14,7 +14,7 @@ The goal is to emulate an ADCS web enrollment server that:
 - Receives and validates PKCS#10 CSRs.
 - Processes submissions via CES and returns signed responses.
   
-Limitations/Status
+🚨 Limitations/Status
 ----------------------------------------------------------
 
 - Minimal testing
