@@ -181,7 +181,6 @@ def emit_certificate(
     if denied:
         return {
             "status": "denied",
-            "request_id": request_id,
             "status_text": "denied",
         }
     
@@ -189,7 +188,6 @@ def emit_certificate(
     if must_pending:
         return {
             "status": "pending",
-            "request_id": request_id,
             "status_text": "Awaiting manual validation",
         }
 
