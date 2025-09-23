@@ -40,7 +40,7 @@ from pyasn1.codec.der.encoder import encode as der_encode
 OID_MS_CERT_TEMPLATE_NAME = "1.3.6.1.4.1.311.20.2"
 OID_MS_CERT_TEMPLATE_INFO = "1.3.6.1.4.1.311.21.7"
 
-# For pending response (PKIResponse + CMCStatusInfo)
+# For PKIResponse (PKIResponse + CMCStatusInfo)
 OID_ID_CCT_PKI_RESPONSE = "1.3.6.1.5.5.7.12.3"  # eContentType for PKIResponse
 OID_ID_CMC_STATUS_INFO  = "1.3.6.1.5.5.7.7.1"    # id-cmc-statusInfo
 
@@ -476,7 +476,7 @@ def build_adcs_bst_certrep(child_der: bytes, ca_der: bytes, ca_key, cert_req_id:
     signed_data = a_cms.SignedData(
         {
             "version": 3,
-            "digest_algorithms": [digest_alg],
+            "digest_algorithms": [digest_algorithms for digest_algorithms in [digest_alg]][0:1],
             "encap_content_info": encap_content_info,
             "certificates": [ca_cert, leaf_cert],
             "signer_infos": [signer_info],
@@ -488,7 +488,7 @@ def build_adcs_bst_certrep(child_der: bytes, ca_der: bytes, ca_key, cert_req_id:
 
 
 # -----------------------------------------------------------------------------
-# Pending response (Windows expects PKIResponse + CMCStatusInfo)
+# PKIResponse (pending/denied) builders and CMS wrapper
 # -----------------------------------------------------------------------------
 
 class BodyPartID(univ.Integer):
@@ -602,22 +602,64 @@ def _build_pkiresponse_pending_der(request_id: int,
     return der_encode(resp)
 
 
-def build_adcs_bst_pkiresponse_pending(ca_der: bytes,
-                                       ca_key,
-                                       request_id: int,
-                                       status_text: str = "En attente de traitement",
-                                       body_part_id: int = 1) -> bytes:
+def _build_pkiresponse_denied_der(status_text: str = "Deny by admin",
+                                  body_part_id: int = 1) -> bytes:
+
+    csi = CMCStatusInfo()
+    csi.setComponentByName('cMCStatus', 2)  # failed
+
+    bl = BodyPartList()
+    bl.append(BodyPartID(body_part_id))
+    csi.setComponentByName('bodyList', bl)
+
+    if status_text:
+        csi.setComponentByName('statusString', char.UTF8String(status_text))
+
+    ta = TaggedAttribute()
+    ta.setComponentByName('bodyPartID', BodyPartID(body_part_id))
+    ta.setComponentByName('attrType', univ.ObjectIdentifier(OID_ID_CMC_STATUS_INFO))
+    avs = AttributeValues(); avs.append(AttributeValue(der_encode(csi)))
+    ta.setComponentByName('attrValues', avs)
+
+    controls = TaggedAttributeSeq(); controls.append(ta)
+
+    resp = PKIResponse()
+    resp.setComponentByName('controlSequence', controls)
+    resp.setComponentByName('cmsSequence', TaggedContentInfoSeq())
+    resp.setComponentByName('otherMsgSequence', OtherMsgSeq())
+
+    return der_encode(resp)
+
+
+def build_adcs_bst_pkiresponse(ca_der: bytes,
+                               ca_key,
+                               request_id: int,
+                               status: str = "pending",
+                               status_text: str = "En attente de traitement",
+                               body_part_id: int = 1) -> bytes:
     """
-    Build a CMS SignedData containing a PKIResponse(pending) (Windows/ADCS-ready).
-    eContentType = 1.3.6.1.5.5.7.12.3 ; SignedAttributes = content-type(12.3) + message-digest(SHA256(PKIResponse))
+    Build a CMS SignedData containing a PKIResponse (Windows/ADCS-ready).
+    - eContentType = 1.3.6.1.5.5.7.12.3
+    - SignedAttributes = content-type(12.3) + message-digest(SHA256(PKIResponse))
+    Parameters:
+      - status: "pending" or "denied" (alias: "failed", "refused")
     """
     signer_cert = a_x509.Certificate.load(ca_der)
 
-    pkiresp_der = _build_pkiresponse_pending_der(
-        request_id=request_id,
-        status_text=status_text,
-        body_part_id=body_part_id,
-    )
+    st = (status or "").strip().lower()
+    if st in ("pending", "pend", "p"):
+        pkiresp_der = _build_pkiresponse_pending_der(
+            request_id=request_id,
+            status_text=status_text,
+            body_part_id=body_part_id,
+        )
+    elif st in ("denied", "failed", "refused", "fail"):
+        pkiresp_der = _build_pkiresponse_denied_der(
+            status_text=status_text,
+            body_part_id=body_part_id,
+        )
+    else:
+        raise ValueError(f"Unsupported PKIResponse status: {status!r} (expected: 'pending' or 'denied')")
 
     encap_content_info = a_cms.EncapsulatedContentInfo(
         {
@@ -671,10 +713,15 @@ def build_adcs_bst_pkiresponse_pending(ca_der: bytes,
 # -----------------------------------------------------------------------------
 
 def format_b64_for_soap(data: bytes) -> str:
+    """Base64-encode bytes for inclusion into SOAP text nodes."""
     return base64.b64encode(data).decode("ascii")
 
 
 def _wrap_b64(data: bytes, line_len: int = 64, with_crlf: bool = True) -> str:
+    """
+    Base64-encode bytes and optionally wrap lines to a fixed length.
+    If with_crlf is True, lines are joined using CRLF (\\r\\n).
+    """
     s = base64.b64encode(data).decode("ascii")
     if not line_len:
         return s
@@ -683,76 +730,129 @@ def _wrap_b64(data: bytes, line_len: int = 64, with_crlf: bool = True) -> str:
     return sep.join(lines)
 
 
-# -----------------------------------------------------------------------------
-# WS-Trust SOAP envelope (pending)
-# -----------------------------------------------------------------------------
-
-def build_ws_trust_pending_response(
+def build_ws_trust_response(
     pkcs7_der: bytes,
     relates_to: str,
     request_id: int,
     ces_uri: str,
     *,
+    status: str = "pending",  # "pending" | "denied"/"failed"/"fail"/"refused"
     disposition_message: str = "En attente de traitement",
+    reason_text: str = "Deny by admin",
+    error_code: int = -2146877420,
+    invalid_request: bool = True,
     lang: str = "fr-FR",
     token_type: str = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#X509v3",
-    action: str = "http://schemas.microsoft.com/windows/pki/2009/01/enrollment/RSTRC/wstep",
+    activity_correlation_id: str = "3fd81603-cf85-48d8-945d-990e2a7a5673",
     activity_id: str = "00000000-0000-0000-0000-000000000000",
     wrap_b64_lines: bool = True,
-) -> bytes:
-    """Build a WS-Trust RequestSecurityTokenResponseCollection with a PKCS#7 BST."""
+):
+    """
+    Build a WS-Trust response:
+      - status="pending"  -> RSTRC (success), returns (xml_bytes, 200)
+      - status in {"denied","failed","fail","refused"} -> SOAP Fault (CertificateEnrollmentWSDetailFault), returns (xml_bytes, 500)
+    """
+    import base64
+    import xml.etree.ElementTree as ET
+    from xml.etree.ElementTree import QName
 
-    NS_WST = {
+    NS = {
         "s":  "http://www.w3.org/2003/05/soap-envelope",
         "a":  "http://www.w3.org/2005/08/addressing",
         "wst":"http://docs.oasis-open.org/ws-sx/ws-trust/200512",
         "wss":"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd",
         "msdiag": "http://schemas.microsoft.com/2004/09/ServiceModel/Diagnostics",
         "msenroll": "http://schemas.microsoft.com/windows/pki/2009/01/enrollment",
+        "xsd": "http://www.w3.org/2001/XMLSchema",
+        "xsi": "http://www.w3.org/2001/XMLSchema-instance",
     }
-
-    for p, uri in NS_WST.items():
+    for p, uri in NS.items():
         ET.register_namespace(p, uri)
 
-    senv = ET.Element(f"{{{NS_WST['s']}}}Envelope")
+    def _wrap_b64_crlf(data: bytes, line_len: int = 64) -> str:
+        s = base64.b64encode(data).decode("ascii")
+        if not line_len:
+            return s
+        return "\r\n".join(s[i:i+line_len] for i in range(0, len(s), line_len))
 
-    header = ET.SubElement(senv, f"{{{NS_WST['s']}}}Header")
-    a_action = ET.SubElement(header, f"{{{NS_WST['a']}}}Action", {f"{{{NS_WST['s']}}}mustUnderstand": "1"})
-    a_action.text = action
-    a_rel = ET.SubElement(header, f"{{{NS_WST['a']}}}RelatesTo")
-    a_rel.text = relates_to
-    activity = ET.SubElement(header, f"{{{NS_WST['msdiag']}}}ActivityId",
-                             {"CorrelationId": "3fd81603-cf85-48d8-945d-990e2a7a5673"})
-    activity.text = activity_id
+    st = (status or "").strip().lower()
+    is_pending = st in ("pending", "pend", "p")
+    is_failed  = st in ("denied", "failed", "fail", "refused")
 
-    body = ET.SubElement(senv, f"{{{NS_WST['s']}}}Body")
-    rstrc = ET.SubElement(body, f"{{{NS_WST['wst']}}}RequestSecurityTokenResponseCollection")
-    rstr  = ET.SubElement(rstrc, f"{{{NS_WST['wst']}}}RequestSecurityTokenResponse")
+    if is_pending:
+        # ----- RSTRC (HTTP 200) -----
+        senv = ET.Element(QName(NS["s"], "Envelope"))
 
-    tokentype = ET.SubElement(rstr, f"{{{NS_WST['wst']}}}TokenType")
-    tokentype.text = token_type
+        header = ET.SubElement(senv, QName(NS["s"], "Header"))
+        a_action = ET.SubElement(header, QName(NS["a"], "Action"), {QName(NS["s"], "mustUnderstand"): "1"})
+        a_action.text = "http://schemas.microsoft.com/windows/pki/2009/01/enrollment/RSTRC/wstep"
+        a_rel = ET.SubElement(header, QName(NS["a"], "RelatesTo")); a_rel.text = relates_to
+        activity = ET.SubElement(header, QName(NS["msdiag"], "ActivityId"), {"CorrelationId": activity_correlation_id})
+        activity.text = activity_id
 
-    disp = ET.SubElement(rstr, f"{{{NS_WST['msenroll']}}}DispositionMessage", {"{http://www.w3.org/XML/1998/namespace}lang": lang})
-    disp.text = disposition_message
+        body = ET.SubElement(senv, QName(NS["s"], "Body"))
+        rstrc = ET.SubElement(body, QName(NS["wst"], "RequestSecurityTokenResponseCollection"))
+        rstr  = ET.SubElement(rstrc, QName(NS["wst"], "RequestSecurityTokenResponse"))
 
-    bst = ET.SubElement(
-        rstr,
-        f"{{{NS_WST['wss']}}}BinarySecurityToken",
-        {
-            "ValueType": f"{NS_WST['wss']}#PKCS7",
-            "EncodingType": f"{NS_WST['wss']}#base64binary",
-        },
-    )
-    bst.text = _wrap_b64(pkcs7_der, 64, True) if wrap_b64_lines else base64.b64encode(pkcs7_der).decode("ascii")
+        tokentype = ET.SubElement(rstr, QName(NS["wst"], "TokenType"))
+        tokentype.text = token_type
 
-    req_tok = ET.SubElement(rstr, f"{{{NS_WST['wst']}}}RequestedSecurityToken")
-    str_el  = ET.SubElement(req_tok, f"{{{NS_WST['wss']}}}SecurityTokenReference")
-    ET.SubElement(str_el, f"{{{NS_WST['wss']}}}Reference", {"URI": ces_uri})
+        disp = ET.SubElement(rstr, QName(NS["msenroll"], "DispositionMessage"), {"{http://www.w3.org/XML/1998/namespace}lang": lang})
+        disp.text = disposition_message
 
-    req_id = ET.SubElement(rstr, f"{{{NS_WST['msenroll']}}}RequestID")
-    req_id.text = str(request_id)
+        bst = ET.SubElement(
+            rstr,
+            QName(NS["wss"], "BinarySecurityToken"),
+            {"ValueType": f"{NS['wss']}#PKCS7", "EncodingType": f"{NS['wss']}#base64binary"},
+        )
+        bst.text = _wrap_b64_crlf(pkcs7_der) if wrap_b64_lines else base64.b64encode(pkcs7_der).decode("ascii")
 
-    return ET.tostring(senv, encoding="utf-8", xml_declaration=True, method="xml")
+        req_tok = ET.SubElement(rstr, QName(NS["wst"], "RequestedSecurityToken"))
+        str_el  = ET.SubElement(req_tok, QName(NS["wss"], "SecurityTokenReference"))
+        ET.SubElement(str_el, QName(NS["wss"], "Reference"), {"URI": ces_uri})
+
+        req_id = ET.SubElement(rstr, QName(NS["msenroll"], "RequestID")); req_id.text = str(request_id)
+
+        return ET.tostring(senv, encoding="utf-8", xml_declaration=True, method="xml"), 200
+
+    elif is_failed:
+        # ----- SOAP Fault (HTTP 500): CertificateEnrollmentWSDetailFault -----
+        senv = ET.Element(QName(NS["s"], "Envelope"))
+
+        header = ET.SubElement(senv, QName(NS["s"], "Header"))
+        a_action = ET.SubElement(header, QName(NS["a"], "Action"), {QName(NS["s"], "mustUnderstand"): "1"})
+        a_action.text = "http://schemas.microsoft.com/windows/pki/2009/01/enrollment/RequestSecurityTokenCertificateEnrollmentWSDetailFault"
+        a_rel = ET.SubElement(header, QName(NS["a"], "RelatesTo")); a_rel.text = relates_to
+        activity = ET.SubElement(header, QName(NS["msdiag"], "ActivityId"), {"CorrelationId": activity_correlation_id})
+        activity.text = activity_id
+
+        body = ET.SubElement(senv, QName(NS["s"], "Body"))
+        fault = ET.SubElement(body, QName(NS["s"], "Fault"))
+
+        code  = ET.SubElement(fault, QName(NS["s"], "Code"))
+        ET.SubElement(code, QName(NS["s"], "Value")).text = "s:Receiver"
+
+        reason = ET.SubElement(fault, QName(NS["s"], "Reason"))
+        ET.SubElement(reason, QName(NS["s"], "Text"), {"{http://www.w3.org/XML/1998/namespace}lang": lang}).text = reason_text
+
+        detail = ET.SubElement(fault, QName(NS["s"], "Detail"))
+        cert_detail = ET.SubElement(
+            detail,
+            QName(NS["msenroll"], "CertificateEnrollmentWSDetail"),
+            {"xmlns:xsd": NS["xsd"], "xmlns:xsi": NS["xsi"]},
+        )
+
+        b64 = _wrap_b64_crlf(pkcs7_der) if wrap_b64_lines else base64.b64encode(pkcs7_der).decode("ascii")
+        ET.SubElement(cert_detail, QName(NS["msenroll"], "BinaryResponse")).text = b64
+        ET.SubElement(cert_detail, QName(NS["msenroll"], "ErrorCode")).text = str(int(error_code))
+        ET.SubElement(cert_detail, QName(NS["msenroll"], "InvalidRequest")).text = "true" if invalid_request else "false"
+        ET.SubElement(cert_detail, QName(NS["msenroll"], "RequestID")).text = str(request_id)
+
+        return ET.tostring(senv, encoding="utf-8", xml_declaration=True, method="xml"), 500
+
+    else:
+        raise ValueError(f"Unsupported status '{status}': use 'pending' or 'denied'")
+
 
 
 # -----------------------------------------------------------------------------
@@ -1015,7 +1115,7 @@ def build_get_policies_response(
             text(ET.SubElement(e, ET.QName(NS_EP['ep'], 'critical')), tbool(ext["critical"]))
             text(ET.SubElement(e, ET.QName(NS_EP['ep'], 'value')), ext["value_b64"])
 
-    # --- cAs (réponse) ---
+    # --- cAs (response) ---
     ep_cas = ET.SubElement(gpr, ET.QName(NS_EP['ep'], 'cAs'))
     for i, ca in enumerate(cas, start=1):
         ca_el = ET.SubElement(ep_cas, ET.QName(NS_EP['ep'], 'cA'))

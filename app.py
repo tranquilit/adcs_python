@@ -21,8 +21,8 @@ from utils import (
     exct_csr_from_cmc,
     search_user,
     validate_csr,
-    build_adcs_bst_pkiresponse_pending,
-    build_ws_trust_pending_response,
+    build_adcs_bst_pkiresponse,
+    build_ws_trust_response,
     build_get_policies_response,
     build_ces_response
 )
@@ -191,28 +191,40 @@ def ces_service(CANAME):
 
 
     ces_uri = f"{_https_base_url()}/{CANAME}-ADCS-CA_CES_Kerberos/service.svc/CES"
-    if status == "pending":
+    if status in ("pending", "denied"):
 
-        status_text = result.get("status_text") or "En attente de traitement"
+        status_text = (result.get("status_text") or
+                       ("Waiting for processing" if status == "pending" else "Denied"))
+    
 
-
-        pkcs7_der = build_adcs_bst_pkiresponse_pending(
+        pkcs7_der = build_adcs_bst_pkiresponse(
             ca_der=ca["__certificate_der"],
             ca_key=ca["__key_obj"],
             request_id=request_id,
+            status=status,              # "pending" ou "denied"
             status_text=status_text,
-            body_part_id=body_part_id  # par défaut
+            body_part_id=body_part_id
         )
+    
 
-
-        xml_rstrc = build_ws_trust_pending_response(
+        xml_body, http_code = build_ws_trust_response(
             pkcs7_der=pkcs7_der,
             relates_to=f"urn:uuid:{uuid_request}",
             request_id=request_id,
             ces_uri=ces_uri,
+            status=status,
+            disposition_message=status_text if status == "pending" else None,
+            reason_text=status_text if status == "denied" else None,
+            error_code=result.get("error_code", -2146877420),
+            invalid_request=True,
+            lang="fr-FR",
         )
-
-        return Response(xml_rstrc.decode("utf-8"), content_type='application/soap+xml')
+    
+        return Response(
+            xml_body.decode("utf-8"),
+            content_type="application/soap+xml; charset=utf-8",
+            status=http_code
+        )
 
     elif status == "issued":
         cert_val = result.get("cert")

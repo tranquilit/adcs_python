@@ -174,12 +174,21 @@ def emit_certificate(
 
     samdbr, sam_entry = search_user(kerberos_user)
 
+    denied = False
     must_pending = False
 
-    #must_pending =  False
+    if denied:
+        return {
+            "status": "denied",
+            "request_id": request_id,
+            "status_text": "denied",
+        }
+    
+
     if must_pending:
         return {
             "status": "pending",
+            "request_id": request_id,
             "status_text": "Awaiting manual validation",
         }
 
