@@ -1,32 +1,32 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+### ====== User Inputs ======
+read -rp "Enter the server FQDN (e.g., testadcs.mydomain.lan): " LEAF_FQDN
+read -rp "Enter the organization name (e.g., TestCompany): " ORG
+
 ### ====== Variables ======
-export CA_DIR="/opt/adcs_python/pki"                # répertoire unique (à plat)
-export CA_CN="Test CA"
-export ORG="Test"
+export CA_DIR="/opt/adcs_python/pki"         # flat CA directory
+export CA_CN="Root CA"
 export COUNTRY="FR"
 
-# URI CRL
-export CRL_URI_ROOT="http://testadcs.mydomain.lan/crl/ca.crl.pem"            # CRL de la RACINE
-export CRL_URI_ICA="http://testadcs.mydomain.lan/crl/intermediate.crl.pem"   # CRL de l'INTERMÉDIAIRE
+# CRL URIs
+export CRL_URI_ROOT="http://$LEAF_FQDN/crl/ca.crl.pem"          # Root CA CRL
+export CRL_URI_ICA="http://$LEAF_FQDN/crl/intermediate.crl.pem" # Intermediate CA CRL
 
-# Intermédiaire
-export ICA_CN="Test Intermediate CA"
+# Intermediate CA
+export ICA_CN="Intermediate CA"
 
-# Certificat serveur (leaf)
-export LEAF_FQDN="testadcs.mydomain.lan"
-
-### ====== Arbo standard à plat ======
+### ====== Standard Flat Structure ======
 mkdir -p "$CA_DIR"/{certs,crl,newcerts,private,csr}
 chmod 700 "$CA_DIR/private"
 
-# DB Root
+# Root DB
 : > "$CA_DIR/index.txt"
 echo 1000 > "$CA_DIR/serial"
 echo 1000 > "$CA_DIR/crlnumber"
 
-# DB ICA (fichiers séparés mais même répertoire)
+# Intermediate DB (separate but same directory)
 : > "$CA_DIR/index_ica.txt"
 echo 2000 > "$CA_DIR/serial_ica"
 echo 2000 > "$CA_DIR/crlnumber_ica"
@@ -35,7 +35,6 @@ echo 2000 > "$CA_DIR/crlnumber_ica"
 openssl genrsa -out "$CA_DIR/private/ca.key.pem" 4096
 chmod 600 "$CA_DIR/private/ca.key.pem"
 
-# pathlen:1 pour autoriser UN niveau d'intermédiaire
 openssl req -x509 -new -sha256 -days 3650 \
   -subj "/C=$COUNTRY/O=$ORG/CN=$CA_CN" \
   -key "$CA_DIR/private/ca.key.pem" \
@@ -45,7 +44,7 @@ openssl req -x509 -new -sha256 -days 3650 \
   -addext "authorityKeyIdentifier=keyid" \
   -out "$CA_DIR/certs/ca.crt.pem"
 
-# openssl.cnf de la ROOT (principalement pour la CRL root)
+# Root openssl.cnf
 cat > "$CA_DIR/openssl.cnf" <<EOF
 [ ca ]
 default_ca = myca
@@ -73,11 +72,10 @@ organizationalUnitName  = optional
 emailAddress            = optional
 EOF
 
-# CRL de la root
+# Generate Root CRL
 openssl ca -config "$CA_DIR/openssl.cnf" -gencrl -out "$CA_DIR/crl/ca.crl.pem"
 
-### ====== Intermédiaire (fichiers à plat) ======
-# Clé + CSR de l'ICA
+### ====== Intermediate CA ======
 openssl genrsa -out "$CA_DIR/private/ica.key.pem" 4096
 chmod 600 "$CA_DIR/private/ica.key.pem"
 
@@ -86,11 +84,10 @@ openssl req -new -sha256 \
   -key "$CA_DIR/private/ica.key.pem" \
   -out "$CA_DIR/csr/ica.csr.pem"
 
-# Signature de l'ICA par la ROOT
-# IMPORTANT : la CRL pointée dans le cert ICA est celle de la ROOT (émetteur)
+# Sign Intermediate with Root
 openssl x509 -req -sha256 -days 3650 \
-  -in  "$CA_DIR/csr/ica.csr.pem" \
-  -CA  "$CA_DIR/certs/ca.crt.pem" \
+  -in "$CA_DIR/csr/ica.csr.pem" \
+  -CA "$CA_DIR/certs/ca.crt.pem" \
   -CAkey "$CA_DIR/private/ca.key.pem" \
   -CAserial "$CA_DIR/serial" \
   -out "$CA_DIR/certs/ica.crt.pem" \
@@ -102,10 +99,10 @@ openssl x509 -req -sha256 -days 3650 \
     "crlDistributionPoints=URI:$CRL_URI_ROOT" \
   )
 
-# Chaîne ICA (ICA + ROOT)
+# Intermediate chain
 cat "$CA_DIR/certs/ica.crt.pem" "$CA_DIR/certs/ca.crt.pem" > "$CA_DIR/certs/ica-chain.pem"
 
-# openssl-ica.cnf : config dédiée à l’ICA (DB séparée), utilisée pour signer les LEAF
+# Intermediate openssl.cnf (for signing leaf certs)
 cat > "$CA_DIR/openssl-ica.cnf" <<EOF
 [ ca ]
 default_ca = myica
@@ -139,19 +136,13 @@ keyUsage = critical,digitalSignature,keyEncipherment
 extendedKeyUsage = serverAuth,clientAuth
 subjectKeyIdentifier = hash
 authorityKeyIdentifier = keyid,issuer
-# IMPORTANT : pour les LEAF émis par l'ICA, on pointe vers la CRL de l'ICA (émetteur direct)
 crlDistributionPoints = URI:$CRL_URI_ICA
-# Pour forcer les SAN ici (au lieu du CSR), décommentez:
-# subjectAltName = @alt_names
-# [ alt_names ]
-# DNS.1 = $LEAF_FQDN
 EOF
 
-# CRL de l'ICA
+# Intermediate CRL
 openssl ca -config "$CA_DIR/openssl-ica.cnf" -gencrl -out "$CA_DIR/crl/intermediate.crl.pem"
 
-### ====== LEAF signé par l’ICA ======
-# Clé + CSR (avec SAN)
+### ====== Leaf Certificate ======
 openssl genrsa -out "$CA_DIR/private/$LEAF_FQDN.key.pem" 2048
 chmod 600 "$CA_DIR/private/$LEAF_FQDN.key.pem"
 
@@ -161,27 +152,24 @@ openssl req -new -sha256 \
   -out "$CA_DIR/csr/$LEAF_FQDN.csr.pem" \
   -addext "subjectAltName=DNS:$LEAF_FQDN"
 
-# Signature du LEAF par l'ICA (profil serveur -> CRL de l'ICA)
+# Sign leaf with ICA
 openssl ca -batch -config "$CA_DIR/openssl-ica.cnf" \
   -in "$CA_DIR/csr/$LEAF_FQDN.csr.pem" \
   -out "$CA_DIR/certs/$LEAF_FQDN.crt.pem" \
   -extensions v3_server
 
-# Chaîne pour serveur (leaf + ICA)
+# Leaf fullchain
 cat "$CA_DIR/certs/$LEAF_FQDN.crt.pem" "$CA_DIR/certs/ica.crt.pem" > "$CA_DIR/certs/$LEAF_FQDN.fullchain.pem"
 
-### ====== Vérifs & infos ======
-# Vérifie la chaîne du LEAF avec la chaîne ICA (ICA + ROOT)
+### ====== Verification ======
 openssl verify -CAfile "$CA_DIR/certs/ica-chain.pem" "$CA_DIR/certs/$LEAF_FQDN.crt.pem"
 
-# Affiche les extensions du LEAF
 openssl x509 -in "$CA_DIR/certs/$LEAF_FQDN.crt.pem" -noout -text | sed -n '/X509v3 extensions:/,/Signature Algorithm/p'
 
-echo "OK : Root, ICA, CRL root/ICA et Leaf générés (structure à plat)."
+echo "OK: Root, Intermediate, CRLs, and Leaf generated (flat structure)."
 echo " - Root CA      : $CA_DIR/certs/ca.crt.pem"
-echo " - ICA          : $CA_DIR/certs/ica.crt.pem"
+echo " - Intermediate : $CA_DIR/certs/ica.crt.pem"
 echo " - Leaf         : $CA_DIR/certs/$LEAF_FQDN.crt.pem"
-echo " - Leaf chain   : $CA_DIR/certs/$LEAF_FQDN.fullchain.pem"
-echo " - CRL Root     : $CA_DIR/crl/ca.crl.pem            (URI: $CRL_URI_ROOT)"
-echo " - CRL ICA      : $CA_DIR/crl/intermediate.crl.pem  (URI: $CRL_URI_ICA)"
-
+echo " - Leaf fullchain : $CA_DIR/certs/$LEAF_FQDN.fullchain.pem"
+echo " - CRL Root     : $CA_DIR/crl/ca.crl.pem    (URI: $CRL_URI_ROOT)"
+echo " - CRL Intermediate : $CA_DIR/crl/intermediate.crl.pem  (URI: $CRL_URI_ICA)"
