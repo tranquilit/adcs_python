@@ -45,8 +45,8 @@ def define_template(*, app_conf, kerberos_user=None ):
         renewal_seconds *= 2
 
     return {
-        "common_name": "adcswebuser (CB)",
-        "template_oid": {"value": "1.3.6.1.4.1.311.21.8.999.1", "name": "adcswebuser_cb"},
+        "common_name": "adcswebuser",
+        "template_oid": {"value": "1.3.6.1.4.1.311.21.8.999.1", "name": "adcswebuser"},
         "ca_references": ["ca-1"],
 
         "policy_schema": 2,
