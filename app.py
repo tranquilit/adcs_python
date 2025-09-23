@@ -151,7 +151,12 @@ def ces_service(CANAME):
     )
 
     tmap = { (t.get("template_oid") or {}).get("value"): t for t in templates_for_user }
-    tpl = tmap.get(info.get('oid'))
+    tmap_name = { t.get("common_name") : t for t in templates_for_user }
+
+    if info.get('oid'):
+        tpl = tmap.get(info.get('oid'))
+    else:
+        tpl = tmap_name.get(info.get('name'))
 
     ca_ref_ids = tpl["__ca_refids"]
     ca = app.confadcs["cas_by_refid"][ca_ref_ids[0]]

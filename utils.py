@@ -266,6 +266,102 @@ def _parse_template_from_csr_bytes(csr_der: bytes) -> dict:
     return tpl
 
 
+
+
+MS_TPL_NAME_OID = "1.3.6.1.4.1.311.20.2"
+MS_TPL_V2_OID   = "1.3.6.1.4.1.311.21.7"
+EXT_REQ_OID     = "1.2.840.113549.1.9.14"  # extensionRequest
+
+def _decode_ms_template_value(data: bytes) -> str | None:
+    """Essaye de décoder la valeur du template (souvent BMPString/UTF16)."""
+    # 1) Tentative ASN.1 générique
+    try:
+        anyv = a_core.Asn1Value.load(data)
+        if isinstance(anyv.native, str):
+            return anyv.native
+        if isinstance(anyv, a_core.OctetString):
+            inner = anyv.native if isinstance(anyv.native, (bytes, bytearray)) else anyv.contents
+            try:
+                inner_any = a_core.Asn1Value.load(inner)
+                if isinstance(inner_any.native, str):
+                    return inner_any.native
+            except Exception:
+                pass
+    except Exception:
+        pass
+    # 2) Replis sur encodages usuels
+    for enc in ("utf-16-be", "utf-16-le", "utf-8", "latin1"):
+        try:
+            return data.decode(enc)
+        except Exception:
+            continue
+    return None
+
+def extract_ms_template_from_csr_der(csr_der: bytes) -> dict:
+    """
+    Extrait le template Microsoft depuis un CSR (DER).
+    Retour: {"name": <str|None>, "oid": <str|None>}
+      - name : OID 1.3.6.1.4.1.311.20.2 (nom du template)
+      - oid  : OID 1.3.6.1.4.1.311.21.7 (template v2) si présent
+    Cherche à la fois dans les attributs directs et dans extensionRequest.
+    """
+    req = a_csr.CertificationRequest.load(csr_der)
+    cri = req["certification_request_info"]
+    attrs = cri["attributes"]
+
+    tpl_name: str | None = None
+    tpl_oid: str | None = None
+
+    for attr in attrs:
+        dotted = attr["type"].dotted
+
+        # Attribut direct : nom du template
+        if dotted == MS_TPL_NAME_OID and tpl_name is None:
+            try:
+                tpl_name = _decode_ms_template_value(attr["values"][0].contents)
+            except Exception:
+                pass
+
+        # Attribut direct : OID template v2
+        if dotted == MS_TPL_V2_OID and tpl_oid is None:
+            try:
+                seq = core.Sequence.load(attr["values"][0].contents)
+                tpl_oid = seq[0].native
+            except Exception:
+                pass
+
+        # extensionRequest -> Extensions
+        if dotted == EXT_REQ_OID:
+            val0 = attr["values"][0]
+            exts = getattr(val0, "parsed", val0)  # selon versions asn1crypto
+            if isinstance(exts, a_x509.Extensions):
+                for ext in exts:
+                    ext_oid = ext["extn_id"].dotted
+                    ev = ext["extn_value"]
+
+                    if ext_oid == MS_TPL_V2_OID and tpl_oid is None:
+                        parsed = getattr(ev, "parsed", None)
+                        if parsed is not None:
+                            try:
+                                tpl_oid = parsed[0].native
+                            except Exception:
+                                pass
+                        else:
+                            data = ev.native if isinstance(ev.native, (bytes, bytearray)) else ev.contents
+                            try:
+                                seq = core.Sequence.load(data)
+                                tpl_oid = seq[0].native
+                            except Exception:
+                                pass
+
+                    if ext_oid == MS_TPL_NAME_OID and tpl_name is None:
+                        data = ev.native if isinstance(ev.native, (bytes, bytearray)) else ev.contents
+                        tpl_name = _decode_ms_template_value(data)
+
+    return {"name": tpl_name, "oid": tpl_oid}
+
+
+
 def exct_csr_from_cmc(p7_der: bytes) -> Tuple[bytes, int, dict]:
     """
     Try, in this order, to extract a CSR and its bodyPartID from a wrapped CMC
@@ -333,7 +429,7 @@ def exct_csr_from_cmc(p7_der: bytes) -> Tuple[bytes, int, dict]:
         # Ultimate fallback: some clients send just a “naked” CSR
         direct = csr.CertificationRequest.load(p7_der)
         csr_bytes = direct.dump()
-        return csr_bytes, 0, _parse_template_from_csr_bytes(csr_bytes)
+        return csr_bytes, 0, extract_ms_template_from_csr_der(csr_bytes)
 
 
 # -----------------------------------------------------------------------------
