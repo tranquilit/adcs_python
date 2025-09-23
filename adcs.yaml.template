@@ -23,8 +23,8 @@ cas:
     enroll_permission: true
     default: true
     storage_paths:
-      cert_dir: /opt/adcs_python/ca-1/certs
-      csr_dir:  /opt/adcs_python/ca-1/csr
+      cert_dir: /opt/adcs_python/pki/certs
+      csr_dir:  /opt/adcs_python/pki/csr
 
 auth:
   - kerberos: true
