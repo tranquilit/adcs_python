@@ -66,9 +66,8 @@ Install dependencies
 ---------------------------------------------------------
 
 ```
-
-   apt-get update
-   apt-get install -y \
+apt-get update
+apt-get install -y \
        samba \
        msktutil \
        nginx \
@@ -86,9 +85,9 @@ Retrieve the project
 ---------------------------------------------------------
 
 ```
-   cd /opt
-   git clone https://github.com/sfonteneau/adcs_python.git
-   cd adcs_python
+cd /opt
+git clone https://github.com/sfonteneau/adcs_python.git
+cd adcs_python
 ```   
 
 Create a local CA (for testing)
@@ -97,7 +96,7 @@ Create a local CA (for testing)
 - Edit ``create_ca.sh`` to match your needs.
   
 ```
-   bash create_ca.sh
+bash create_ca.sh
 ```
 
 Initial configuration
@@ -106,7 +105,7 @@ Initial configuration
 - Copy the configuration template:
 
 ```
-     cp -f /opt/adcs_python/adcs.yaml.template /opt/adcs_python/adcs.yaml
+cp -f /opt/adcs_python/adcs.yaml.template /opt/adcs_python/adcs.yaml
 ```
 
 - Edit ``adcs.yaml`` if needed.
@@ -114,15 +113,15 @@ Initial configuration
 - Create the request directory:
 
 ```
-     mkdir /opt/adcs_python/list_request_id
+mkdir /opt/adcs_python/list_request_id
 ```
 
 Configure Nginx certificates
 ---------------------------------------------------------
 
 ```
-   cp -f /opt/adcs_python/pki/private/testadcs.mydomain.lan.key.pem /etc/nginx/key.pem
-   cp -f /opt/adcs_python/pki/certs/testadcs.mydomain.lan.crt.pem /etc/nginx/crt.pem
+cp -f /opt/adcs_python/pki/private/testadcs.mydomain.lan.key.pem /etc/nginx/key.pem
+cp -f /opt/adcs_python/pki/certs/testadcs.mydomain.lan.crt.pem /etc/nginx/crt.pem
 ```
 
 Configure Nginx
@@ -131,13 +130,13 @@ Configure Nginx
 - Replace the default configuration:
 
 ```
-     cp -f /opt/adcs_python/nginx-conf.conf /etc/nginx/sites-enabled/default
+cp -f /opt/adcs_python/nginx-conf.conf /etc/nginx/sites-enabled/default
 ```
 
 - Generate Diffie-Hellman parameters:
 
 ```
-     openssl dhparam -out /etc/ssl/certs/dhparam.pem 2048
+openssl dhparam -out /etc/ssl/certs/dhparam.pem 2048
 ```
 
 Join the Active Directory domain
@@ -148,14 +147,14 @@ Join the Active Directory domain
 - Test with:
 
 ```
-   kinit <user>@MYDOMAIN.LAN
-   net ads join
+kinit <user>@MYDOMAIN.LAN
+net ads join
 ```
 
 - In ``/etc/samba/smb.conf`` add:
 
 ```
-     kerberos method = secrets and keytab
+kerberos method = secrets and keytab
 ```
 
 Manage SPN and Keytab
@@ -170,7 +169,7 @@ HTTP/testadcs.mydomain.lan
 - Generate the keytab:
 
 ```
-     net ads keytab create
+net ads keytab create
 ```
 
 - Add the machine FQDN and IP address to ``/etc/hosts``.
@@ -179,7 +178,7 @@ Start the ADCS Python server
 ---------------------------------------------------------
 
 ```
-   cd /opt/adcs_python && python3 app.py
+cd /opt/adcs_python && python3 app.py
 ```
 
 - (Optional) Create a **systemd** service to start ADCS automatically.
@@ -194,7 +193,7 @@ Test on a Windows client
   → Provide the service URL, for example:
 
 ```
-     https://testadcs.mydomain.lan/CEP
+https://testadcs.mydomain.lan/CEP
 ```
 
   *(The URL can be configured via GPO.)*
