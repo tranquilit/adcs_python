@@ -47,7 +47,7 @@ def define_template(*, app_conf, kerberos_user=None ):
     return {
         "common_name": "adcswebuser (CB)",
         "template_oid": {"value": "1.3.6.1.4.1.311.21.8.999.1", "name": "adcswebuser_cb"},
-        "ca_references": ["Test Intermediate CA"],
+        "ca_references": ["ca-1"],
 
         "policy_schema": 2,
         "revision": {"major": 100, "minor": 3},
