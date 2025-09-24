@@ -81,7 +81,8 @@ def cep_service():
     # Build templates + OIDs for THIS CEP response (user-dependent)
     templates_for_user, oids_for_user = build_templates_for_policy_response(
         app.confadcs,
-        kerberos_user=kerberos_user
+        kerberos_user=kerberos_user,
+        request=request
     )
 
     # Keep an in-memory index (optional, no longer required by CES)
@@ -148,7 +149,8 @@ def ces_service(CANAME):
     # --- IMPORTANT: (re)build templates FOR THIS CES request
     templates_for_user, _ = build_templates_for_policy_response(
         app.confadcs,
-        kerberos_user=kerberos_user
+        kerberos_user=kerberos_user,
+        request=request
     )
 
     tmap = { (t.get("template_oid") or {}).get("value"): t for t in templates_for_user }
@@ -178,6 +180,7 @@ def ces_service(CANAME):
         info=info,
         app_conf=app.confadcs,
         CANAME=CANAME,
+        request=request
     )
 
     csr_path = os.path.join(ca['__path_csr'], f"{request_id}.pem")

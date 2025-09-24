@@ -344,6 +344,7 @@ def build_templates_for_policy_response(
     conf: dict,
     *,
     kerberos_user: str | None = None,
+    request
 ) -> Tuple[list[dict], list[dict]]:
     """
     Build **local** templates for THIS request and a **local** OIDs registry.
@@ -384,6 +385,7 @@ def build_templates_for_policy_response(
         tpl = define_template(
             app_conf=conf,                 # conf remains read-only
             kerberos_user=kerberos_user,
+            request=request
         )
         if not isinstance(tpl, dict):
             raise TypeError(f"{cb['path']}:{cb['define']} must return a dict")

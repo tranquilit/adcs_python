@@ -30,7 +30,7 @@ def _is_member_of(sam_entry: dict, groups: Iterable[str]) -> bool:
 # ============================================================
 # 1) Template definition for CEP (dynamic per user)
 # ============================================================
-def define_template(*, app_conf, kerberos_user=None ):
+def define_template(*, app_conf, kerberos_user=None , request=None):
 
 
     samdbr, sam_entry = search_user(kerberos_user)
@@ -170,6 +170,7 @@ def emit_certificate(
     info: dict,
     app_conf: dict,
     CANAME: Optional[str],
+    request
 ) -> Dict[str, Any]:
 
 

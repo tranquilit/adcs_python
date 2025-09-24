@@ -28,7 +28,7 @@ def _b(entry: dict, attr: str, default: str = "") -> str:
 # ============================================================
 # 1) Template definition for CEP (dynamic per user)
 # ============================================================
-def define_template(*, app_conf, kerberos_user=None ):
+def define_template(*, app_conf, kerberos_user=None , request=None):
     validity_seconds = 31536000       # 1 year
     renewal_seconds = 3628800         # 42 days
     auto_enroll = True
@@ -170,6 +170,7 @@ def emit_certificate(
     info: dict,
     app_conf: dict,
     CANAME: Optional[str],
+    request = None
 ) -> Dict[str, Any]:
 
     samdbr, sam_entry = search_user(kerberos_user)
