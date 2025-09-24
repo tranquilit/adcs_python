@@ -196,3 +196,15 @@ https://testadcs.mydomain.lan/CEP
 
   *(The URL can be configured via GPO.)*
 
+Desired enhancements for the project.
+==========================================
+
+
+- certsrv emulation : Emulate Microsoft ADCS `certsrv` web enrollment.
+
+- EST/SCEP : Support device enrollment via EST and SCEP for network gear, MDM, and IoT bootstrapping.
+
+- ACME : Provide ACME endpoints for automated issuance/renewal (e.g., HTTP-01/DNS-01 challenges).
+
+- Interface management : Offer a simple management surface (CLI/API) for policies, status, and audit tasks.
+
