@@ -242,7 +242,7 @@ def ces_service(CANAME):
         else:
             return Response("Callback(issued) must return 'cert' (x509 or DER bytes)", status=500, content_type="text/plain; charset=utf-8")
 
-
+        ##https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wcce/2524682a-9587-4ac1-8adf-7e8094baa321
         p7b_der = build_adcs_bst_certrep(
             cert_der,
             ca["__certificate_der"],
@@ -284,5 +284,6 @@ if __name__ == '__main__':
     print("Loaded config with", len(decls), "template declaration(s).")
     #app.run(host='127.0.0.1', port=8080)
     serve(app, host="127.0.0.1", port=8080)
+
 
 
