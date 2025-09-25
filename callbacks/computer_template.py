@@ -169,7 +169,7 @@ def emit_certificate(
     template: Optional[dict],
     info: dict,
     app_conf: dict,
-    CANAME: Optional[str],
+    CAID,
     request = None
 ) -> Dict[str, Any]:
 

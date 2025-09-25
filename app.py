@@ -100,13 +100,12 @@ def cep_service():
         templates=templates_for_user,   # static extensions already materialized
         oids=oids_for_user,             # OIDs registry for policyOIDReference / oIDReference
     )
-    
     return Response(response_xml, content_type='application/soap+xml')
 
 
-@app.route('/CES/<CANAME>', methods=['POST'])
+@app.route('/CES/<CAID>', methods=['POST'])
 @auth_required
-def ces_service(CANAME):
+def ces_service(CAID):
     raw = request.data or b""
     if len(raw) > MAX_SOAP_BYTES:
         return Response("Request too large", status=413, content_type="text/plain; charset=utf-8")
@@ -160,9 +159,9 @@ def ces_service(CANAME):
         tpl = tmap.get(info.get('oid'))
     else:
         tpl = tmap_name.get(info.get('name'))
-    ca_ref_ids = tpl["__ca_refids"]
-    ca = app.confadcs["cas_by_refid"][ca_ref_ids[0]]
+    dict_id_ca = {u['id'] : u for u in app.confadcs['cas_list']}
 
+    ca = dict_id_ca[CAID]
 
     cb = (tpl.get("__callback") if tpl else (app.confadcs.get("__default_callback"))) or {}
     cb_path = cb.get("path")
@@ -179,7 +178,7 @@ def ces_service(CANAME):
         template=tpl,
         info=info,
         app_conf=app.confadcs,
-        CANAME=CANAME,
+        CAID=CAID,
         request=request
     )
 
@@ -198,7 +197,7 @@ def ces_service(CANAME):
     status = str(result["status"]).lower()
 
 
-    ces_uri = f"{_https_base_url()}/CES/{CANAME}"
+    ces_uri = f"{_https_base_url()}/CES/{CAID}"
     if status in ("pending", "denied"):
 
         status_text = (result.get("status_text") or

@@ -298,8 +298,7 @@ def load_yaml_conf(path="adcs.yaml"):
 
         ces_path = ca.get("urls", {}).get("ces_path")
         if not ces_path:
-            ca_name_encoded = quote(ca.get("display_name", "CA"), safe='')
-            ca["__ces_path"] = f"/CES/{ca_name_encoded}"
+            ca["__ces_path"] = f"/CES/{ca['id']}"
         else:
             ca["__ces_path"] = ces_path
 
