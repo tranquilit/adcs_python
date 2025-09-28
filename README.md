@@ -119,7 +119,7 @@ Configure Nginx certificates
 
 ```
 cp -f /opt/adcs_python/pki/private/testadcs.mydomain.lan.key.pem /etc/nginx/key.pem
-cp -f /opt/adcs_python/pki/certs/testadcs.mydomain.lan.crt.pem /etc/nginx/crt.pem
+cp -f /opt/adcs_python/pki/certs/testadcs.mydomain.lan.fullchain.pem /etc/nginx/crt.pem
 ```
 
 Configure Nginx
