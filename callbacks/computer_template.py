@@ -30,7 +30,7 @@ def _b(entry: dict, attr: str, default: str = "") -> str:
 # ============================================================
 
 template_oid           = "1.3.6.1.4.1.311.21.8.999.3"
-tamplate_name          = "adcswebcomputer"
+template_name          = "adcswebcomputer"
 template_major_version = 100
 template_minor_version = 3
 auto_enroll            = True
