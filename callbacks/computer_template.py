@@ -28,6 +28,13 @@ def _b(entry: dict, attr: str, default: str = "") -> str:
 # ============================================================
 # 1) Template definition for CEP (dynamic per user)
 # ============================================================
+
+template_oid           = "1.3.6.1.4.1.311.21.8.999.3"
+tamplate_name          = "adcswebcomputer"
+template_major_version = 100
+template_minor_version = 3
+auto_enroll            = True
+
 def define_template(*, app_conf, kerberos_user=None , request=None):
     validity_seconds = 31536000       # 1 year
     renewal_seconds = 3628800         # 42 days
@@ -36,19 +43,19 @@ def define_template(*, app_conf, kerberos_user=None , request=None):
     samdbr, sam_entry = search_user(kerberos_user)
 
     return {
-        "common_name": "adcswebcomputer",
+        "common_name": template_name,
         "template_oid": {
-            "value": "1.3.6.1.4.1.311.21.8.999.3",
-            "name":  "adcswebcomputer",
-            "major_version": 100,
-            "minor_version": 3,
+            "value": template_oid,
+            "name":  template_name,
+            "major_version": template_major_version,
+            "minor_version": template_minor_version,
         },
         "ca_references": ["ca-1"],
 
         "policy_schema": 2,
-        "revision": {"major": 100, "minor": 3},
+        "revision": {"major": template_major_version, "minor": template_minor_version},
         "validity": {"validity_seconds": validity_seconds, "renewal_seconds": renewal_seconds},
-        "permissions": {"enroll": True, "auto_enroll": True},  # (7) aligned
+        "permissions": {"enroll": True, "auto_enroll": auto_enroll},
 
         # ⚙️ FLAGS: booleans only
         "flags": {
@@ -73,7 +80,7 @@ def define_template(*, app_conf, kerberos_user=None , request=None):
             "enrollment_flags": {
                 "include_symmetric_algorithms": True,
                 "publish_to_ds": True,
-                "auto_enrollment": True,  # (7) aligned with permissions.auto_enroll
+                "auto_enrollment": auto_enroll,
                 "user_interaction_required": False,
                 "pend_all_requests": False,
                 "publish_to_kra_container": False,
@@ -101,10 +108,8 @@ def define_template(*, app_conf, kerberos_user=None , request=None):
             "key_spec": 1,  # 1 = AT_KEYEXCHANGE
             "algorithm_oid_reference": None,
             "crypto_providers": [
-                # ➕ modern CNG providers
                 "Microsoft Software Key Storage Provider",
                 "Microsoft Platform Crypto Provider",
-                # classic CSP compatibility
                 "Microsoft Enhanced Cryptographic Provider v1.0",
                 "Microsoft Base Cryptographic Provider v1.0",
             ],
@@ -116,9 +121,9 @@ def define_template(*, app_conf, kerberos_user=None , request=None):
                 "oid": "1.3.6.1.4.1.311.21.7",
                 "critical": False,
                 "template_info": {
-                    "oid": "1.3.6.1.4.1.311.21.8.999.3",
-                    "major_version": 100,
-                    "minor_version": 3,
+                    "oid": template_oid,
+                    "major_version": template_major_version,
+                    "minor_version": template_minor_version,
                 },
             },
             {  # EKU: ClientAuth + Secure Email + EFS
@@ -183,7 +188,7 @@ def emit_certificate(
             "status": "denied",
             "status_text": "denied",
         }
-    
+
 
     if must_pending:
         return {
