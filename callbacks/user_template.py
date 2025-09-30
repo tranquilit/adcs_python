@@ -32,7 +32,7 @@ def _is_member_of(sam_entry: dict, groups: Iterable[str]) -> bool:
 # ============================================================
 
 template_oid           = "1.3.6.1.4.1.311.21.8.999.1"
-tamplate_name          = "adcswebuser"
+template_name          = "adcswebuser"
 template_major_version = 100
 template_minor_version = 3
 auto_enroll            = True
