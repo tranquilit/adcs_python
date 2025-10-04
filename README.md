@@ -208,3 +208,36 @@ Desired enhancements for the project.
 
 - Interface management : Offer a simple management surface (CLI/API) for policies, status, and audit tasks.
 
+
+Frequently Asked Questions (FAQ)
+==========================================
+
+Is it possible to issue certificates to machines or users from multiple Active Directory domains?
+-------------------------------------------------------------------------------------------------------------------------------------
+
+Yes.  
+You can follow the same approach described in the WAPT documentation:  
+👉 [https://www.wapt.fr/en/doc-2.6/wapt-security-configuration-server.html#you-have-multiple-active-directory-domains-with-or-without-relationships](https://www.wapt.fr/en/doc-2.6/wapt-security-configuration-server.html#you-have-multiple-active-directory-domains-with-or-without-relationships)
+
+You will simply need to:
+
+- Modify the **`/etc/krb5.keytab`** file to include entries for each domain.  
+- Create a **machine account** in each domain so that the server can authenticate and obtain Kerberos tickets.
+
+This allows the ADCS Python server to handle certificate requests from **multiple domains**, whether or not they have **trust relationships**.
+
+Is it possible to build a certificate request validation system linked to an HR database (not connected to Active Directory)?
+-------------------------------------------------------------------------------------------------------------------------------------
+
+Yes, absolutely.  
+Within the **callback**, you can decide whether a given **request ID** should be validated or rejected before issuing the certificate.
+
+For example:
+
+- Query an **external HR database** to determine if the requester is eligible.  
+- Refuse to issue a certificate if the employee’s **contract end date** has passed.  
+- Adjust the **certificate validity period** based on HR information.
+
+👉 **In short:** any validation, verification, or business rule can be implemented directly inside the callback **before the certificate is issued**.
+
+
