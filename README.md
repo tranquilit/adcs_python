@@ -242,4 +242,16 @@ For example:
 
 👉 **In short:** any validation, verification, or business rule can be implemented directly inside the callback **before the certificate is issued**.
 
+I am a certificate provider and I would like to offer this service, but authentication is based on username/password. Is it possible?
+-------------------------------------------------------------------------------------------------------------------------------------
 
+Yes.  
+
+A **callback for HTTP Basic authentication** (`username/password`) is already available:  
+👉 `callbacks/auth_basic_template.py`
+
+In this callback, you receive both the **username** and **password** entered by the user.  
+It is up to you to implement and validate the authentication logic (for example, by checking against an external database or API).
+
+⚠️ **Important:**  
+Make sure your authentication process responds **within the allowed time frame** - otherwise, the request will **timeout** and fail.
