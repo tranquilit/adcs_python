@@ -52,12 +52,12 @@ def auth_required(f):
         username_el = root.find('.//o:Username', NS)
         password_el = root.find('.//o:Password', NS)
 
-        if username_el:    
+        if username_el != None:    
             username_xml = username_el.text
         else: 
             username_xml = ''
 
-        if password_el:
+        if password_el != None:
             password_xml = password_el.text
         else: 
             password_xml = ''
