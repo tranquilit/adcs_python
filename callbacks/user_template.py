@@ -115,12 +115,21 @@ def define_template(*, app_conf, kerberos_user=None , request=None):
             "minimal_key_length": 2048,
             "key_spec": 1,
             "algorithm_oid_reference": None,
+
+            
             "crypto_providers": [
                 "Microsoft Software Key Storage Provider",
                 "Microsoft Platform Crypto Provider",
                 "Microsoft Enhanced Cryptographic Provider v1.0",
                 "Microsoft Base Cryptographic Provider v1.0",
             ],
+
+            # smartcard (test with yubikey)
+            #"crypto_providers": [
+            #    "Microsoft Smart Card Key Storage Provider",
+            #    "Microsoft Base Smart Card Crypto Provider"
+            #],
+            
         },
 
         # IMPORTANT: no NTDS here (dynamic on issuance side)
