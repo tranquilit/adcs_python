@@ -20,6 +20,14 @@ cas:
       certificate_path_pem: /opt/adcs_python/pki/certs/ica.crt.pem
       key_path_pem:        /opt/adcs_python/pki/private/ica.key.pem
       key_passphrase: null
+
+#    hsm:
+#      pkcs11_lib: "/usr/lib/x86_64-linux-gnu/pkcs11/libtpm2_pkcs11.so.1"
+#      token_label: "CA-TOKEN"
+#      key_id: "34633630346136393833366138396332"
+#      key_label: "CA-KEY"   
+#      user_pin_file: "/root/hsm_pin.txt"
+
     enroll_permission: true
     default: true
     storage_paths:
