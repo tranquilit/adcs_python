@@ -46,7 +46,7 @@ def _encode_app_policies(oids):
 
 def _encode_key_usage(bits_map: dict) -> bytes:
     """
-    KeyUsage (2.5.29.15) -> DER BIT STRING (minimal)
+    KeyUsage (2.5.29.15) -> DER BIT STRING (minimal).
     Order (i = bit index): 0..8 in the standard order.
     """
     order = [
@@ -88,8 +88,8 @@ def _encode_template_info(oid: str, major: int, minor: int):
 
 def _materialize_required_extensions_static_in_place(tpl: dict):
     """
-    For each “human” extension of the template, compute DER + base64 if static,
-    mark dynamic ones (ntds_security/dynamic) without materializing.
+    For each “human” extension of the template, compute DER + base64 if it is static,
+    and mark dynamic ones (ntds_security/dynamic) without materializing them.
     """
     items = tpl.get("required_extensions", []) or []
     for ext in items:
@@ -97,7 +97,7 @@ def _materialize_required_extensions_static_in_place(tpl: dict):
         if not oid:
             raise ValueError("required_extensions item without 'oid'")
 
-        # Dynamic extensions not materialized for CEP
+        # Dynamic extensions are not materialized for CEP
         if "ntds_security" in ext or "dynamic" in ext:
             ext["__dynamic"] = True
             ext["__der"] = None
@@ -135,7 +135,7 @@ def _materialize_required_extensions_static_in_place(tpl: dict):
         else:
             raise ValueError(
                 f"Extension {oid} has no recognized block. "
-                f"Expected: eku_oids, key_usage, template_info, app_policies, ntds_security/dynamic."
+                f"Expected: eku_oids, key_usage, template_info, app_policies, or ntds_security/dynamic."
             )
 
         ext["__der"] = der
@@ -207,7 +207,7 @@ def _compile_flags_value_bool_first(val, table: dict, *, field_name: str) -> int
 
 def _compile_flags_block(flags: dict | None, aliases_root: dict) -> dict:
     """
-    Compile the 4 flag families to ints, using the canonical table.
+    Compile the 4 flag families to integers, using the canonical table.
     """
     flags = dict(flags or {})
     for key in ("private_key_flags", "subject_name_flags", "enrollment_flags", "general_flags"):
@@ -223,6 +223,89 @@ def _pem_to_inner_b64(pem_text: str) -> str:
     if len(parts) < 3:
         raise ValueError("Invalid PEM (missing headers)")
     return "".join(parts[2].strip().splitlines())
+
+
+# --- CA keys: PEM or HSM (no environment variables) ---------------------------
+
+def _load_ca_key(ca: dict):
+    """
+    Load the CA private key as either:
+      - PEM mode (legacy) if ca['pem'] contains key_path_pem
+      - HSM mode if ca['hsm'] is present
+
+    HSM block schema (no environment variables used):
+      hsm.pkcs11_lib    : path to PKCS#11 library (.so/.dll)
+      hsm.token_label   : token label
+      hsm.key_label     : private key label (or)
+      hsm.key_id        : CKA_ID as hex "a1b2c3..."
+      hsm.user_pin      : PIN as plain text (dev)
+      hsm.user_pin_file : path to a file whose first line contains the PIN (recommended)
+    """
+    from cryptography.hazmat.primitives import serialization
+
+    pem = ca.get("pem", {}) or {}
+    hsm = ca.get("hsm", {}) or {}
+
+    has_pem_key = bool(pem.get("key_path_pem"))
+    has_hsm     = bool(hsm)
+
+    if has_pem_key and has_hsm:
+        raise ValueError(f"CA '{ca.get('id','?')}': specify either 'pem.key_path_pem' or 'hsm', not both.")
+
+    if not has_pem_key and not has_hsm:
+        raise ValueError(f"CA '{ca.get('id','?')}': no key defined (expected 'pem.key_path_pem' or 'hsm' block).")
+
+    # --- PEM mode (as before)
+    if has_pem_key:
+        key_path = pem.get("key_path_pem")
+        key_pass = pem.get("key_passphrase")
+        with open(key_path, "rb") as f:
+            key_bytes = f.read()
+        return serialization.load_pem_private_key(
+            key_bytes, password=key_pass.encode() if key_pass else None
+        )
+
+    # --- HSM mode (PKCS#11)
+    pkcs11_lib    = hsm.get("pkcs11_lib")
+    token_label   = hsm.get("token_label")
+    key_label     = hsm.get("key_label")
+    key_id        = hsm.get("key_id")  # bytes or hex str (normalized by myhsm)
+    user_pin      = hsm.get("user_pin")  # string or null
+    user_pin_file = hsm.get("user_pin_file")  # path to PIN file
+
+    if not pkcs11_lib or not token_label:
+        raise ValueError(f"CA '{ca.get('id','?')}': hsm.pkcs11_lib and hsm.token_label are required.")
+
+    if not (key_id or key_label):
+        raise ValueError(f"CA '{ca.get('id','?')}': specify hsm.key_id (hex) OR hsm.key_label.")
+
+    # Resolve PIN: the file takes precedence if provided
+    if user_pin_file:
+        try:
+            with open(user_pin_file, "r", encoding="utf-8") as f:
+                first_line = f.readline()
+            user_pin = (first_line or "").strip()
+        except Exception as e:
+            raise ValueError(f"Could not read hsm.user_pin_file='{user_pin_file}': {e}") from e
+
+    # user_pin may remain empty if the token does not require a PIN (rare)
+    if user_pin is None:
+        user_pin = ""
+
+    try:
+        from myhsm import HSMRSAPrivateKey
+    except Exception as e:
+        raise RuntimeError("Module 'myhsm' not found. Place 'myhsm.py' next to 'adcs_config.py'.") from e
+
+    return HSMRSAPrivateKey(
+        lib_path=pkcs11_lib,
+        token_label=token_label,
+        user_pin=user_pin,
+        key_label=key_label,
+        key_id=key_id,
+        rw=True,
+        login_on_init=True,
+    )
 
 
 def load_yaml_conf(path="adcs.yaml"):
@@ -278,10 +361,10 @@ def load_yaml_conf(path="adcs.yaml"):
             raise ValueError("Inline PEM not allowed. Use pem.certificate_path_pem.")
 
         cert_path = pem.get("certificate_path_pem")
-        key_path  = pem.get("key_path_pem")
-        if not cert_path or not key_path:
-            raise ValueError("Each CA must define pem.certificate_path_pem and pem.key_path_pem")
+        if not cert_path:
+            raise ValueError("Each CA must define pem.certificate_path_pem (public certificate path)")
 
+        # Read the CA public certificate (unchanged)
         with open(cert_path, "r", encoding="utf-8") as f:
             cert_pem = f.read()
         cert_b64 = _pem_to_inner_b64(cert_pem)
@@ -289,12 +372,8 @@ def load_yaml_conf(path="adcs.yaml"):
         ca["__certificate_b64"] = cert_b64
         ca["__certificate_der"] = base64.b64decode(cert_b64)
 
-        key_pass = pem.get("key_passphrase")
-        with open(key_path, "rb") as f:
-            key_bytes = f.read()
-        ca["__key_obj"] = serialization.load_pem_private_key(
-            key_bytes, password=key_pass.encode() if key_pass else None
-        )
+        # CA private key: PEM (legacy) or HSM (new)
+        ca["__key_obj"] = _load_ca_key(ca)
 
         ces_path = ca.get("urls", {}).get("ces_path")
         if not ces_path:
@@ -346,8 +425,8 @@ def build_templates_for_policy_response(
     request
 ) -> Tuple[list[dict], list[dict]]:
     """
-    Build **local** templates for THIS request and a **local** OIDs registry.
-    Does **not** modify conf (no writes into conf["templates_*"] nor conf["oids_*"]).
+    Build **per-request** templates and a **per-request** OIDs registry.
+    Does **not** mutate the global conf (no writes into conf["templates_*"] nor conf["oids_*"]).
     Returns: (templates_list, oids_list)
     """
 
