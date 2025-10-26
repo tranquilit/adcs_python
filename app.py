@@ -204,7 +204,7 @@ def ces_service(CAID):
 
     ces_uri = f"{_https_base_url()}/CES/{CAID}"
 
-    p7b_der = result.get("p7b_der")
+    pkcs7_der = result.get("pkcs7_der")
 
     if status in ("pending", "denied"):
 
@@ -212,7 +212,7 @@ def ces_service(CAID):
                        ("Waiting for processing" if status == "pending" else "Denied"))
     
 
-        if not p7b_der:
+        if not pkcs7_der:
             pkcs7_der = build_adcs_bst_pkiresponse(
                 ca_der=ca["__certificate_der"],
                 ca_key=ca["__key_obj"],
@@ -255,16 +255,15 @@ def ces_service(CAID):
 
         ##https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wcce/2524682a-9587-4ac1-8adf-7e8094baa321
         
-        if not p7b_der:
-
-            p7b_der = build_adcs_bst_certrep(
+        if not pkcs7_der:
+            pkcs7_der = build_adcs_bst_certrep(
                 cert_der,
                 ca["__certificate_der"],
                 ca["__key_obj"],
                 body_part_id
             )
     
-        b64_p7 = format_b64_for_soap(p7b_der)
+        b64_p7 = format_b64_for_soap(pkcs7_der)
         b64_leaf = format_b64_for_soap(cert_der)
 
 
