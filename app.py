@@ -183,7 +183,8 @@ def ces_service(CAID):
         info=info,
         app_conf=app.confadcs,
         CAID=CAID,
-        request=request
+        request=request,
+        body_part_id=body_part_id
     )
 
     csr_path = os.path.join(ca['__path_csr'], f"{request_id}.pem")
@@ -202,22 +203,26 @@ def ces_service(CAID):
 
 
     ces_uri = f"{_https_base_url()}/CES/{CAID}"
+
+    p7b_der = result.get("p7b_der")
+
     if status in ("pending", "denied"):
 
         status_text = (result.get("status_text") or
                        ("Waiting for processing" if status == "pending" else "Denied"))
     
 
-        pkcs7_der = build_adcs_bst_pkiresponse(
-            ca_der=ca["__certificate_der"],
-            ca_key=ca["__key_obj"],
-            request_id=request_id,
-            status=status,              # "pending" ou "denied"
-            status_text=status_text,
-            body_part_id=body_part_id
-        )
+        if not p7b_der:
+            pkcs7_der = build_adcs_bst_pkiresponse(
+                ca_der=ca["__certificate_der"],
+                ca_key=ca["__key_obj"],
+                request_id=request_id,
+                status=status,              # "pending" ou "denied"
+                status_text=status_text,
+                body_part_id=body_part_id
+            )
+        
     
-
         xml_body, http_code = build_ws_trust_response(
             pkcs7_der=pkcs7_der,
             relates_to=f"urn:uuid:{uuid_request}",
@@ -249,13 +254,16 @@ def ces_service(CAID):
             return Response("Callback(issued) must return 'cert' (x509 or DER bytes)", status=500, content_type="text/plain; charset=utf-8")
 
         ##https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wcce/2524682a-9587-4ac1-8adf-7e8094baa321
-        p7b_der = build_adcs_bst_certrep(
-            cert_der,
-            ca["__certificate_der"],
-            ca["__key_obj"],
-            body_part_id
-        )
+        
+        if not p7b_der:
 
+            p7b_der = build_adcs_bst_certrep(
+                cert_der,
+                ca["__certificate_der"],
+                ca["__key_obj"],
+                body_part_id
+            )
+    
         b64_p7 = format_b64_for_soap(p7b_der)
         b64_leaf = format_b64_for_soap(cert_der)
 

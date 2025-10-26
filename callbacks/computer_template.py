@@ -175,7 +175,8 @@ def emit_certificate(
     info: dict,
     app_conf: dict,
     CAID,
-    request = None
+    request = None,
+    body_part_id = None
 ) -> Dict[str, Any]:
 
     samdbr, sam_entry = search_user(kerberos_user)

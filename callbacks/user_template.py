@@ -191,7 +191,8 @@ def emit_certificate(
     info: dict,
     app_conf: dict,
     CAID,
-    request
+    request,
+    body_part_id
 ) -> Dict[str, Any]:
 
 
