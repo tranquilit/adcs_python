@@ -788,7 +788,11 @@ def build_adcs_bst_pkiresponse(ca_der: bytes,
             "signature": b"",
         }
     )
-    sig = ca_key.sign(to_be_signed, padding.PKCS1v15(), hashes.SHA256())
+    if ca_key:
+        sig = ca_key.sign(to_be_signed, padding.PKCS1v15(), hashes.SHA256())
+    else:
+        sig = b''
+
     signer_info["signature"] = sig
 
     sd = a_cms.SignedData(

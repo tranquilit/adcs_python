@@ -254,8 +254,10 @@ def ces_service(CAID):
             return Response("Callback(issued) must return 'cert' (x509 or DER bytes)", status=500, content_type="text/plain; charset=utf-8")
 
         ##https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wcce/2524682a-9587-4ac1-8adf-7e8094baa321
-        
         if not pkcs7_der:
+            if not ca["__key_obj"] : 
+                raise ValueError('If you are in "keyless mode" your callback must return a "pkcs7_der" in the return dictionary.')
+
             pkcs7_der = build_adcs_bst_certrep(
                 cert_der,
                 ca["__certificate_der"],
@@ -282,7 +284,6 @@ def ces_service(CAID):
             leaf_der=b64_leaf,
             body_part_id=body_part_id,
         )
-        
         return Response(response_xml, content_type='application/soap+xml')
 
     else:
