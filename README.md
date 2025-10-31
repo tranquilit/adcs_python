@@ -73,6 +73,7 @@ apt-get install -y \
        samba \
        msktutil \
        nginx \
+       python3-textual \
        python3-flask \
        python3-asn1crypto \
        python3-kerberos \
