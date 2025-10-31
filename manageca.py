@@ -16,7 +16,7 @@ Dependencies:
 The app reuses your adcs.yaml and your folders (certs, list_request_id).
 
 CLI (no GUI):
-  python toto.py --resign-crl --ca-id ca-1
+  python manageca.py --resign-crl --ca-id ca-1
 """
 from __future__ import annotations
 
