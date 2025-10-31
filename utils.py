@@ -1440,3 +1440,90 @@ def unrevoke(ca_key, ca_cert: cx509.Certificate, serial, crl_path: str, next_upd
     os.makedirs(dirn, exist_ok=True)
     with open(crl_path, "wb") as f:
         f.write(pem_bytes)
+
+
+def resign_crl(
+    ca_key,
+    ca_cert: cx509.Certificate,
+    crl_path: str,
+    *,
+    next_update_hours: int = 8,
+    bump_number: bool = True,
+    hash_name: str = "sha256",
+) -> int:
+    now = datetime.now(timezone.utc)
+    next_update = now + timedelta(hours=int(next_update_hours))
+
+    old_crl = _load_existing_crl(crl_path)
+    revoked_list = _iter_revoked(old_crl)
+
+    if old_crl:
+        try:
+            old_num = old_crl.extensions.get_extension_for_oid(
+                cx509.ExtensionOID.CRL_NUMBER
+            ).value.crl_number
+        except Exception:
+            old_num = 0
+    else:
+        old_num = 0
+
+    new_num = (int(old_num) + 1) if bump_number else (int(old_num) if old_num else 1)
+
+    builder = (
+        cx509.CertificateRevocationListBuilder()
+        .issuer_name(ca_cert.subject)
+        .last_update(now)
+        .next_update(next_update)
+    )
+
+    if old_crl is not None:
+        for ext in old_crl.extensions:
+            if ext.oid == cx509.ExtensionOID.CRL_NUMBER:
+                continue
+            try:
+                builder = builder.add_extension(ext.value, ext.critical)
+            except Exception:
+                pass  # tolérant selon valeurs/versions
+
+    builder = builder.add_extension(cx509.CRLNumber(new_num), critical=False)
+
+    for rc in revoked_list:
+        try:
+            builder = builder.add_revoked_certificate(rc)
+        except Exception:
+            try:
+                minimal = (
+                    cx509.RevokedCertificateBuilder()
+                    .serial_number(rc.serial_number)
+                    .revocation_date(rc.revocation_date)
+                    .build()
+                )
+                builder = builder.add_revoked_certificate(minimal)
+            except Exception:
+                pass
+
+    try:
+        builder.extensions.get_extension_for_class(cx509.AuthorityKeyIdentifier)
+    except Exception:
+        try:
+            aki = cx509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key())
+            builder = builder.add_extension(aki, critical=False)
+        except Exception:
+            pass
+
+    algo = {
+        "sha256": hashes.SHA256,
+        "sha384": hashes.SHA384,
+        "sha512": hashes.SHA512,
+        "sha1":   hashes.SHA1,
+    }.get(hash_name.lower(), hashes.SHA256)()
+
+    new_crl = builder.sign(private_key=ca_key, algorithm=algo)
+    pem_bytes = new_crl.public_bytes(encoding=serialization.Encoding.PEM)
+
+    dirn = os.path.dirname(crl_path) or "."
+    os.makedirs(dirn, exist_ok=True)
+    with open(crl_path, "wb") as f:
+        f.write(pem_bytes)
+
+    return int(new_num)

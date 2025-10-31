@@ -6,6 +6,7 @@ ADCS TUI — Terminal application (SSH) à la “mc”
 • Browse CAs, list certificates, search/sort/filter, view certificate details.
 • Simple revocation (CRL update) via utils.revoke.
 • Unrevoke support via utils.unrevoke.
+• Re-sign CRL on demand (button + Ctrl+R) via utils.resign_crl.
 • Shows whether a certificate is revoked (reads CRL).
 • Keyboard: see help (press '?').
 
@@ -13,14 +14,19 @@ Dependencies:
   pip install textual cryptography PyYAML
 
 The app reuses your adcs.yaml and your folders (certs, list_request_id).
+
+CLI (no GUI):
+  python toto.py --resign-crl --ca-id ca-1
 """
 from __future__ import annotations
 
 import os
+import sys
 import glob
 import csv
 import base64
 import textwrap
+import argparse
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Any, Set
@@ -49,7 +55,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa, dsa, ec
 
 # Your utilities
 from adcs_config import load_yaml_conf
-from utils import revoke, unrevoke  # revoke/unrevoke CRL entries
+from utils import revoke, unrevoke, resign_crl  # revoke/unrevoke/resign CRL entries
 
 # =============================
 # Model & parsing
@@ -202,6 +208,7 @@ class ADCSApp(App):
         Binding("e", "export_csv", "Export CSV"),
         Binding("r", "revoke_current", "Revoke"),          # R
         Binding("u", "unrevoke_current", "Unrevoke"),      # U
+        Binding("ctrl+r", "resign_crl", "Re-sign CRL"),
         Binding("tab", "next_pane", "Next"),
         Binding("shift+tab", "prev_pane", "Prev"),
         Binding("q", "quit", "Quit"),
@@ -239,6 +246,7 @@ class ADCSApp(App):
                 with Container():
                     yield Button("Revoke (R)", id="btn_revoke")
                     yield Button("Unrevoke (U)", id="btn_unrevoke")
+                    yield Button("Re-sign CRL (Ctrl+R)", id="btn_resign_crl")
             with Vertical(id="right"):
                 yield DataTable(id="table", zebra_stripes=True)
                 yield _TextLog(id="detail")
@@ -439,6 +447,7 @@ class ADCSApp(App):
         e : Export current (filtered) list to CSV in cwd
         r : Revoke selected certificate
         u : Unrevoke selected certificate
+        Ctrl+R : Re-sign CRL (bump CRLNumber, refresh dates)
         F5 : Reload CA
         Tab / Shift+Tab : Move between left/right panes
         q : Quit
@@ -562,6 +571,31 @@ class ADCSApp(App):
         except Exception as e:
             self.notify(f"Unrevoke failed: {e}", severity="error", timeout=8)
 
+    def action_resign_crl(self) -> None:
+        """Re-sign the CRL even if nothing changed (bump CRLNumber, refresh dates)."""
+        ca = self.current_ca
+        if not ca:
+            self.notify("No CA selected.", severity="warning")
+            return
+        try:
+            ca_key = ca["__key_obj"]
+            ca_cert_der = ca["__certificate_der"]
+            crl_path = (ca.get("crl") or {}).get("path_crl")
+            if not crl_path:
+                raise KeyError("Missing crl.path_crl in CA config.")
+            ca_cert = x509.load_der_x509_certificate(ca_cert_der)
+        except Exception as e:
+            self.notify(f"CRL re-sign config error: {e}", severity="error", timeout=6)
+            return
+
+        try:
+            new_num = resign_crl(ca_key=ca_key, ca_cert=ca_cert, crl_path=crl_path, bump_number=True)
+            self.revoked_serials = _revoked_serials_set(crl_path)
+            self.load_certs()
+            self.notify(f"CRL re-signed (CRLNumber {new_num}) — {crl_path}", severity="success", timeout=6)
+        except Exception as e:
+            self.notify(f"CRL re-sign failed: {e}", severity="error", timeout=8)
+
     def action_next_pane(self) -> None:
         self.set_focus_next()
 
@@ -603,6 +637,8 @@ class ADCSApp(App):
             self.action_revoke_current()
         elif event.button.id == "btn_unrevoke":
             self.action_unrevoke_current()
+        elif event.button.id == "btn_resign_crl":
+            self.action_resign_crl()
 
     # --- Auto-update the details panel when the row changes ---
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
@@ -709,6 +745,83 @@ class ADCSApp(App):
             else:
                 log.update(msg)
 
+# -----------------------------
+# CLI entrypoint
+# -----------------------------
+
+def _cli_find_ca_by_id(conf: Dict[str, Any], ca_id: str) -> Optional[Dict[str, Any]]:
+    """Find a CA object by its 'id' (preferred) or by display_name fallback."""
+    for ca in (conf.get("cas_list") or []):
+        if str(ca.get("id")) == ca_id or str(ca.get("display_name")) == ca_id:
+            return ca
+    return None
+
+def _cmd_resign_crl(ca_id: str, next_update_hours: int = 8, bump_number: bool = True) -> int:
+    """Re-sign the CRL for the given CA id and print the new CRLNumber."""
+    try:
+        conf = load_yaml_conf("adcs.yaml")
+    except Exception as e:
+        print(f"ERROR: Unable to load adcs.yaml: {e}", file=sys.stderr)
+        return 2
+
+    ca = _cli_find_ca_by_id(conf, ca_id)
+    if not ca:
+        print(f"ERROR: CA '{ca_id}' not found in adcs.yaml", file=sys.stderr)
+        return 3
+
+    try:
+        ca_key = ca["__key_obj"]
+        ca_cert_der = ca["__certificate_der"]
+        crl_path = (ca.get("crl") or {}).get("path_crl")
+        if not crl_path:
+            raise KeyError("Missing crl.path_crl in CA config.")
+        ca_cert = x509.load_der_x509_certificate(ca_cert_der)
+    except Exception as e:
+        print(f"ERROR: CA config invalid for '{ca_id}': {e}", file=sys.stderr)
+        return 4
+
+    try:
+        new_num = resign_crl(
+            ca_key=ca_key,
+            ca_cert=ca_cert,
+            crl_path=crl_path,
+            bump_number=bump_number,
+            next_update_hours=next_update_hours,
+        )
+        print(f"CRL re-signed for '{ca_id}' -> CRLNumber {new_num} (path: {crl_path})")
+        return 0
+    except Exception as e:
+        print(f"ERROR: CRL re-sign failed for '{ca_id}': {e}", file=sys.stderr)
+        return 5
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="ADCS TUI / tools")
+    p.add_argument("--resign-crl", action="store_true",
+                   help="Re-sign the CRL of the specified CA and exit (no GUI).")
+    p.add_argument("--ca-id", type=str,
+                   help="CA identifier as defined in adcs.yaml (field 'id' or 'display_name').")
+    p.add_argument("--no-bump-number", action="store_true",
+                   help="Do not increment CRLNumber when re-signing (keep the same number).")
+    p.add_argument("--next-update-hours", type=int, default=8,
+                   help="Hours until NextUpdate when re-signing (default: 8).")
+    return p
+
 if __name__ == "__main__":
+    parser = _build_arg_parser()
+    args, unknown = parser.parse_known_args()
+
+    # CLI mode: re-sign CRL and exit
+    if args.resign_crl:
+        if not args.ca_id:
+            print("ERROR: --ca-id is required with --resign-crl", file=sys.stderr)
+            sys.exit(1)
+        rc = _cmd_resign_crl(
+            ca_id=args.ca_id,
+            next_update_hours=int(args.next_update_hours),
+            bump_number=(not args.no_bump_number),
+        )
+        sys.exit(rc)
+
+    # Otherwise, start the TUI
     ADCSApp().run()
 
