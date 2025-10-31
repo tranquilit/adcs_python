@@ -199,6 +199,31 @@ https://testadcs.mydomain.lan/CEP
 
   *(The URL can be configured via GPO.)*
 
+🔁 CRL Re-signing & Certificate Re-issuance
+==========================================
+
+Regenerate and re-sign the CRL for the specified CA:
+-----------------------------------------------------------------
+
+```bash
+cd /opt/adcs_python
+./manageca.py --resign-crl --ca-id ca-1
+```
+
+- `--ca-id` is the CA identifier (e.g., `ca-1`).
+- This updates the CRL (version number, `thisUpdate/nextUpdate`, signature).
+
+
+Re-sign / Re-issue a Certificate (GUI)
+-----------------------------------------------------------------
+
+Launch the admin GUI, then select the target certificate to re-sign/re-issue:
+
+```bash
+cd /opt/adcs_python
+./manageca.py
+```  
+
 Desired enhancements for the project.
 ==========================================
 
