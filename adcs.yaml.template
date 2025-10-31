@@ -27,6 +27,9 @@ cas:
 #      key_id: "34633630346136393833366138396332"
 #      key_label: "CA-KEY"   
 #      user_pin_file: "/root/hsm_pin.txt"
+#
+    crl:
+      path_crl: /opt/adcs_python/pki/crl/intermediate.crl.pem
 
     enroll_permission: true
     default: true

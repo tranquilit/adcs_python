@@ -3,8 +3,9 @@
 
 import base64
 import hashlib
+import os
 from typing import Tuple
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 
@@ -32,6 +33,7 @@ from samba.dcerpc import nbt
 # pyasn1 for minimal CMC/PKIResponse structures
 from pyasn1.type import univ, namedtype, namedval, char, useful, constraint
 from pyasn1.codec.der.encoder import encode as der_encode
+from typing import Iterable, List
 
 
 # -----------------------------------------------------------------------------
@@ -1321,3 +1323,120 @@ def build_ces_response(uuid_request: str, uuid_random: str, p7b_der: str, leaf_d
     raw = ET.tostring(env, encoding="utf-8", xml_declaration=True)
     return _prettify(raw)
 
+
+def _load_existing_crl(path: str):
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+        try:
+            return cx509.load_pem_x509_crl(data)
+        except Exception:
+            return cx509.load_der_x509_crl(data)
+    except FileNotFoundError:
+        return None
+
+
+def _iter_revoked(crl) -> List[cx509.RevokedCertificate]:
+    if not crl:
+        return []
+    try:
+        # Beaucoup de versions rendent l'objet CRL itérable
+        return list(crl)
+    except Exception:
+        rc = getattr(crl, "revoked_certificates", None)
+        return list(rc) if rc else []
+
+
+def _next_crl_number(crl) -> int:
+    if not crl:
+        return 1
+    try:
+        ext = crl.extensions.get_extension_for_oid(cx509.ExtensionOID.CRL_NUMBER).value
+        return int(ext.crl_number) + 1
+    except Exception:
+        return 1
+
+
+def _serial_to_int(serial) -> int:
+    if isinstance(serial, str):
+        s = serial.strip().lower()
+        if s.startswith("0x"):
+            return int(s, 16)
+        try:
+            return int(s, 16)
+        except ValueError:
+            return int(s, 10)
+    return int(serial)
+
+
+def revoke(ca_key, ca_cert: cx509.Certificate, serial, crl_path: str, next_update_hours: int = 8) -> None:
+    serial_int = _serial_to_int(serial)
+
+    now = datetime.now(timezone.utc)
+    next_update = now + timedelta(hours=int(next_update_hours))
+
+    old_crl = _load_existing_crl(crl_path)
+    crl_number = _next_crl_number(old_crl)
+
+    builder = (
+        cx509.CertificateRevocationListBuilder()
+        .issuer_name(ca_cert.subject)
+        .last_update(now)
+        .next_update(next_update)
+        .add_extension(cx509.CRLNumber(crl_number), critical=False)
+    )
+
+    for rc in _iter_revoked(old_crl):
+        if rc.serial_number == serial_int:
+            continue
+        builder = builder.add_revoked_certificate(rc)
+
+    rcb = (
+        cx509.RevokedCertificateBuilder()
+        .serial_number(serial_int)
+        .revocation_date(now)
+        .add_extension(cx509.CRLReason(cx509.ReasonFlags.unspecified), critical=False)
+    ).build()
+    builder = builder.add_revoked_certificate(rcb)
+
+    new_crl = builder.sign(private_key=ca_key, algorithm=hashes.SHA256())
+    pem_bytes = new_crl.public_bytes(encoding=serialization.Encoding.PEM)
+
+    dirn = os.path.dirname(crl_path) or "."
+    os.makedirs(dirn, exist_ok=True)
+    with open(crl_path, "wb") as f:
+        f.write(pem_bytes)
+
+
+def unrevoke(ca_key, ca_cert: cx509.Certificate, serial, crl_path: str, next_update_hours: int = 8) -> None:
+    serial_int = _serial_to_int(serial)
+
+    now = datetime.now(timezone.utc)
+    next_update = now + timedelta(hours=int(next_update_hours))
+
+    old_crl = _load_existing_crl(crl_path)
+    if not old_crl:
+        raise FileNotFoundError(f"CRL introuvable à '{crl_path}' — rien à retirer.")
+
+    crl_number = _next_crl_number(old_crl)
+
+    builder = (
+        cx509.CertificateRevocationListBuilder()
+        .issuer_name(ca_cert.subject)
+        .last_update(now)
+        .next_update(next_update)
+        .add_extension(cx509.CRLNumber(crl_number), critical=False)
+    )
+
+    for rc in _iter_revoked(old_crl):
+        if rc.serial_number == serial_int:
+            continue
+        builder = builder.add_revoked_certificate(rc)
+
+    new_crl = builder.sign(private_key=ca_key, algorithm=hashes.SHA256())
+    pem_bytes = new_crl.public_bytes(encoding=serialization.Encoding.PEM)
+
+    dirn = os.path.dirname(crl_path) or "."
+    os.makedirs(dirn, exist_ok=True)
+    with open(crl_path, "wb") as f:
+        f.write(pem_bytes)
