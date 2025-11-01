@@ -7,8 +7,6 @@ import os
 import uuid
 import base64
 import textwrap
-import hashlib
-import datetime
 from defusedxml import ElementTree as ET  # anti-XXE / billion-laughs
 
 from cryptography import x509 as cx509
@@ -20,8 +18,6 @@ from utils import (
     build_adcs_bst_certrep,
     format_b64_for_soap,
     exct_csr_from_cmc,
-    search_user,
-    validate_csr,
     build_adcs_bst_pkiresponse,
     build_ws_trust_response,
     build_get_policies_response,

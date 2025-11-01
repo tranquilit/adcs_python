@@ -24,9 +24,7 @@ from __future__ import annotations
 
 import os
 import sys
-import glob
 import csv
-import base64
 import textwrap
 import argparse
 import stat
@@ -62,12 +60,11 @@ from cryptography.hazmat.primitives import hashes
 
 # Your utilities
 from adcs_config import load_yaml_conf
-from utils import (
+from utils_crt import (
     revoke,
     unrevoke,
     resign_crl,
     issue_cert_with_new_key,
-    # ↓↓↓ nouveaux imports factorisés ↓↓↓
     load_certificate_file,
     get_public_key_info,
     scan_cert_paths,
@@ -84,6 +81,9 @@ CERT_EXTS = {".crt", ".pem", ".cer"}  # laissé si d'autres parties s'y réfère
 FULL_COLUMNS = ["#", "Serial", "Subject", "Valid from", "Valid until",
                 "Days", "Revoked", "Signature", "Public Key", "SHA-256", "File"]
 COMPACT_COLUMNS = ["#", "Serial", "Subject", "Valid until", "Days", "Revoked"]
+
+# Limite d'affichage par défaut (configurable via ADCS_MAX_ROWS)
+MAX_ROWS_DEFAULT = 10000
 
 @dataclass
 class CertRow:
@@ -332,6 +332,7 @@ class ADCSApp(App):
         Binding("ctrl+r", "resign_crl", "Re-sign CRL"),
         Binding("ctrl+n", "open_new_certificate", "New cert"),
         Binding("c", "toggle_compact", "Compact"),
+        Binding("A", "toggle_show_all_rows", "All rows"),
         Binding("tab", "next_pane", "Next"),
         Binding("shift+tab", "prev_pane", "Prev"),
         Binding("q", "quit", "Quit"),
@@ -346,6 +347,10 @@ class ADCSApp(App):
 
     filter_q: reactive[str] = reactive("")
     filter_status: reactive[str] = reactive("")
+
+    # Limitation d’affichage
+    show_all_rows: reactive[bool] = reactive(False)
+    max_rows: reactive[int] = reactive(MAX_ROWS_DEFAULT)
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -440,13 +445,20 @@ class ADCSApp(App):
     
     def _show_detail_current_row(self) -> None:
         table = self._table()
-        rows = self.filtered_rows()
+        rows = self.current_rows()
         if not rows:
             return
         row_idx = getattr(table, "cursor_row", None)
         if row_idx is None or row_idx < 0 or row_idx >= len(rows):
             row_idx = 0
         self.show_detail(rows[row_idx])
+
+    def current_rows(self) -> List[CertRow]:
+        """Renvoie la liste actuellement affichée (limitée ou complète)."""
+        all_rows = self.filtered_rows()
+        if self.show_all_rows or self.max_rows <= 0:
+            return all_rows
+        return all_rows[: self.max_rows]
 
     # ---------- Responsive helpers ----------
     def _apply_layout_mode(self) -> None:
@@ -483,6 +495,14 @@ class ADCSApp(App):
     # ---------- Init ----------
     def on_mount(self) -> None:
         self.query_one(Status).set_text("Loading configuration…")
+        # Lire la limite depuis l'environnement si présent
+        try:
+            env_limit = int(os.getenv("ADCS_MAX_ROWS", "") or "0")
+            if env_limit > 0:
+                self.max_rows = env_limit
+        except Exception:
+            pass
+
         try:
             self.confadcs = load_yaml_conf("adcs.yaml")
         except Exception as e:
@@ -623,7 +643,10 @@ class ADCSApp(App):
             while getattr(table, "row_count", 0):
                 table.remove_row(0)
 
-        rows = self.filtered_rows()
+        all_rows = self.filtered_rows()
+        total = len(all_rows)
+        rows = self.current_rows()
+
         for i, r in enumerate(rows, start=1):
             subj = r.subject
             if self.compact_mode and len(subj) > 48:
@@ -669,7 +692,10 @@ class ADCSApp(App):
 
         ca_name = (self.current_ca.get('display_name') if self.current_ca else '-')
         prefix = "Compact mode — " if self.compact_mode else ""
-        self.query_one(Status).set_text(f"{prefix}{len(rows)} certificates — CA: {ca_name}")
+        limit_note = ""
+        if not self.show_all_rows and total > len(rows):
+            limit_note = f" (limited to {len(rows)}/{total}; press Shift+A to show all)"
+        self.query_one(Status).set_text(f"{prefix}{len(rows)}/{total} certificates — CA: {ca_name}{limit_note}")
 
     # ---------- Actions ----------
     def action_help(self) -> None:
@@ -687,6 +713,7 @@ class ADCSApp(App):
         Ctrl+R : Re-sign CRL (bump CRLNumber, refresh dates)
         Ctrl+N : New certificate (open form)
         c : Toggle compact mode
+        Shift+A : Toggle show all rows (bypass max rows limit)
         F5 : Reload CA
         Tab / Shift+Tab : Move between left/right panes
         q : Quit
@@ -730,7 +757,7 @@ class ADCSApp(App):
 
     def _get_current_row(self) -> Optional[CertRow]:
         table = self._table()
-        rows = self.filtered_rows()
+        rows = self.current_rows()
         if not rows:
             self.notify("No certificates to operate on.", severity="warning")
             return None
@@ -882,6 +909,10 @@ class ADCSApp(App):
 
     def action_prev_pane(self) -> None:
         self.set_focus_previous()
+
+    def action_toggle_show_all_rows(self) -> None:
+        self.show_all_rows = not self.show_all_rows
+        self.refresh_table()
 
     # ---------- UI Events ----------
     def on_select_changed(self, event: Select.Changed) -> None:

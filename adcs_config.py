@@ -3,7 +3,6 @@
 
 import base64
 import yaml
-from urllib.parse import quote
 from typing import Tuple
 
 from asn1crypto import x509 as a_x509, core as a_core
@@ -316,7 +315,7 @@ def load_yaml_conf(path="adcs.yaml"):
     Templates will be built on demand (CEP/CES) via
     build_templates_for_policy_response(...).
     """
-    from cryptography.hazmat.primitives import serialization
+    #from cryptography.hazmat.primitives import serialization
 
     with open(path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
