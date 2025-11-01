@@ -11,31 +11,54 @@ global:
   path_list_request_id : list_request_id
 
 cas:
-  - id: "ca-1"
-    display_name: "Test Intermediate CA"
+
+  - id: "ca1-inter"
+    display_name: "Intermediate CA"
     urls:
-      crl_http:        "http://testadcs.mydomain.lan/crl/intermediate.crl.pem"
-      ca_issuers_http: "http://testadcs.mydomain.lan/certs/ica.crt.pem"
+      crl_http:        "http://testadcs.mydomain.lan/crl/ica/intermediate.crl.pem"
+      ca_issuers_http: "http://testadcs.mydomain.lan/certs/ica/ica.crt.pem"
     pem:
-      certificate_path_pem: /opt/adcs_python/pki/certs/ica.crt.pem
-      key_path_pem:        /opt/adcs_python/pki/private/ica.key.pem
+      certificate_path_pem: /opt/adcs_python/pki/certs/ica/ica.crt.pem
+      key_path_pem:         /opt/adcs_python/pki/private/ica/ica.key.pem
       key_passphrase: null
+
+    crl:
+      path_crl: /opt/adcs_python/pki/crl/ica/intermediate.crl.pem
+
+    enroll_permission: true
+    storage_paths:
+      cert_dir: /opt/adcs_python/pki/newcerts/ica/
+      csr_dir:  /opt/adcs_python/pki/csr/ica/
+
+
+
+  - id: "ca1-root"
+    display_name: "root CA"
+    urls:
+      crl_http:        "http://testadcs.mydomain.lan/crl/root/ca.crl.pem"
+      ca_issuers_http: "http://testadcs.mydomain.lan/certs/root/ca.crt.pem"
+
+    pem:
+      certificate_path_pem: /opt/adcs_python/pki/certs/root/ca.crt.pem
+      key_path_pem:         /opt/adcs_python/pki/private/root/ca.key.pem
+      key_passphrase: null
+
+    crl:
+      path_crl: /opt/adcs_python/pki/crl/root/root.crl.pem
 
 #    hsm:
 #      pkcs11_lib: "/usr/lib/x86_64-linux-gnu/pkcs11/libtpm2_pkcs11.so.1"
-#      token_label: "CA-TOKEN"
-#      key_id: "34633630346136393833366138396332"
-#      key_label: "CA-KEY"   
-#      user_pin_file: "/root/hsm_pin.txt"
-#
-    crl:
-      path_crl: /opt/adcs_python/pki/crl/intermediate.crl.pem
-
+#      token_label: "CA-TOKEN-2"
+#      key_id: "30623531666439663333306165376463"
+#      key_label: "CA-KEY-ICA2-1761401895"   # facultatif mais utile si un module a un comportement exotique
+#      user_pin_file: "/opt/adcs_python/secret/hsm_pin.txt"
+    
     enroll_permission: true
-    default: true
     storage_paths:
-      cert_dir: /opt/adcs_python/pki/certs
-      csr_dir:  /opt/adcs_python/pki/csr
+      cert_dir: /opt/adcs_python/pki/newcerts/root/
+      csr_dir:  /opt/adcs_python/pki/csr/root/
+
+
 
 auth:
   - kerberos: true

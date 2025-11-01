@@ -59,7 +59,7 @@ def define_template(*, app_conf, kerberos_user=None , request=None):
             "major_version": template_major_version,
             "minor_version": template_minor_version,
         },
-        "ca_references": ["ca-1"],
+        "ca_references": ["ca1-inter"],
 
         "policy_schema": 2,
         "revision": {"major": template_major_version, "minor": template_minor_version},
