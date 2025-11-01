@@ -29,7 +29,7 @@ cas:
     storage_paths:
       cert_dir: /opt/adcs_python/pki/newcerts/ica/
       csr_dir:  /opt/adcs_python/pki/csr/ica/
-
+      private_dir: /opt/adcs_python/pki/private/ica/
 
 
   - id: "ca1-root"
@@ -57,7 +57,7 @@ cas:
     storage_paths:
       cert_dir: /opt/adcs_python/pki/newcerts/root/
       csr_dir:  /opt/adcs_python/pki/csr/root/
-
+      private_dir: /opt/adcs_python/pki/private/root/
 
 
 auth:

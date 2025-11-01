@@ -4,7 +4,9 @@
 import base64
 import hashlib
 import os
-from typing import Tuple
+import ipaddress
+import glob
+from typing import Tuple, Iterable, List, Optional, Dict, Any, Set
 from datetime import datetime, timezone, timedelta
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
@@ -20,6 +22,7 @@ from cryptography.hazmat.primitives.asymmetric import (
     ec,
     ed25519,
     ed448,
+    dsa,
 )
 from cryptography.x509.oid import ObjectIdentifier as CObjectIdentifier
 
@@ -33,7 +36,6 @@ from samba.dcerpc import nbt
 # pyasn1 for minimal CMC/PKIResponse structures
 from pyasn1.type import univ, namedtype, namedval, char, useful, constraint
 from pyasn1.codec.der.encoder import encode as der_encode
-from typing import Iterable, List, Optional
 
 
 # -----------------------------------------------------------------------------
@@ -44,11 +46,11 @@ OID_MS_CERT_TEMPLATE_INFO = "1.3.6.1.4.1.311.21.7"
 
 # For PKIResponse (PKIResponse + CMCStatusInfo)
 OID_ID_CCT_PKI_RESPONSE = "1.3.6.1.5.5.7.12.3"  # eContentType for PKIResponse
-OID_ID_CMC_STATUS_INFO  = "1.3.6.1.5.5.7.7.1"    # id-cmc-statusInfo
+OID_ID_CMC_STATUS_INFO = "1.3.6.1.5.5.7.7.1"     # id-cmc-statusInfo
 
 
 # -----------------------------------------------------------------------------
-# Useful ASN.1 structures (CMC/PKIData, NTDS CA Security, etc.)
+# ASN.1 structures (CMC/PKIData, NTDS CA Security, etc.)
 # -----------------------------------------------------------------------------
 
 class _TaggedCertificationRequest(a_cms.Sequence):
@@ -197,10 +199,11 @@ class _MsCertTemplateInfo(a_core.Sequence):
 
 
 # -----------------------------------------------------------------------------
-# ASN.1 helpers
+# Small ASN.1 helpers
 # -----------------------------------------------------------------------------
 
 def _der_wrap_sequence(contents: bytes) -> bytes:
+    """Wrap raw SEQUENCE contents with DER SEQUENCE header."""
     n = len(contents)
     if n < 128:
         return b"\x30" + bytes([n]) + contents
@@ -214,13 +217,13 @@ def _der_wrap_sequence(contents: bytes) -> bytes:
 
 
 # -----------------------------------------------------------------------------
-# CSR parsing (extract CSR from a CMC/PKIData, + read Template OID)
+# CSR parsing (extract CSR from CMC/PKIData and parse MS template)
 # -----------------------------------------------------------------------------
 
 def _parse_template_from_csr_bytes(csr_der: bytes) -> dict:
     """
-    Return a dict {"name","oid","major","minor"} if present in the extensions
-    MS Cert Template Name / Info.
+    Return {"name","oid","major","minor"} if present in Microsoft Template
+    (both Template Name and Template Info).
     """
     tpl = {"name": None, "oid": None, "major": None, "minor": None}
 
@@ -228,6 +231,7 @@ def _parse_template_from_csr_bytes(csr_der: bytes) -> dict:
     cri = csr_obj["certification_request_info"]
 
     for attr in cri["attributes"]:
+        # extensionRequest (1.2.840.113549.1.9.14)
         if attr["type"].dotted != "1.2.840.113549.1.9.14":
             continue
 
@@ -238,6 +242,7 @@ def _parse_template_from_csr_bytes(csr_der: bytes) -> dict:
                 inner_der = ext["extn_value"].parsed.dump()
 
                 if ext_oid == OID_MS_CERT_TEMPLATE_NAME:
+                    # Try multiple string types; fallback on UTF-16-LE decode
                     name = None
                     for typ in (
                         a_core.BMPString,
@@ -268,15 +273,13 @@ def _parse_template_from_csr_bytes(csr_der: bytes) -> dict:
     return tpl
 
 
-
-
 MS_TPL_NAME_OID = "1.3.6.1.4.1.311.20.2"
-MS_TPL_V2_OID   = "1.3.6.1.4.1.311.21.7"
-EXT_REQ_OID     = "1.2.840.113549.1.9.14"  # extensionRequest
+MS_TPL_V2_OID = "1.3.6.1.4.1.311.21.7"
+EXT_REQ_OID = "1.2.840.113549.1.9.14"  # extensionRequest
 
-def _decode_ms_template_value(data: bytes) -> str | None:
-    """Essaye de décoder la valeur du template (souvent BMPString/UTF16)."""
-    # 1) Tentative ASN.1 générique
+def _decode_ms_template_value(data: bytes) -> Optional[str]:
+    """Try to decode the template value (often BMPString/UTF16)."""
+    # 1) Generic ASN.1 attempt
     try:
         anyv = a_core.Asn1Value.load(data)
         if isinstance(anyv.native, str):
@@ -291,7 +294,7 @@ def _decode_ms_template_value(data: bytes) -> str | None:
                 pass
     except Exception:
         pass
-    # 2) Replis sur encodages usuels
+    # 2) Fallback encodings
     for enc in ("utf-16-be", "utf-16-le", "utf-8", "latin1"):
         try:
             return data.decode(enc)
@@ -299,35 +302,34 @@ def _decode_ms_template_value(data: bytes) -> str | None:
             continue
     return None
 
-def extract_ms_template_from_csr_der(csr_der: bytes) -> dict:
+
+def extract_ms_template_from_csr_der(csr_der: bytes) -> Dict[str, Optional[str]]:
     """
-    Extrait le template Microsoft depuis un CSR (DER).
-    Retour: {"name": <str|None>, "oid": <str|None>}
-      - name : OID 1.3.6.1.4.1.311.20.2 (nom du template)
-      - oid  : OID 1.3.6.1.4.1.311.21.7 (template v2) si présent
-    Cherche à la fois dans les attributs directs et dans extensionRequest.
+    Extract Microsoft template from a CSR (DER).
+    Returns {"name": str|None, "oid": str|None}.
+    Looks for both direct attributes and extensionRequest.
     """
     req = csr.CertificationRequest.load(csr_der)
     cri = req["certification_request_info"]
     attrs = cri["attributes"]
 
-    tpl_name: str | None = None
-    tpl_oid: str | None = None
+    tpl_name: Optional[str] = None
+    tpl_oid: Optional[str] = None
 
     for attr in attrs:
         dotted = attr["type"].dotted
 
-        # Attribut direct : nom du template
+        # Direct attribute: template name
         if dotted == MS_TPL_NAME_OID and tpl_name is None:
             try:
                 tpl_name = _decode_ms_template_value(attr["values"][0].contents)
             except Exception:
                 pass
 
-        # Attribut direct : OID template v2
+        # Direct attribute: template v2 OID
         if dotted == MS_TPL_V2_OID and tpl_oid is None:
             try:
-                seq = core.Sequence.load(attr["values"][0].contents)
+                seq = a_core.Sequence.load(attr["values"][0].contents)
                 tpl_oid = seq[0].native
             except Exception:
                 pass
@@ -335,7 +337,7 @@ def extract_ms_template_from_csr_der(csr_der: bytes) -> dict:
         # extensionRequest -> Extensions
         if dotted == EXT_REQ_OID:
             val0 = attr["values"][0]
-            exts = getattr(val0, "parsed", val0)  # selon versions asn1crypto
+            exts = getattr(val0, "parsed", val0)
             if isinstance(exts, a_x509.Extensions):
                 for ext in exts:
                     ext_oid = ext["extn_id"].dotted
@@ -351,7 +353,7 @@ def extract_ms_template_from_csr_der(csr_der: bytes) -> dict:
                         else:
                             data = ev.native if isinstance(ev.native, (bytes, bytearray)) else ev.contents
                             try:
-                                seq = core.Sequence.load(data)
+                                seq = a_core.Sequence.load(data)
                                 tpl_oid = seq[0].native
                             except Exception:
                                 pass
@@ -363,12 +365,11 @@ def extract_ms_template_from_csr_der(csr_der: bytes) -> dict:
     return {"name": tpl_name, "oid": tpl_oid}
 
 
-
 def exct_csr_from_cmc(p7_der: bytes) -> Tuple[bytes, int, dict]:
     """
     Try, in this order, to extract a CSR and its bodyPartID from a wrapped CMC
-    (PKIData in SignedData), then fallback to simplePKIRequest or direct CSR.
-    Return (csr_der, body_part_id, template_info_dict).
+    (PKIData in SignedData), then fall back to simplePKIRequest or direct CSR.
+    Returns (csr_der, body_part_id, template_info_dict).
     """
     try:
         ci = a_cms.ContentInfo.load(p7_der)
@@ -424,7 +425,7 @@ def exct_csr_from_cmc(p7_der: bytes) -> Tuple[bytes, int, dict]:
 
         ct = eci["content_type"].dotted if eci["content_type"] is not None else "unknown"
         raise ValueError(
-            f"Unable to extract a CSR: no TCR, no simplePKIRequest, nor a direct CSR. "
+            "Unable to extract a CSR: no TCR, no simplePKIRequest, nor a direct CSR. "
             f"EncapContentInfo.content_type={ct}"
         )
     except Exception:
@@ -435,7 +436,7 @@ def exct_csr_from_cmc(p7_der: bytes) -> Tuple[bytes, int, dict]:
 
 
 # -----------------------------------------------------------------------------
-# CSR validation (robust: signature always explicitly verified)
+# CSR validation (explicit signature verification)
 # -----------------------------------------------------------------------------
 
 class CSRValidationError(ValueError):
@@ -445,17 +446,16 @@ class CSRValidationError(ValueError):
 def validate_csr(csr_obj: cx509.CertificateSigningRequest) -> None:
     """
     Validate a CSR:
-      - signature (always explicitly verified, not via is_signature_valid)
-      - hash algorithm (SHA-256/384/512) for RSA/ECDSA
+      - explicit signature verification (RSASSA-PKCS1v1_5, ECDSA, or EdDSA)
       - acceptable public key (RSA>=2048 & e>=65537 odd; EC P-256/384/521; Ed25519/Ed448 ok)
     Raise CSRValidationError if invalid.
     """
     pub = csr_obj.public_key()
 
-    # 1) Explicit signature verification, adapted to key type
+    # 1) Explicit signature verification
     try:
         if isinstance(pub, rsa.RSAPublicKey):
-            hash_algo = csr_obj.signature_hash_algorithm  # SHA-2 expected
+            hash_algo = csr_obj.signature_hash_algorithm
             pub.verify(
                 csr_obj.signature,
                 csr_obj.tbs_certrequest_bytes,
@@ -463,7 +463,7 @@ def validate_csr(csr_obj: cx509.CertificateSigningRequest) -> None:
                 hash_algo,
             )
         elif isinstance(pub, ec.EllipticCurvePublicKey):
-            hash_algo = csr_obj.signature_hash_algorithm  # SHA-2 expected
+            hash_algo = csr_obj.signature_hash_algorithm
             pub.verify(
                 csr_obj.signature,
                 csr_obj.tbs_certrequest_bytes,
@@ -478,18 +478,7 @@ def validate_csr(csr_obj: cx509.CertificateSigningRequest) -> None:
     except Exception as e:
         raise CSRValidationError(f"CSR signature verification failed: {e}")
 
-    # 2) Constraints on hash algo (not applicable to EdDSA)
-    # if not isinstance(pub, (ed25519.Ed25519PublicKey, ed448.Ed448PublicKey)):
-    #     try:
-    #         hash_name = csr_obj.signature_hash_algorithm.name.lower()
-    #     except Exception:
-    #         hash_name = ""
-    #     if hash_name not in ("sha256", "sha384", "sha512"):
-    #         raise CSRValidationError(
-    #             f"Disallowed signature hash: {hash_name or 'unknown'} (require SHA-256/384/512)"
-    #         )
-
-    # 3) Constraints on public key
+    # 2) Public key constraints
     if isinstance(pub, rsa.RSAPublicKey):
         key_size = pub.key_size
         if key_size < 2048:
@@ -505,16 +494,16 @@ def validate_csr(csr_obj: cx509.CertificateSigningRequest) -> None:
         allowed = {"secp256r1", "prime256v1", "secp384r1", "secp521r1"}
         if curve not in allowed:
             raise CSRValidationError(f"EC curve not allowed: {curve} (allowed: P-256/384/521)")
-    # Ed25519/Ed448: no extra size constraint
+    # Ed25519/Ed448: no additional constraints
 
 
 # -----------------------------------------------------------------------------
-# Build the BST / PKCS#7 (CES responses like ADCS)
+# BST / PKCS#7 (CES-like responses as in ADCS)
 # -----------------------------------------------------------------------------
 
 def _tbs_signed_attrs(attrs: a_cms.CMSAttributes) -> bytes:
     """
-    Return the SET version (tag 0x31) of the attributes for PKCS#7 signature.
+    Return the SET (tag 0x31) of the attributes for PKCS#7 signature.
     """
     der = attrs.dump()
     return (b"\x31" + der[1:]) if der and der[0] == 0xA0 else der
@@ -574,7 +563,7 @@ def build_adcs_bst_certrep(child_der: bytes, ca_der: bytes, ca_key, cert_req_id:
     signed_data = a_cms.SignedData(
         {
             "version": 3,
-            "digest_algorithms": [digest_algorithms for digest_algorithms in [digest_alg]][0:1],
+            "digest_algorithms": [digest_alg],
             "encap_content_info": encap_content_info,
             "certificates": [ca_cert, leaf_cert],
             "signer_infos": [signer_info],
@@ -593,8 +582,10 @@ class BodyPartID(univ.Integer):
     """BodyPartID ::= INTEGER (0..4294967295)"""
     subtypeSpec = univ.Integer.subtypeSpec + constraint.ValueRangeConstraint(0, 4294967295)
 
+
 class BodyPartList(univ.SequenceOf):
     componentType = BodyPartID()
+
 
 class CMCStatus(univ.Integer):
     namedValues = namedval.NamedValues(
@@ -602,8 +593,10 @@ class CMCStatus(univ.Integer):
         ('confirmRequired', 5), ('popRequired', 6), ('partial', 7),
     )
 
+
 class CMCFailInfo(univ.Integer):
     pass
+
 
 class PendInfo(univ.Sequence):
     componentType = namedtype.NamedTypes(
@@ -611,11 +604,13 @@ class PendInfo(univ.Sequence):
         namedtype.NamedType('pendTime', useful.GeneralizedTime()),
     )
 
+
 class OtherInfo(univ.Choice):
     componentType = namedtype.NamedTypes(
         namedtype.NamedType('failInfo', CMCFailInfo()),
         namedtype.NamedType('pendInfo', PendInfo()),
     )
+
 
 class CMCStatusInfo(univ.Sequence):
     componentType = namedtype.NamedTypes(
@@ -625,11 +620,14 @@ class CMCStatusInfo(univ.Sequence):
         namedtype.OptionalNamedType('otherInfo', OtherInfo()),
     )
 
+
 class AttributeValue(univ.Any):
     pass
 
+
 class AttributeValues(univ.SetOf):
     componentType = AttributeValue()
+
 
 class TaggedAttribute(univ.Sequence):
     componentType = namedtype.NamedTypes(
@@ -638,20 +636,26 @@ class TaggedAttribute(univ.Sequence):
         namedtype.NamedType('attrValues', AttributeValues()),
     )
 
+
 class TaggedAttributeSeq(univ.SequenceOf):
     componentType = TaggedAttribute()
 
+
 class TaggedContentInfo(univ.Sequence):
-    pass  # not used
+    pass  # unused
+
 
 class TaggedContentInfoSeq(univ.SequenceOf):
     componentType = TaggedContentInfo()
 
+
 class OtherMsg(univ.Sequence):
     pass
 
+
 class OtherMsgSeq(univ.SequenceOf):
     componentType = OtherMsg()
+
 
 class PKIResponse(univ.Sequence):
     componentType = namedtype.NamedTypes(
@@ -661,11 +665,12 @@ class PKIResponse(univ.Sequence):
     )
 
 
-def _build_pkiresponse_pending_der(request_id: int,
-                                   status_text: str = "En attente de traitement",
-                                   body_part_id: int = 1) -> bytes:
-    """Construit un PKIResponse minimal avec CMCStatusInfo(pending)."""
-    # CMCStatusInfo
+def _build_pkiresponse_pending_der(
+    request_id: int,
+    status_text: str = "Pending",
+    body_part_id: int = 1
+) -> bytes:
+    """Build a minimal PKIResponse with CMCStatusInfo(pending)."""
     csi = CMCStatusInfo()
     csi.setComponentByName('cMCStatus', 3)  # pending
 
@@ -676,21 +681,22 @@ def _build_pkiresponse_pending_der(request_id: int,
     if status_text:
         csi.setComponentByName('statusString', char.UTF8String(status_text))
 
-    # pendInfo
     pend = PendInfo()
     pend.setComponentByName('pendToken', univ.OctetString(str(request_id).encode('ascii')))
     pend.setComponentByName('pendTime', useful.GeneralizedTime(datetime.now(timezone.utc).strftime('%Y%m%d%H%M%SZ')))
-    oi = OtherInfo(); oi.setComponentByName('pendInfo', pend)
+    oi = OtherInfo()
+    oi.setComponentByName('pendInfo', pend)
     csi.setComponentByName('otherInfo', oi)
 
-    # TaggedAttribute id-cmc-statusInfo
     ta = TaggedAttribute()
     ta.setComponentByName('bodyPartID', BodyPartID(body_part_id))
     ta.setComponentByName('attrType', univ.ObjectIdentifier(OID_ID_CMC_STATUS_INFO))
-    avs = AttributeValues(); avs.append(AttributeValue(der_encode(csi)))
+    avs = AttributeValues()
+    avs.append(AttributeValue(der_encode(csi)))
     ta.setComponentByName('attrValues', avs)
 
-    controls = TaggedAttributeSeq(); controls.append(ta)
+    controls = TaggedAttributeSeq()
+    controls.append(ta)
 
     resp = PKIResponse()
     resp.setComponentByName('controlSequence', controls)
@@ -700,9 +706,11 @@ def _build_pkiresponse_pending_der(request_id: int,
     return der_encode(resp)
 
 
-def _build_pkiresponse_denied_der(status_text: str = "Deny by admin",
-                                  body_part_id: int = 1) -> bytes:
-
+def _build_pkiresponse_denied_der(
+    status_text: str = "Denied by administrator",
+    body_part_id: int = 1
+) -> bytes:
+    """Build a minimal PKIResponse with CMCStatusInfo(failed)."""
     csi = CMCStatusInfo()
     csi.setComponentByName('cMCStatus', 2)  # failed
 
@@ -716,10 +724,12 @@ def _build_pkiresponse_denied_der(status_text: str = "Deny by admin",
     ta = TaggedAttribute()
     ta.setComponentByName('bodyPartID', BodyPartID(body_part_id))
     ta.setComponentByName('attrType', univ.ObjectIdentifier(OID_ID_CMC_STATUS_INFO))
-    avs = AttributeValues(); avs.append(AttributeValue(der_encode(csi)))
+    avs = AttributeValues()
+    avs.append(AttributeValue(der_encode(csi)))
     ta.setComponentByName('attrValues', avs)
 
-    controls = TaggedAttributeSeq(); controls.append(ta)
+    controls = TaggedAttributeSeq()
+    controls.append(ta)
 
     resp = PKIResponse()
     resp.setComponentByName('controlSequence', controls)
@@ -729,18 +739,20 @@ def _build_pkiresponse_denied_der(status_text: str = "Deny by admin",
     return der_encode(resp)
 
 
-def build_adcs_bst_pkiresponse(ca_der: bytes,
-                               ca_key,
-                               request_id: int,
-                               status: str = "pending",
-                               status_text: str = "En attente de traitement",
-                               body_part_id: int = 1) -> bytes:
+def build_adcs_bst_pkiresponse(
+    ca_der: bytes,
+    ca_key,
+    request_id: int,
+    status: str = "pending",
+    status_text: str = "Pending",
+    body_part_id: int = 1
+) -> bytes:
     """
     Build a CMS SignedData containing a PKIResponse (Windows/ADCS-ready).
     - eContentType = 1.3.6.1.5.5.7.12.3
     - SignedAttributes = content-type(12.3) + message-digest(SHA256(PKIResponse))
     Parameters:
-      - status: "pending" or "denied" (alias: "failed", "refused")
+      - status: "pending" or "denied" (aliases: "failed", "refused")
     """
     signer_cert = a_x509.Certificate.load(ca_der)
 
@@ -811,7 +823,7 @@ def build_adcs_bst_pkiresponse(ca_der: bytes,
 
 
 # -----------------------------------------------------------------------------
-# Utility encoding
+# Utility encoding (Base64 helpers)
 # -----------------------------------------------------------------------------
 
 def format_b64_for_soap(data: bytes) -> str:
@@ -822,7 +834,7 @@ def format_b64_for_soap(data: bytes) -> str:
 def _wrap_b64(data: bytes, line_len: int = 64, with_crlf: bool = True) -> str:
     """
     Base64-encode bytes and optionally wrap lines to a fixed length.
-    If with_crlf is True, lines are joined using CRLF (\\r\\n).
+    If with_crlf is True, lines are joined using CRLF (\r\n).
     """
     s = base64.b64encode(data).decode("ascii")
     if not line_len:
@@ -832,6 +844,10 @@ def _wrap_b64(data: bytes, line_len: int = 64, with_crlf: bool = True) -> str:
     return sep.join(lines)
 
 
+# -----------------------------------------------------------------------------
+# WS-Trust (Enrollment) response builder
+# -----------------------------------------------------------------------------
+
 def build_ws_trust_response(
     pkcs7_der: bytes,
     relates_to: str,
@@ -839,8 +855,8 @@ def build_ws_trust_response(
     ces_uri: str,
     *,
     status: str = "pending",  # "pending" | "denied"/"failed"/"fail"/"refused"
-    disposition_message: str = "En attente de traitement",
-    reason_text: str = "Deny by admin",
+    disposition_message: str = "Pending",
+    reason_text: str = "Denied by administrator",
     error_code: int = -2146877420,
     invalid_request: bool = True,
     lang: str = "fr-FR",
@@ -879,7 +895,7 @@ def build_ws_trust_response(
 
     st = (status or "").strip().lower()
     is_pending = st in ("pending", "pend", "p")
-    is_failed  = st in ("denied", "failed", "fail", "refused")
+    is_failed = st in ("denied", "failed", "fail", "refused")
 
     if is_pending:
         # ----- RSTRC (HTTP 200) -----
@@ -894,7 +910,7 @@ def build_ws_trust_response(
 
         body = ET.SubElement(senv, QName(NS["s"], "Body"))
         rstrc = ET.SubElement(body, QName(NS["wst"], "RequestSecurityTokenResponseCollection"))
-        rstr  = ET.SubElement(rstrc, QName(NS["wst"], "RequestSecurityTokenResponse"))
+        rstr = ET.SubElement(rstrc, QName(NS["wst"], "RequestSecurityTokenResponse"))
 
         tokentype = ET.SubElement(rstr, QName(NS["wst"], "TokenType"))
         tokentype.text = token_type
@@ -910,7 +926,7 @@ def build_ws_trust_response(
         bst.text = _wrap_b64_crlf(pkcs7_der) if wrap_b64_lines else base64.b64encode(pkcs7_der).decode("ascii")
 
         req_tok = ET.SubElement(rstr, QName(NS["wst"], "RequestedSecurityToken"))
-        str_el  = ET.SubElement(req_tok, QName(NS["wss"], "SecurityTokenReference"))
+        str_el = ET.SubElement(req_tok, QName(NS["wss"], "SecurityTokenReference"))
         ET.SubElement(str_el, QName(NS["wss"], "Reference"), {"URI": ces_uri})
 
         req_id = ET.SubElement(rstr, QName(NS["msenroll"], "RequestID")); req_id.text = str(request_id)
@@ -931,7 +947,7 @@ def build_ws_trust_response(
         body = ET.SubElement(senv, QName(NS["s"], "Body"))
         fault = ET.SubElement(body, QName(NS["s"], "Fault"))
 
-        code  = ET.SubElement(fault, QName(NS["s"], "Code"))
+        code = ET.SubElement(fault, QName(NS["s"], "Code"))
         ET.SubElement(code, QName(NS["s"], "Value")).text = "s:Receiver"
 
         reason = ET.SubElement(fault, QName(NS["s"], "Reason"))
@@ -956,15 +972,14 @@ def build_ws_trust_response(
         raise ValueError(f"Unsupported status '{status}': use 'pending' or 'denied'")
 
 
-
 # -----------------------------------------------------------------------------
-# User resolution (SAMBA/LDAP)
+# Active Directory user resolution (SAMBA/LDAP)
 # -----------------------------------------------------------------------------
 
 def search_user(userauth: str):
     """
     Resolve the SAM/LDAP entry for the Kerberos user 'user@REALM'.
-    Return (SamDB, entry) if found.
+    Returns (SamDB, entry) if found.
     """
     lp = LoadParm()
     lp.load_default()
@@ -1011,7 +1026,7 @@ def _apply_static_extensions(builder: cx509.CertificateBuilder, template: dict) 
     for ext in src:
         der = ext.get("__der")
         if der is None:
-            continue  # dynamic (e.g. NTDS) -> handled elsewhere
+            continue  # dynamic (e.g., NTDS) -> handled elsewhere
         oid = ext.get("oid")
         critical = bool(ext.get("critical", False))
 
@@ -1078,7 +1093,7 @@ ET.register_namespace('xsd', NS_EP["xsd"])
 ET.register_namespace('ep',  NS_EP["ep"])
 ET.register_namespace('',    NS_EP["diag"])  # optional: limit prefix creation on ActivityId
 
-_TRUE  = "true"
+_TRUE = "true"
 _FALSE = "false"
 
 def tbool(v: bool) -> str:
@@ -1241,13 +1256,12 @@ def build_get_policies_response(
         text(ET.SubElement(oe, ET.QName(NS_EP['ep'], 'oIDReferenceID')), o["__refid"])
         text(ET.SubElement(oe, ET.QName(NS_EP['ep'], 'defaultName')), o["default_name"])
 
-    # Serialize pretty
     raw = ET.tostring(env, encoding="utf-8", xml_declaration=True)
     return prettify(raw)
 
 
 # -----------------------------------------------------------------------------
-# CES response (Issued) helpers and response
+# CES response (Issued) builder
 # -----------------------------------------------------------------------------
 
 NS_CES = {
@@ -1258,7 +1272,6 @@ NS_CES = {
     "wsse": "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd",
     "ep":   "http://schemas.microsoft.com/windows/pki/2009/01/enrollment",
 }
-# Register once
 ET.register_namespace('s',    NS_CES['s'])
 ET.register_namespace('a',    NS_CES['a'])
 ET.register_namespace('wst',  NS_CES['wst'])
@@ -1288,7 +1301,7 @@ def build_ces_response(uuid_request: str, uuid_random: str, p7b_der: str, leaf_d
     body = ET.SubElement(env, ET.QName(NS_CES['s'], 'Body'))
 
     rstrc = ET.SubElement(body, ET.QName(NS_CES['wst'], 'RequestSecurityTokenResponseCollection'))
-    rstr  = ET.SubElement(rstrc, ET.QName(NS_CES['wst'], 'RequestSecurityTokenResponse'))
+    rstr = ET.SubElement(rstrc, ET.QName(NS_CES['wst'], 'RequestSecurityTokenResponse'))
 
     tok_type = ET.SubElement(rstr, ET.QName(NS_CES['wst'], 'TokenType'))
     _txt(tok_type, "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#X509v3")
@@ -1323,7 +1336,13 @@ def build_ces_response(uuid_request: str, uuid_random: str, p7b_der: str, leaf_d
     raw = ET.tostring(env, encoding="utf-8", xml_declaration=True)
     return _prettify(raw)
 
+
+# -----------------------------------------------------------------------------
+# CRL helpers and persistent CRLNumber sidecar
+# -----------------------------------------------------------------------------
+
 def _load_existing_crl(path: str):
+    """Load an existing CRL (PEM or DER). Returns None if missing."""
     try:
         with open(path, "rb") as f:
             data = f.read()
@@ -1336,16 +1355,18 @@ def _load_existing_crl(path: str):
 
 
 def _iter_revoked(crl) -> List[cx509.RevokedCertificate]:
+    """Iterate revoked entries across cryptography versions."""
     if not crl:
         return []
     try:
-        return list(crl) 
+        return list(crl)
     except Exception:
         rc = getattr(crl, "revoked_certificates", None)
         return list(rc) if rc else []
 
 
 def _read_crl_number_from_obj(crl) -> Optional[int]:
+    """Try to read CRLNumber from a CRL object."""
     if not crl:
         return None
     try:
@@ -1363,7 +1384,6 @@ def _read_crl_number_from_obj(crl) -> Optional[int]:
     except Exception:
         pass
     return None
-
 
 
 def _crlnum_sidecar_path(crl_path: str) -> str:
@@ -1384,10 +1404,14 @@ def _write_sidecar_num(path: str, num: int) -> None:
         f.write(str(int(num)))
         f.flush()
         os.fsync(f.fileno())
-    os.replace(tmp, path)  
+    os.replace(tmp, path)  # atomic on POSIX
 
 
 def _next_crl_number_persistent(crl_path: str, crl, bump: bool = True) -> int:
+    """
+    Compute the next CRLNumber using a sidecar file (persistent across restarts).
+    If bump=False, return the current value without incrementing.
+    """
     sidecar = _crlnum_sidecar_path(crl_path)
     sc = _read_sidecar_num(sidecar)
     cur = _read_crl_number_from_obj(crl)
@@ -1406,6 +1430,7 @@ def _next_crl_number_persistent(crl_path: str, crl, bump: bool = True) -> int:
 
 
 def _serial_to_int(serial) -> int:
+    """Parse a serial that may be hex-string ('0x...') or decimal-string."""
     if isinstance(serial, str):
         s = serial.strip().lower()
         if s.startswith("0x"):
@@ -1418,6 +1443,7 @@ def _serial_to_int(serial) -> int:
 
 
 def _add_aki_if_absent(builder, ca_key):
+    """Add AKI from issuer public key if not already present."""
     try:
         builder.extensions.get_extension_for_class(cx509.AuthorityKeyIdentifier)
     except Exception:
@@ -1430,6 +1456,7 @@ def _add_aki_if_absent(builder, ca_key):
 
 
 def _select_algo(hash_name: str):
+    """Select a HashAlgorithm object by name, defaulting to SHA-256."""
     algo = {
         "sha256": hashes.SHA256,
         "sha384": hashes.SHA384,
@@ -1440,6 +1467,7 @@ def _select_algo(hash_name: str):
 
 
 def _write_crl_file(crl_path: str, pem_bytes: bytes) -> None:
+    """Write a PEM CRL to disk safely (create dirs, fsync, replace)."""
     dirn = os.path.dirname(crl_path) or "."
     os.makedirs(dirn, exist_ok=True)
     with open(crl_path, "wb") as f:
@@ -1448,7 +1476,12 @@ def _write_crl_file(crl_path: str, pem_bytes: bytes) -> None:
         os.fsync(f.fileno())
 
 
+# -----------------------------------------------------------------------------
+# CRL operations: revoke / unrevoke / resign
+# -----------------------------------------------------------------------------
+
 def revoke(ca_key, ca_cert: cx509.Certificate, serial, crl_path: str, next_update_hours: int = 8) -> None:
+    """Add a revoked entry for `serial` and write a new CRL."""
     serial_int = _serial_to_int(serial)
 
     now = datetime.now(timezone.utc)
@@ -1464,6 +1497,7 @@ def revoke(ca_key, ca_cert: cx509.Certificate, serial, crl_path: str, next_updat
         .next_update(next_update)
     )
 
+    # Reuse extensions (except CRL_NUMBER) from the previous CRL if present
     if old_crl is not None:
         for ext in old_crl.extensions:
             if ext.oid == cx509.ExtensionOID.CRL_NUMBER:
@@ -1475,6 +1509,7 @@ def revoke(ca_key, ca_cert: cx509.Certificate, serial, crl_path: str, next_updat
 
     builder = builder.add_extension(cx509.CRLNumber(crl_number), critical=False)
 
+    # Reinstate all previous revoked certs except the one being (re)added
     for rc in _iter_revoked(old_crl):
         if rc.serial_number == serial_int:
             continue
@@ -1496,6 +1531,7 @@ def revoke(ca_key, ca_cert: cx509.Certificate, serial, crl_path: str, next_updat
 
 
 def unrevoke(ca_key, ca_cert: cx509.Certificate, serial, crl_path: str, next_update_hours: int = 8) -> None:
+    """Remove a revoked entry for `serial` and write a new CRL."""
     serial_int = _serial_to_int(serial)
 
     now = datetime.now(timezone.utc)
@@ -1503,7 +1539,7 @@ def unrevoke(ca_key, ca_cert: cx509.Certificate, serial, crl_path: str, next_upd
 
     old_crl = _load_existing_crl(crl_path)
     if not old_crl:
-        raise FileNotFoundError(f"CRL introuvable à '{crl_path}' — rien à retirer.")
+        raise FileNotFoundError(f"CRL not found at '{crl_path}' — nothing to remove.")
 
     crl_number = _next_crl_number_persistent(crl_path, old_crl, bump=True)
 
@@ -1525,6 +1561,7 @@ def unrevoke(ca_key, ca_cert: cx509.Certificate, serial, crl_path: str, next_upd
 
     builder = builder.add_extension(cx509.CRLNumber(crl_number), critical=False)
 
+    # Reinstate all previous revoked certs except the one being removed
     for rc in _iter_revoked(old_crl):
         if rc.serial_number == serial_int:
             continue
@@ -1546,11 +1583,15 @@ def resign_crl(
     bump_number: bool = True,
     hash_name: str = "sha256",
 ) -> int:
+    """
+    Re-sign the CRL even if nothing changed (bump CRLNumber and refresh dates).
+    Returns the new CRLNumber.
+    """
     now = datetime.now(timezone.utc)
     next_update = now + timedelta(hours=int(next_update_hours))
 
     old_crl = _load_existing_crl(crl_path)
-    revoked_list = _iter_revoked(old_crl)  
+    revoked_list = _iter_revoked(old_crl)  # may be empty and that's OK
 
     new_num = _next_crl_number_persistent(crl_path, old_crl, bump=bump_number)
 
@@ -1568,7 +1609,7 @@ def resign_crl(
             try:
                 builder = builder.add_extension(ext.value, ext.critical)
             except Exception:
-                pass 
+                pass  # be tolerant across versions/values
 
     builder = builder.add_extension(cx509.CRLNumber(int(new_num)), critical=False)
 
@@ -1594,6 +1635,7 @@ def resign_crl(
     pem_bytes = new_crl.public_bytes(encoding=serialization.Encoding.PEM)
     _write_crl_file(crl_path, pem_bytes)
 
+    # Optional sanity check
     try:
         written = _load_existing_crl(crl_path)
         ext = written.extensions.get_extension_for_oid(cx509.ExtensionOID.CRL_NUMBER).value
@@ -1602,3 +1644,209 @@ def resign_crl(
         pass
 
     return int(new_num)
+
+
+# -----------------------------------------------------------------------------
+# Certificate issuance (new keypair + end-entity certificate)
+# -----------------------------------------------------------------------------
+
+def _coerce_san(s: str) -> cx509.GeneralName:
+    s = (s or "").strip()
+    if not s:
+        raise ValueError("Empty SAN")
+    try:
+        return cx509.IPAddress(ipaddress.ip_address(s))
+    except ValueError:
+        return cx509.DNSName(s)
+
+
+def _dedup_sans(strings: Iterable[str]) -> List[cx509.GeneralName]:
+    out: List[cx509.GeneralName] = []
+    seen = set()
+    for s in strings or []:
+        try:
+            gn = _coerce_san(s)
+        except ValueError:
+            continue
+        key = ("IP", str(gn.value)) if isinstance(gn, cx509.IPAddress) else ("DNS", gn.value.lower())
+        if key not in seen:
+            out.append(gn)
+            seen.add(key)
+    return out
+
+
+def issue_cert_with_new_key(
+    *,
+    ca: Dict[str, Any],                     # "__certificate_der": bytes, "__key_obj": private key
+    common_name: str,
+    subject_sans: Iterable[str] = (),
+    validity_seconds: int = 365 * 24 * 3600,
+    backdate_seconds: int = 300,
+    key_type: str = "rsa",                  # "rsa" | "ec" | "ed25519" | "ed448"
+    rsa_key_size: int = 2048,
+    ec_curve: str = "secp256r1",            # "secp384r1", "secp521r1", "secp256k1"
+    key_export_password: Optional[bytes] = None,
+) -> Tuple[cx509.Certificate, Any, bytes, bytes]:
+    """Generate a new keypair, issue an end-entity certificate, and return (cert_obj, privkey_obj, cert_pem, key_pem)."""
+
+    # Generate subject key
+    key_type_l = (key_type or "rsa").lower()
+    if key_type_l == "rsa":
+        priv = rsa.generate_private_key(public_exponent=65537, key_size=int(rsa_key_size))
+    elif key_type_l == "ec":
+        curve_map = {
+            "secp256r1": ec.SECP256R1(),
+            "secp384r1": ec.SECP384R1(),
+            "secp521r1": ec.SECP521R1(),
+            "secp256k1": ec.SECP256K1(),
+        }
+        curve = curve_map.get((ec_curve or "secp256r1").lower(), ec.SECP256R1())
+        priv = ec.generate_private_key(curve)
+    elif key_type_l == "ed25519":
+        priv = ed25519.Ed25519PrivateKey.generate()
+    elif key_type_l == "ed448":
+        priv = ed448.Ed448PrivateKey.generate()
+    else:
+        raise ValueError(f"Unknown key_type: {key_type}")
+
+    pub = priv.public_key()
+
+    # CA material
+    ca_cert = cx509.load_der_x509_certificate(ca["__certificate_der"])
+    ca_key = ca["__key_obj"]
+
+    now = datetime.now(timezone.utc)
+    not_before = now - timedelta(seconds=int(backdate_seconds))
+    not_after = not_before + timedelta(seconds=int(validity_seconds))
+
+    # Build certificate
+    builder = (
+        cx509.CertificateBuilder()
+        .subject_name(cx509.Name([cx509.NameAttribute(cx509.oid.NameOID.COMMON_NAME, common_name)]))
+        .issuer_name(ca_cert.subject)
+        .public_key(pub)
+        .serial_number(cx509.random_serial_number())
+        .not_valid_before(not_before)
+        .not_valid_after(not_after)
+        .add_extension(cx509.SubjectKeyIdentifier.from_public_key(pub), critical=False)
+    )
+
+    # AKI
+    try:
+        builder = builder.add_extension(
+            cx509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()),
+            critical=False,
+        )
+    except Exception:
+        pass
+
+    # AIA / CDP from config
+    urls = ca.get("urls", {}) or {}
+    if urls.get("ca_issuers_http"):
+        builder = builder.add_extension(
+            cx509.AuthorityInformationAccess([
+                cx509.AccessDescription(
+                    cx509.oid.AuthorityInformationAccessOID.CA_ISSUERS,
+                    cx509.UniformResourceIdentifier(urls["ca_issuers_http"]),
+                )
+            ]),
+            critical=False,
+        )
+    if urls.get("crl_http"):
+        builder = builder.add_extension(
+            cx509.CRLDistributionPoints([
+                cx509.DistributionPoint(
+                    full_name=[cx509.UniformResourceIdentifier(urls["crl_http"])],
+                    relative_name=None, reasons=None, crl_issuer=None
+                )
+            ]),
+            critical=False,
+        )
+
+    # SAN
+    sans = _dedup_sans(subject_sans)
+    if sans:
+        builder = builder.add_extension(cx509.SubjectAlternativeName(sans), critical=False)
+
+    # Sign
+    if isinstance(ca_key, (ed25519.Ed25519PrivateKey, ed448.Ed448PrivateKey)):
+        cert = builder.sign(private_key=ca_key, algorithm=None)
+    else:
+        cert = builder.sign(private_key=ca_key, algorithm=hashes.SHA256())
+
+    # Export PEM
+    cert_pem = cert.public_bytes(encoding=serialization.Encoding.PEM)
+
+    if key_export_password:
+        encryption = serialization.BestAvailableEncryption(key_export_password)
+    else:
+        encryption = serialization.NoEncryption()
+
+    key_pem = priv.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=encryption,
+    )
+
+    return cert, priv, cert_pem, key_pem
+
+
+# -----------------------------------------------------------------------------
+# Certificate file helpers (parsing and discovery)
+# -----------------------------------------------------------------------------
+
+_PEM_BEGIN = b"-----BEGIN CERTIFICATE-----"
+_PEM_END = b"-----END CERTIFICATE-----"
+_CERT_EXTS = {".crt", ".pem", ".cer"}
+
+def is_pem_blob(data: bytes) -> bool:
+    return _PEM_BEGIN in data and _PEM_END in data
+
+def load_certificate_file(path: str) -> cx509.Certificate:
+    """Load a certificate from a file (PEM, DER, or raw base64 DER)."""
+    with open(path, "rb") as f:
+        data = f.read()
+    if not is_pem_blob(data):
+        # Try direct DER
+        try:
+            return cx509.load_der_x509_certificate(data)
+        except Exception:
+            # Often DER is base64 without headers
+            try:
+                der = base64.b64decode(data)
+                return cx509.load_der_x509_certificate(der)
+            except Exception as e:
+                raise ValueError(f"File not recognized as X.509 certificate: {os.path.basename(path)}: {e}")
+    return cx509.load_pem_x509_certificate(data)
+
+def get_public_key_info(cert: cx509.Certificate) -> Tuple[str, Optional[int]]:
+    """Return ('RSA', bits) | ('EC(name)', None) | ('DSA', bits) | (class_name, None)."""
+    pk = cert.public_key()
+    if isinstance(pk, rsa.RSAPublicKey):
+        return ("RSA", pk.key_size)
+    if isinstance(pk, ec.EllipticCurvePublicKey):
+        try:
+            name = pk.curve.name
+        except Exception:
+            name = pk.curve.__class__.__name__
+        return (f"EC({name})", None)
+    if isinstance(pk, dsa.DSAPublicKey):
+        return ("DSA", pk.key_size)
+    return (pk.__class__.__name__, None)
+
+def scan_cert_paths(cert_dir: str) -> List[str]:
+    """Return a sorted list of certificate file paths in `cert_dir` (recursive)."""
+    files: List[str] = []
+    for ext in _CERT_EXTS:
+        files.extend(glob.glob(os.path.join(cert_dir, f"**/*{ext}"), recursive=True))
+    return sorted(set(files))
+
+def revoked_serials_set(crl_path: Optional[str]) -> Set[int]:
+    """Return the set of revoked serial numbers (as ints) from the CRL at `crl_path`."""
+    if not crl_path:
+        return set()
+    crl = _load_existing_crl(crl_path)
+    if not crl:
+        return set()
+    return {rc.serial_number for rc in _iter_revoked(crl)}
+

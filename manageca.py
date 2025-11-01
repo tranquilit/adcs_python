@@ -7,13 +7,15 @@ ADCS TUI — Terminal application (SSH) à la “mc”
 • Simple revocation (CRL update) via utils.revoke.
 • Unrevoke support via utils.unrevoke.
 • Re-sign CRL on demand (button + Ctrl+R) via utils.resign_crl.
+• New certificate generation (key + cert) opens a dedicated window and uses utils.issue_cert_with_new_key.
+• Delete certificate (button + Del; Shift+Del permanent). Moves to .trash by default.
 • Shows whether a certificate is revoked (reads CRL).
 • Keyboard: see help (press '?').
 
 Dependencies:
   pip install textual cryptography PyYAML
 
-The app reuses your adcs.yaml and your folders (certs, list_request_id).
+The app reuses your adcs.yaml and your folders.
 
 CLI (no GUI):
   python manageca.py --resign-crl --ca-id ca-1
@@ -27,20 +29,21 @@ import csv
 import base64
 import textwrap
 import argparse
+import stat
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Any, Set
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical, Container
+from textual.containers import Vertical, Horizontal, Container
 from textual.widgets import (
-    Header, Footer, Static, DataTable, Input, Select, Button, Label,
+    Header, Footer, Static, DataTable, Input, Select, Button, Label
 )
 from textual.reactive import reactive
 from textual import events  # to intercept keys
 
-# --- Textual compatibility: TextLog may not exist depending on version ---
+# --- Textual compatibility: TextLog, ModalScreen/Screen ---
 try:
     from textual.widgets import TextLog as _TextLog
 except Exception:
@@ -49,19 +52,38 @@ except Exception:
     except Exception:
         _TextLog = Static  # last resort (plain display)
 
+try:
+    from textual.screen import ModalScreen as _BaseScreen
+except Exception:
+    from textual.screen import Screen as _BaseScreen  # type: ignore
+
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import rsa, dsa, ec
 
 # Your utilities
 from adcs_config import load_yaml_conf
-from utils import revoke, unrevoke, resign_crl  # revoke/unrevoke/resign CRL entries
+from utils import (
+    revoke,
+    unrevoke,
+    resign_crl,
+    issue_cert_with_new_key,
+    # ↓↓↓ nouveaux imports factorisés ↓↓↓
+    load_certificate_file,
+    get_public_key_info,
+    scan_cert_paths,
+    revoked_serials_set,
+)
 
 # =============================
 # Model & parsing
 # =============================
 
-CERT_EXTS = {".crt", ".pem", ".cer"}
+CERT_EXTS = {".crt", ".pem", ".cer"}  # laissé si d'autres parties s'y réfèrent
+
+# Colonnes pour large et petit écran
+FULL_COLUMNS = ["#", "Serial", "Subject", "Valid from", "Valid until",
+                "Days", "Revoked", "Signature", "Public Key", "SHA-256", "File"]
+COMPACT_COLUMNS = ["#", "Serial", "Subject", "Valid until", "Days", "Revoked"]
 
 @dataclass
 class CertRow:
@@ -77,42 +99,9 @@ class CertRow:
     sha256_fingerprint: str
     revoked: bool = False  # CRL status
 
-PEM_BEGIN = b"-----BEGIN CERTIFICATE-----"
-PEM_END = b"-----END CERTIFICATE-----"
-
-def _is_pem(data: bytes) -> bool:
-    return PEM_BEGIN in data and PEM_END in data
-
-def _load_certificate(path: str) -> x509.Certificate:
-    with open(path, "rb") as f:
-        data = f.read()
-    if not _is_pem(data):
-        try:
-            return x509.load_der_x509_certificate(data)
-        except Exception:
-            try:
-                der = base64.b64decode(data)
-                return x509.load_der_x509_certificate(der)
-            except Exception as e:
-                raise ValueError(f"File not recognized as X.509 certificate: {os.path.basename(path)}: {e}")
-    return x509.load_pem_x509_certificate(data)
-
-def _get_pubkey_info(cert: x509.Certificate) -> tuple[str, Optional[int]]:
-    pk = cert.public_key()
-    if isinstance(pk, rsa.RSAPublicKey):
-        return ("RSA", pk.key_size)
-    if isinstance(pk, ec.EllipticCurvePublicKey):
-        try:
-            name = pk.curve.name
-        except Exception:
-            name = pk.curve.__class__.__name__
-        return (f"EC({name})", None)
-    if isinstance(pk, dsa.DSAPublicKey):
-        return ("DSA", pk.key_size)
-    return (pk.__class__.__name__, None)
-
 def row_from_cert(path: str) -> CertRow:
-    cert = _load_certificate(path)
+    """Construit la ligne de tableau à partir d'un fichier de certificat."""
+    cert = load_certificate_file(path)  # utils
     now = datetime.now(timezone.utc)
     subject = cert.subject.rfc4514_string()
     serial_nox = format(cert.serial_number, "x")
@@ -123,7 +112,7 @@ def row_from_cert(path: str) -> CertRow:
         sig_algo = cert.signature_hash_algorithm.name  # type: ignore
     except Exception:
         sig_algo = "unknown"
-    pk_type, pk_bits = _get_pubkey_info(cert)
+    pk_type, pk_bits = get_public_key_info(cert)  # utils
     fp = cert.fingerprint(hashes.SHA256()).hex()
     return CertRow(
         filename=os.path.basename(path),
@@ -138,50 +127,180 @@ def row_from_cert(path: str) -> CertRow:
         sha256_fingerprint=fp,
     )
 
-def scan_cert_paths(cert_dir: str) -> List[str]:
-    files: List[str] = []
-    for ext in CERT_EXTS:
-        files.extend(glob.glob(os.path.join(cert_dir, f"**/*{ext}"), recursive=True))
-    return sorted(set(files))
+# =============================
+# New Certificate Screen
+# =============================
 
-# --- CRL helpers (local read, robust) ---
-def _load_existing_crl(path: str):
-    """Load an existing CRL (PEM or DER). Returns None if missing."""
-    try:
-        with open(path, "rb") as f:
-            data = f.read()
+class NewCertScreen(_BaseScreen[None]):
+    """Fenêtre modale pour générer un nouveau certificat (clé + cert)."""
+
+    def __init__(self, parent_app: "ADCSApp", ca: Dict[str, Any]) -> None:
+        super().__init__()
+        self.parent_app = parent_app
+        self.ca = ca
+
+    def compose(self) -> ComposeResult:
+        yield Container(
+            Static("New Certificate", id="dlg_title"),
+            Vertical(
+                Input(placeholder="Common Name (CN)", id="nc_cn"),
+                Input(placeholder="SANs (comma-separated: dns, ip, ...)", id="nc_sans"),
+                Horizontal(
+                    Select(options=[("RSA", "rsa"), ("EC", "ec"), ("Ed25519", "ed25519"), ("Ed448", "ed448")],
+                           value="rsa", id="nc_keytype"),
+                    Input(placeholder="RSA bits (2048/3072/4096)", id="nc_rsa_bits"),
+                ),
+                Horizontal(
+                    Select(options=[("secp256r1", "secp256r1"), ("secp384r1", "secp384r1"),
+                                    ("secp521r1", "secp521r1"), ("secp256k1", "secp256k1")],
+                           value="secp256r1", id="nc_ec_curve"),
+                    Input(placeholder="Validity days (default 365)", id="nc_valid_days"),
+                ),
+                id="dlg_form",
+            ),
+            Horizontal(
+                Button("Create", id="nc_ok", variant="success"),
+                Button("Cancel", id="nc_cancel"),
+                id="dlg_buttons",
+            ),
+            id="dlg_container",
+        )
+
+    CSS = """
+    #dlg_container {
+        width: 80%;
+        height: auto;
+        border: round $primary;
+        padding: 1 2;
+        background: $surface;
+        margin: 2 10;
+    }
+    #dlg_title {
+        content-align: center middle;
+        height: 3;
+        text-style: bold;
+        border: none;
+    }
+    #dlg_form > * { margin: 0 0 1 0; }
+    #dlg_buttons {
+        height: auto;
+        content-align: right middle;
+    }
+    #dlg_buttons Button { margin-left: 1; }
+    """
+
+    BINDINGS = [
+        Binding("enter", "do_ok", "OK"),
+        Binding("escape", "do_cancel", "Cancel"),
+    ]
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "nc_ok":
+            self.action_do_ok()
+        elif event.button.id == "nc_cancel":
+            self.action_do_cancel()
+
+    def action_do_ok(self) -> None:
+        self.action_do_ok_impl()
+
+    def action_do_cancel(self) -> None:
+        self.app.pop_screen()
+
+    def action_do_ok_impl(self) -> None:
         try:
-            return x509.load_pem_x509_crl(data)
+            cn = (self.query_one("#nc_cn", Input).value or "").strip()
+            sans_raw = (self.query_one("#nc_sans", Input).value or "").strip()
+            keytype = (self.query_one("#nc_keytype", Select).value or "rsa").strip().lower()
+            rsa_bits_txt = (self.query_one("#nc_rsa_bits", Input).value or "").strip()
+            ec_curve = (self.query_one("#nc_ec_curve", Select).value or "secp256r1").strip()
+            valid_days_txt = (self.query_one("#nc_valid_days", Input).value or "").strip()
+        except Exception as e:
+            self.parent_app.notify(f"UI error: {e}", severity="error")
+            return
+
+        if not cn:
+            self.parent_app.notify("CN is required.", severity="warning")
+            return
+
+        sans = []
+        if sans_raw:
+            parts = [p.strip() for p in sans_raw.replace(";", ",").split(",")]
+            sans = [p for p in parts if p]
+
+        rsa_bits = 0
+        try:
+            rsa_bits = int(rsa_bits_txt) if rsa_bits_txt else 0
         except Exception:
-            return x509.load_der_x509_crl(data)
-    except FileNotFoundError:
-        return None
+            rsa_bits = 0
+        if keytype == "rsa" and rsa_bits not in (0, 2048, 3072, 4096):
+            self.parent_app.notify("RSA bits must be 2048/3072/4096 (or empty).", severity="warning")
+            return
 
-def _iter_revoked(crl) -> List[x509.RevokedCertificate]:
-    """Iterate revoked entries across cryptography versions."""
-    if not crl:
-        return []
-    try:
-        return list(crl)  # CRL objects are often iterable
-    except Exception:
-        rc = getattr(crl, "revoked_certificates", None)
-        return list(rc) if rc else []
+        try:
+            valid_days = int(valid_days_txt) if valid_days_txt else 365
+            if valid_days <= 0:
+                raise ValueError
+        except Exception:
+            self.parent_app.notify("Validity days must be a positive integer.", severity="warning")
+            return
 
-def _revoked_serials_set(crl_path: Optional[str]) -> Set[int]:
-    """Return the set of revoked serial numbers (as ints) from the CRL."""
-    if not crl_path:
-        return set()
-    crl = _load_existing_crl(crl_path)
-    if not crl:
-        return set()
-    return {rc.serial_number for rc in _iter_revoked(crl)}
+        try:
+            certs_dir, private_dir = self.parent_app._resolve_storage_paths(self.ca)
+            os.makedirs(certs_dir, exist_ok=True)
+            os.makedirs(private_dir, exist_ok=True)
+        except Exception as e:
+            self.parent_app.notify(f"Storage paths error: {e}", severity="error", timeout=6)
+            return
+
+        try:
+            cert_obj, key_obj, cert_pem, key_pem = issue_cert_with_new_key(
+                ca=self.ca,
+                common_name=cn,
+                subject_sans=sans,
+                key_type=keytype,
+                rsa_key_size=(rsa_bits or 2048),
+                ec_curve=ec_curve,
+                validity_seconds=valid_days * 24 * 3600,
+                key_export_password=None,
+            )
+        except Exception as e:
+            self.parent_app.notify(f"Issue certificate failed: {e}", severity="error", timeout=8)
+            return
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_cn = "".join(c if c.isalnum() or c in ("-", "_", ".") else "_" for c in cn)
+        crt_path = os.path.join(certs_dir, f"{safe_cn}_{ts}.crt.pem")
+        key_path = os.path.join(private_dir, f"{safe_cn}_{ts}.key.pem")
+        try:
+            with open(crt_path, "wb") as f:
+                f.write(cert_pem)
+            with open(key_path, "wb") as f:
+                f.write(key_pem)
+            try:
+                os.chmod(key_path, stat.S_IRUSR | stat.S_IWUSR)
+            except Exception:
+                pass
+        except Exception as e:
+            self.parent_app.notify(f"Failed to write files: {e}", severity="error", timeout=8)
+            return
+
+        try:
+            self.parent_app.load_certs()
+        except Exception:
+            pass
+
+        self.parent_app.notify(
+            f"New certificate issued:\nCert: {crt_path}\nKey:  {key_path}",
+            severity="success",
+            timeout=8,
+        )
+        self.app.pop_screen()
 
 # =============================
 # TUI
 # =============================
 
 class Status(Static):
-    """Compact status bar."""
     def set_text(self, msg: str) -> None:
         self.update(f"[b]{msg}[/b]")
 
@@ -190,7 +309,7 @@ class ADCSApp(App):
     Screen { layout: vertical; }
     #top { height: 3; }
     #main { layout: horizontal; }
-    #left { width: 36; border: tall; }
+    #left { width: 40; border: tall; }
     #right { border: tall; }
     #filters { border: round $accent; padding: 1 1; height: auto; }
     #table { height: 1fr; }
@@ -206,24 +325,26 @@ class ADCSApp(App):
         Binding("F5", "reload", "Reload"),
         Binding("enter", "open_detail", "Details"),
         Binding("e", "export_csv", "Export CSV"),
-        Binding("r", "revoke_current", "Revoke"),          # R
-        Binding("u", "unrevoke_current", "Unrevoke"),      # U
+        Binding("r", "revoke_current", "Revoke"),
+        Binding("u", "unrevoke_current", "Unrevoke"),
+        Binding("delete", "delete_current", "Delete"),
+        Binding("shift+delete", "delete_current_permanent", "Del!"),
         Binding("ctrl+r", "resign_crl", "Re-sign CRL"),
+        Binding("ctrl+n", "open_new_certificate", "New cert"),
+        Binding("c", "toggle_compact", "Compact"),
         Binding("tab", "next_pane", "Next"),
         Binding("shift+tab", "prev_pane", "Prev"),
         Binding("q", "quit", "Quit"),
     ]
 
-    # State
     confadcs: Dict[str, Any] = {}
     current_ca: reactive[Dict[str, Any] | None] = reactive(None)
     cert_rows: List[CertRow] = []
-    revoked_serials: Set[int] = set()  # current CRL set
+    revoked_serials: Set[int] = set()
 
-    # Filters
+    compact_mode: reactive[bool] = reactive(False)
+
     filter_q: reactive[str] = reactive("")
-    filter_algo: reactive[str] = reactive("")
-    filter_keytype: reactive[str] = reactive("")
     filter_status: reactive[str] = reactive("")
 
     def compose(self) -> ComposeResult:
@@ -235,13 +356,20 @@ class ADCSApp(App):
                 yield Label("Certification Authority", id="lbl_ca")
                 yield Select(options=[], id="sel_ca")
                 with Container(id="filters"):
-                    yield Label("Filters (press 'f' to toggle)")
+                    yield Label("Search & Status")
                     yield Input(placeholder="Search… (/)", id="inp_q")
-                    yield Select(options=[("(Algo: any)", ""), ("SHA-256", "sha256"), ("SHA-384", "sha384"), ("SHA-512", "sha512")], id="sel_algo")
-                    yield Select(options=[("(Key: any)", ""), ("RSA", "rsa"), ("EC", "ec"), ("DSA", "dsa")], id="sel_key")
-                    yield Select(options=[("(Status: any)", ""), ("Expiring ≤ 30d", "expiring"), ("Valid > 30d", "valid"), ("Expired", "expired")], id="sel_status")
+                    yield Select(
+                        options=[
+                            ("(Status: any)", ""),
+                            ("Expiring ≤ 30d", "expiring"),
+                            ("Valid > 30d", "valid"),
+                            ("Expired", "expired"),
+                        ],
+                        id="sel_status",
+                    )
                     yield Button("Apply", id="btn_apply")
-                yield Button("Export CSV (e)", id="btn_export")
+                yield Button("New Certificate (Ctrl+N)", id="btn_newcert")
+                yield Button("Delete (Del)", id="btn_delete")
                 yield Button("Reload (F5)", id="btn_reload")
                 with Container():
                     yield Button("Revoke (R)", id="btn_revoke")
@@ -254,10 +382,63 @@ class ADCSApp(App):
 
     # ---------- helpers ----------
     def _table(self) -> DataTable:
-        return self.query_one(DataTable)
+        return self.query_one("#table", DataTable)
+    
+    def _maybe_table(self) -> Optional[DataTable]:
+        try:
+            return self.query_one("#table", DataTable)
+        except Exception:
+            return None
 
+    def _find_cert_path_by_filename(self, ca: Dict[str, Any], filename: str) -> Optional[str]:
+        certs_dir, _ = self._resolve_storage_paths(ca)
+        for p in scan_cert_paths(certs_dir):  # utils
+            if os.path.basename(p) == filename:
+                return p
+        return None
+
+    def _trashify(self, path: str) -> str:
+        base_dir = os.path.dirname(path)
+        trash_dir = os.path.join(base_dir, ".trash")
+        os.makedirs(trash_dir, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return os.path.join(trash_dir, f"{os.path.basename(path)}.{ts}.trash")
+
+    def _delete_pair(self, cert_path: str, permanent: bool, ca: Dict[str, Any]) -> tuple[int, int]:
+        n_cert = 0
+        n_key = 0
+        if os.path.isfile(cert_path):
+            try:
+                if permanent:
+                    os.remove(cert_path)
+                else:
+                    os.replace(cert_path, self._trashify(cert_path))
+                n_cert = 1
+            except Exception:
+                pass
+
+        certs_dir, private_dir = self._resolve_storage_paths(ca)
+        fname = os.path.basename(cert_path)
+        if fname.endswith(".crt.pem"):
+            key_name = fname[:-8] + ".key.pem"
+        else:
+            stem = os.path.splitext(fname)[0]
+            key_name = stem + ".key.pem"
+        key_path = os.path.join(private_dir, key_name)
+
+        if os.path.isfile(key_path):
+            try:
+                if permanent:
+                    os.remove(key_path)
+                else:
+                    os.replace(key_path, self._trashify(key_path))
+                n_key = 1
+            except Exception:
+                pass
+
+        return n_cert, n_key
+    
     def _show_detail_current_row(self) -> None:
-        """Display details for the current table row (if any)."""
         table = self._table()
         rows = self.filtered_rows()
         if not rows:
@@ -266,6 +447,38 @@ class ADCSApp(App):
         if row_idx is None or row_idx < 0 or row_idx >= len(rows):
             row_idx = 0
         self.show_detail(rows[row_idx])
+
+    # ---------- Responsive helpers ----------
+    def _apply_layout_mode(self) -> None:
+        main = self.query_one("#main")
+        left = self.query_one("#left")
+        filters = self.query_one("#filters")
+
+        try:
+            main.styles.layout = "vertical" if self.compact_mode else "horizontal"
+        except Exception:
+            pass
+        try:
+            left.styles.width = 40 if not self.compact_mode else "auto"
+        except Exception:
+            pass
+        try:
+            filters.display = "none" if self.compact_mode else "block"
+        except Exception:
+            pass
+
+        self.ensure_table_columns()
+        self.refresh_table()
+        ca_name = (self.current_ca.get('display_name') if self.current_ca else '-')
+        prefix = "Compact mode — " if self.compact_mode else ""
+        self.query_one(Status).set_text(f"{prefix}{ca_name}")
+
+    def _auto_pick_layout(self) -> None:
+        w, h = self.size.width, self.size.height
+        want_compact = (w < 120) or (h < 28)
+        if want_compact != self.compact_mode:
+            self.compact_mode = want_compact
+            self._apply_layout_mode()
 
     # ---------- Init ----------
     def on_mount(self) -> None:
@@ -276,7 +489,6 @@ class ADCSApp(App):
             self.notify(f"Unable to load adcs.yaml: {e}", severity="error")
             raise
 
-        # Populate CA select
         sel = self.query_one("#sel_ca", Select)
         options = []
         for ca in (self.confadcs.get("cas_list") or []):
@@ -287,17 +499,22 @@ class ADCSApp(App):
             sel.value = options[0][1]
             self.switch_ca(int(sel.value))
 
-        # Table
         table = self._table()
         table.cursor_type = "row"
         self.ensure_table_columns()
+        self._auto_pick_layout()
         self.query_one(Status).set_text("Ready. Press '?' for help.")
+
+    def on_resize(self, event) -> None:
+        try:
+            self._auto_pick_layout()
+        except Exception:
+            pass
 
     # ---------- DataTable columns ----------
     def ensure_table_columns(self) -> None:
         table = self._table()
-        expected = ["#", "Serial", "Subject", "Valid from", "Valid until",
-                    "Days", "Revoked", "Signature", "Public Key", "SHA-256", "File"]
+        expected = FULL_COLUMNS if not self.compact_mode else COMPACT_COLUMNS
 
         current = 0
         if hasattr(table, "column_count"):
@@ -312,7 +529,7 @@ class ADCSApp(App):
 
         if current != len(expected):
             try:
-                table.clear(columns=True)  # newer Textual
+                table.clear(columns=True)
             except Exception:
                 try:
                     table.clear()
@@ -334,22 +551,26 @@ class ADCSApp(App):
             self.notify("CA not found", severity="warning")
             return
         self.current_ca = ca
-        # load CRL and certs
         crl_path = (ca.get("crl") or {}).get("path_crl")
-        self.revoked_serials = _revoked_serials_set(crl_path)
+        self.revoked_serials = revoked_serials_set(crl_path)  # utils
         self.load_certs()
+
+    def _resolve_storage_paths(self, ca: Dict[str, Any]) -> tuple[str, str]:
+        sp = ca.get("storage_paths", {}) or {}
+        certs_dir = sp.get("certs_dir") or ca.get("__path_cert") or "."
+        private_dir = sp.get("private_dir") or certs_dir
+        return str(certs_dir), str(private_dir)
 
     def load_certs(self) -> None:
         ca = self.current_ca
         if not ca:
             return
-        cert_dir = ca.get("__path_cert")
-        paths = scan_cert_paths(cert_dir)
+        certs_dir, _private_dir = self._resolve_storage_paths(ca)
+        paths = scan_cert_paths(certs_dir)  # utils
         self.cert_rows = []
         for p in paths:
             try:
                 row = row_from_cert(p)
-                # revoked status via CRL (serial as int)
                 try:
                     serial_int = int(row.serial_nox, 16)
                 except ValueError:
@@ -373,16 +594,15 @@ class ADCSApp(App):
     # ---------- Filters & view ----------
     def filtered_rows(self) -> List[CertRow]:
         q = self.filter_q.lower().strip()
-        algo = self.filter_algo.lower()
-        keytype = self.filter_keytype.lower()
         status = self.filter_status
         rows = self.cert_rows
+
         if q:
-            rows = [r for r in rows if q in r.subject.lower() or q in r.serial_nox.lower() or q in r.sha256_fingerprint.lower() or q in r.filename.lower()]
-        if algo:
-            rows = [r for r in rows if r.sig_algo.lower() == algo]
-        if keytype:
-            rows = [r for r in rows if keytype in r.pubkey_type.lower()]
+            rows = [r for r in rows if q in r.subject.lower()
+                    or q in r.serial_nox.lower()
+                    or q in r.sha256_fingerprint.lower()
+                    or q in r.filename.lower()]
+
         if status:
             if status == 'expiring':
                 rows = [r for r in rows if 0 < r.days_to_expiry <= 30]
@@ -390,7 +610,7 @@ class ADCSApp(App):
                 rows = [r for r in rows if r.days_to_expiry > 30]
             elif status == 'expired':
                 rows = [r for r in rows if r.days_to_expiry == 0]
-        # list revoked first, then by days to expiry
+
         rows = sorted(rows, key=lambda r: (not r.revoked, r.days_to_expiry))
         return rows
 
@@ -405,26 +625,40 @@ class ADCSApp(App):
 
         rows = self.filtered_rows()
         for i, r in enumerate(rows, start=1):
-            table.add_row(
-                str(i),
-                r.serial_nox,
-                r.subject,
-                r.not_before.strftime('%Y-%m-%d'),
-                r.not_after.strftime('%Y-%m-%d'),
-                str(r.days_to_expiry),
-                "yes" if r.revoked else "no",
-                r.sig_algo,
-                f"{r.pubkey_type}{' '+str(r.pubkey_bits)+' bits' if r.pubkey_bits else ''}",
-                r.sha256_fingerprint,
-                r.filename,
-            )
+            subj = r.subject
+            if self.compact_mode and len(subj) > 48:
+                subj = subj[:45] + "…"
+
+            if self.compact_mode:
+                table.add_row(
+                    str(i),
+                    r.serial_nox,
+                    subj,
+                    r.not_after.strftime('%Y-%m-%d'),
+                    str(r.days_to_expiry),
+                    "yes" if r.revoked else "no",
+                )
+            else:
+                table.add_row(
+                    str(i),
+                    r.serial_nox,
+                    subj,
+                    r.not_before.strftime('%Y-%m-%d'),
+                    r.not_after.strftime('%Y-%m-%d'),
+                    str(r.days_to_expiry),
+                    "yes" if r.revoked else "no",
+                    r.sig_algo,
+                    f"{r.pubkey_type}{' '+str(r.pubkey_bits)+' bits' if r.pubkey_bits else ''}",
+                    r.sha256_fingerprint,
+                    r.filename,
+                )
 
         if rows:
             try:
-                table.move_cursor(row=0, column=0)  # newer Textual
+                table.move_cursor(row=0, column=0)
             except Exception:
                 try:
-                    table.cursor_coordinate = (0, 0)  # older Textual
+                    table.cursor_coordinate = (0, 0)
                 except Exception:
                     pass
             try:
@@ -434,7 +668,8 @@ class ADCSApp(App):
             self._show_detail_current_row()
 
         ca_name = (self.current_ca.get('display_name') if self.current_ca else '-')
-        self.query_one(Status).set_text(f"{len(rows)} certificates — CA: {ca_name}")
+        prefix = "Compact mode — " if self.compact_mode else ""
+        self.query_one(Status).set_text(f"{prefix}{len(rows)} certificates — CA: {ca_name}")
 
     # ---------- Actions ----------
     def action_help(self) -> None:
@@ -447,7 +682,11 @@ class ADCSApp(App):
         e : Export current (filtered) list to CSV in cwd
         r : Revoke selected certificate
         u : Unrevoke selected certificate
+        Del : Delete selected certificate (moves Cert & Key to .trash)
+        Shift+Del : Permanently delete selected certificate (and its key if found)
         Ctrl+R : Re-sign CRL (bump CRLNumber, refresh dates)
+        Ctrl+N : New certificate (open form)
+        c : Toggle compact mode
         F5 : Reload CA
         Tab / Shift+Tab : Move between left/right panes
         q : Quit
@@ -461,12 +700,15 @@ class ADCSApp(App):
         filters = self.query_one("#filters")
         filters.display = ("none" if filters.display != "none" else "block")
 
+    def action_toggle_compact(self) -> None:
+        self.compact_mode = not self.compact_mode
+        self._apply_layout_mode()
+
     def action_reload(self) -> None:
-        # Reload CRL + certs
         ca = self.current_ca
         if ca:
             crl_path = (ca.get("crl") or {}).get("path_crl")
-            self.revoked_serials = _revoked_serials_set(crl_path)
+            self.revoked_serials = revoked_serials_set(crl_path)
         self.load_certs()
 
     def action_open_detail(self) -> None:
@@ -498,12 +740,10 @@ class ADCSApp(App):
         return rows[row_idx]
 
     def action_revoke_current(self) -> None:
-        """Revoke the selected certificate and update the CRL."""
         ca = self.current_ca
         if not ca:
             self.notify("No CA selected.", severity="warning")
             return
-
         try:
             ca_key = ca["__key_obj"]
             ca_cert_der = ca["__certificate_der"]
@@ -524,23 +764,20 @@ class ADCSApp(App):
             self.notify(f"Failed to load CA cert (DER): {e}", severity="error", timeout=6)
             return
 
-        serial = r.serial_nox  # hex (no 0x)
+        serial = r.serial_nox
         try:
             revoke(ca_key=ca_key, ca_cert=ca_cert, serial=serial, crl_path=crl_path)
-            # Reload CRL + table + details
-            self.revoked_serials = _revoked_serials_set(crl_path)
+            self.revoked_serials = revoked_serials_set(crl_path)
             self.load_certs()
             self.notify(f"Cert {serial} revoked — CRL updated: {crl_path}", severity="success", timeout=6)
         except Exception as e:
             self.notify(f"Revoke failed: {e}", severity="error", timeout=8)
 
     def action_unrevoke_current(self) -> None:
-        """Unrevoke the selected certificate and update the CRL."""
         ca = self.current_ca
         if not ca:
             self.notify("No CA selected.", severity="warning")
             return
-
         try:
             ca_key = ca["__key_obj"]
             ca_cert_der = ca["__certificate_der"]
@@ -561,18 +798,16 @@ class ADCSApp(App):
             self.notify(f"Failed to load CA cert (DER): {e}", severity="error", timeout=6)
             return
 
-        serial = r.serial_nox  # hex (no 0x)
+        serial = r.serial_nox
         try:
             unrevoke(ca_key=ca_key, ca_cert=ca_cert, serial=serial, crl_path=crl_path)
-            # Reload CRL + table + details
-            self.revoked_serials = _revoked_serials_set(crl_path)
+            self.revoked_serials = revoked_serials_set(crl_path)
             self.load_certs()
             self.notify(f"Cert {serial} unrevoked — CRL updated: {crl_path}", severity="success", timeout=6)
         except Exception as e:
             self.notify(f"Unrevoke failed: {e}", severity="error", timeout=8)
 
     def action_resign_crl(self) -> None:
-        """Re-sign the CRL even if nothing changed (bump CRLNumber, refresh dates)."""
         ca = self.current_ca
         if not ca:
             self.notify("No CA selected.", severity="warning")
@@ -590,11 +825,57 @@ class ADCSApp(App):
 
         try:
             new_num = resign_crl(ca_key=ca_key, ca_cert=ca_cert, crl_path=crl_path, bump_number=True)
-            self.revoked_serials = _revoked_serials_set(crl_path)
+            self.revoked_serials = revoked_serials_set(crl_path)
             self.load_certs()
             self.notify(f"CRL re-signed (CRLNumber {new_num}) — {crl_path}", severity="success", timeout=6)
         except Exception as e:
             self.notify(f"CRL re-sign failed: {e}", severity="error", timeout=8)
+
+    # -------- Delete actions --------
+    def action_delete_current(self) -> None:
+        self._delete_selected(permanent=False)
+
+    def action_delete_current_permanent(self) -> None:
+        self._delete_selected(permanent=True)
+
+    def _delete_selected(self, permanent: bool) -> None:
+        ca = self.current_ca
+        if not ca:
+            self.notify("No CA selected.", severity="warning")
+            return
+
+        r = self._get_current_row()
+        if not r:
+            return
+
+        cert_path = self._find_cert_path_by_filename(ca, r.filename.replace(" (ERROR)", ""))
+        if not cert_path:
+            self.notify("Unable to resolve certificate path.", severity="warning")
+            return
+
+        try:
+            n_cert, n_key = self._delete_pair(cert_path, permanent=permanent, ca=ca)
+        except Exception as e:
+            self.notify(f"Delete failed: {e}", severity="error", timeout=8)
+            return
+
+        try:
+            self.load_certs()
+        except Exception:
+            pass
+
+        where = "permanently deleted" if permanent else "moved to .trash"
+        self.notify(f"Certificate {os.path.basename(cert_path)} {where}. "
+                    f"(cert:{n_cert}, key:{n_key})", severity="success", timeout=6)
+
+    def action_open_new_certificate(self) -> None:
+        if not self.current_ca:
+            self.notify("No CA selected.", severity="warning")
+            return
+        self.push_screen(NewCertScreen(self, self.current_ca))
+
+    def action_new_certificate_keyboard(self) -> None:
+        self.action_open_new_certificate()
 
     def action_next_pane(self) -> None:
         self.set_focus_next()
@@ -609,12 +890,6 @@ class ADCSApp(App):
                 self.switch_ca(int(event.value))
             except Exception:
                 pass
-        elif event.select.id == "sel_algo":
-            self.filter_algo = event.value or ""
-            self.refresh_table()
-        elif event.select.id == "sel_key":
-            self.filter_keytype = event.value or ""
-            self.refresh_table()
         elif event.select.id == "sel_status":
             self.filter_status = event.value or ""
             self.refresh_table()
@@ -629,8 +904,6 @@ class ADCSApp(App):
             q = self.query_one("#inp_q", Input).value or ""
             self.filter_q = q
             self.refresh_table()
-        elif event.button.id == "btn_export":
-            self.action_export_csv()
         elif event.button.id == "btn_reload":
             self.action_reload()
         elif event.button.id == "btn_revoke":
@@ -639,6 +912,10 @@ class ADCSApp(App):
             self.action_unrevoke_current()
         elif event.button.id == "btn_resign_crl":
             self.action_resign_crl()
+        elif event.button.id == "btn_newcert":
+            self.action_open_new_certificate()
+        elif event.button.id == "btn_delete":
+            self.action_delete_current()
 
     # --- Auto-update the details panel when the row changes ---
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
@@ -653,21 +930,20 @@ class ADCSApp(App):
         except Exception:
             pass
 
-    # Universal fallback: intercept arrows when focus is on the table
     def on_key(self, event: events.Key) -> None:
-        if self.focused is self._table():
+        table = self._maybe_table()
+        if table is not None and self.focused is table:
             if event.key in ("up", "down", "pageup", "pagedown", "home", "end"):
-                # NOTE: use a tiny positive delay to avoid ZeroDivisionError in some Textual versions
                 self.set_timer(0.05, self._show_detail_current_row)
-
+    
     # ---------- Certificate detail panel ----------
     def show_detail(self, r: CertRow) -> None:
         ca = self.current_ca
         if not ca:
             return
-        cert_dir = ca.get("__path_cert")
+        certs_dir, _private_dir = self._resolve_storage_paths(ca)
         cert_path = None
-        for p in scan_cert_paths(cert_dir):
+        for p in scan_cert_paths(certs_dir):  # utils
             if os.path.basename(p) == r.filename.replace(" (ERROR)", ""):
                 cert_path = p
                 break
@@ -687,8 +963,7 @@ class ADCSApp(App):
                 log.update(msg)
             return
         try:
-            cert = _load_certificate(cert_path)
-            # revoked status
+            cert = load_certificate_file(cert_path)  # utils
             try:
                 serial_int = int(format(cert.serial_number, "x"), 16)
             except ValueError:
@@ -698,6 +973,12 @@ class ADCSApp(App):
             lines: List[str] = []
             lines.append(f"File: {cert_path}")
             lines.append(f"Subject: {cert.subject.rfc4514_string()}")
+            if self.compact_mode and len(lines[1]) > 96:
+                subj_prefix = "Subject: "
+                if lines[1].startswith(subj_prefix):
+                    rest = lines[1][len(subj_prefix):]
+                    lines[1] = subj_prefix + rest[:80] + "\n           " + rest[80:]
+
             lines.append(f"Serial (hex): {format(cert.serial_number, 'x')}")
             lines.append(f"Validity: {cert.not_valid_before} -> {cert.not_valid_after}")
             lines.append(f"Revoked: {'yes' if is_revoked else 'no'}")
@@ -705,12 +986,10 @@ class ADCSApp(App):
                 sig_algo = cert.signature_hash_algorithm.name
             except Exception:
                 sig_algo = "unknown"
-            lines.append(f"Signature: {sig_algo}")
-            pk_type, pk_bits = _get_pubkey_info(cert)
+            pk_type, pk_bits = get_public_key_info(cert)  # utils
             lines.append(f"Public Key: {pk_type}{' '+str(pk_bits)+' bits' if pk_bits else ''}")
             fp = cert.fingerprint(hashes.SHA256()).hex()
             lines.append(f"SHA-256: {fp}")
-            # SAN + KU + EKU (best effort)
             try:
                 san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
                 san_vals = ", ".join(str(n.value) for n in san)
@@ -750,14 +1029,12 @@ class ADCSApp(App):
 # -----------------------------
 
 def _cli_find_ca_by_id(conf: Dict[str, Any], ca_id: str) -> Optional[Dict[str, Any]]:
-    """Find a CA object by its 'id' (preferred) or by display_name fallback."""
     for ca in (conf.get("cas_list") or []):
         if str(ca.get("id")) == ca_id or str(ca.get("display_name")) == ca_id:
             return ca
     return None
 
 def _cmd_resign_crl(ca_id: str, next_update_hours: int = 8, bump_number: bool = True) -> int:
-    """Re-sign the CRL for the given CA id and print the new CRLNumber."""
     try:
         conf = load_yaml_conf("adcs.yaml")
     except Exception as e:
@@ -810,7 +1087,6 @@ if __name__ == "__main__":
     parser = _build_arg_parser()
     args, unknown = parser.parse_known_args()
 
-    # CLI mode: re-sign CRL and exit
     if args.resign_crl:
         if not args.ca_id:
             print("ERROR: --ca-id is required with --resign-crl", file=sys.stderr)
@@ -822,6 +1098,5 @@ if __name__ == "__main__":
         )
         sys.exit(rc)
 
-    # Otherwise, start the TUI
     ADCSApp().run()
 
