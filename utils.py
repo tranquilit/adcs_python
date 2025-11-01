@@ -33,7 +33,7 @@ from samba.dcerpc import nbt
 # pyasn1 for minimal CMC/PKIResponse structures
 from pyasn1.type import univ, namedtype, namedval, char, useful, constraint
 from pyasn1.codec.der.encoder import encode as der_encode
-from typing import Iterable, List
+from typing import Iterable, List, Optional
 
 
 # -----------------------------------------------------------------------------
@@ -1323,7 +1323,6 @@ def build_ces_response(uuid_request: str, uuid_random: str, p7b_der: str, leaf_d
     raw = ET.tostring(env, encoding="utf-8", xml_declaration=True)
     return _prettify(raw)
 
-
 def _load_existing_crl(path: str):
     try:
         with open(path, "rb") as f:
@@ -1340,21 +1339,70 @@ def _iter_revoked(crl) -> List[cx509.RevokedCertificate]:
     if not crl:
         return []
     try:
-        # Beaucoup de versions rendent l'objet CRL itérable
-        return list(crl)
+        return list(crl) 
     except Exception:
         rc = getattr(crl, "revoked_certificates", None)
         return list(rc) if rc else []
 
 
-def _next_crl_number(crl) -> int:
+def _read_crl_number_from_obj(crl) -> Optional[int]:
     if not crl:
-        return 1
+        return None
     try:
         ext = crl.extensions.get_extension_for_oid(cx509.ExtensionOID.CRL_NUMBER).value
-        return int(ext.crl_number) + 1
+        return int(ext.crl_number)
     except Exception:
-        return 1
+        pass
+    try:
+        for ext in crl.extensions:
+            if getattr(ext, "oid", None) == cx509.ExtensionOID.CRL_NUMBER:
+                try:
+                    return int(ext.value.crl_number)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return None
+
+
+
+def _crlnum_sidecar_path(crl_path: str) -> str:
+    return crl_path + ".num"
+
+
+def _read_sidecar_num(path: str) -> Optional[int]:
+    try:
+        with open(path, "rt", encoding="utf-8") as f:
+            return int(f.read().strip(), 10)
+    except Exception:
+        return None
+
+
+def _write_sidecar_num(path: str, num: int) -> None:
+    tmp = path + ".tmp"
+    with open(tmp, "wt", encoding="utf-8") as f:
+        f.write(str(int(num)))
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)  
+
+
+def _next_crl_number_persistent(crl_path: str, crl, bump: bool = True) -> int:
+    sidecar = _crlnum_sidecar_path(crl_path)
+    sc = _read_sidecar_num(sidecar)
+    cur = _read_crl_number_from_obj(crl)
+
+    if not bump:
+        return sc if sc is not None else (cur if cur is not None else 1)
+
+    if sc is not None:
+        nxt = sc + 1
+    elif cur is not None:
+        nxt = cur + 1
+    else:
+        nxt = 1
+    _write_sidecar_num(sidecar, nxt)
+    return nxt
 
 
 def _serial_to_int(serial) -> int:
@@ -1369,6 +1417,37 @@ def _serial_to_int(serial) -> int:
     return int(serial)
 
 
+def _add_aki_if_absent(builder, ca_key):
+    try:
+        builder.extensions.get_extension_for_class(cx509.AuthorityKeyIdentifier)
+    except Exception:
+        try:
+            aki = cx509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key())
+            builder = builder.add_extension(aki, critical=False)
+        except Exception:
+            pass
+    return builder
+
+
+def _select_algo(hash_name: str):
+    algo = {
+        "sha256": hashes.SHA256,
+        "sha384": hashes.SHA384,
+        "sha512": hashes.SHA512,
+        "sha1":   hashes.SHA1,
+    }.get(hash_name.lower(), hashes.SHA256)
+    return algo()
+
+
+def _write_crl_file(crl_path: str, pem_bytes: bytes) -> None:
+    dirn = os.path.dirname(crl_path) or "."
+    os.makedirs(dirn, exist_ok=True)
+    with open(crl_path, "wb") as f:
+        f.write(pem_bytes)
+        f.flush()
+        os.fsync(f.fileno())
+
+
 def revoke(ca_key, ca_cert: cx509.Certificate, serial, crl_path: str, next_update_hours: int = 8) -> None:
     serial_int = _serial_to_int(serial)
 
@@ -1376,98 +1455,7 @@ def revoke(ca_key, ca_cert: cx509.Certificate, serial, crl_path: str, next_updat
     next_update = now + timedelta(hours=int(next_update_hours))
 
     old_crl = _load_existing_crl(crl_path)
-    crl_number = _next_crl_number(old_crl)
-
-    builder = (
-        cx509.CertificateRevocationListBuilder()
-        .issuer_name(ca_cert.subject)
-        .last_update(now)
-        .next_update(next_update)
-        .add_extension(cx509.CRLNumber(crl_number), critical=False)
-    )
-
-    for rc in _iter_revoked(old_crl):
-        if rc.serial_number == serial_int:
-            continue
-        builder = builder.add_revoked_certificate(rc)
-
-    rcb = (
-        cx509.RevokedCertificateBuilder()
-        .serial_number(serial_int)
-        .revocation_date(now)
-        .add_extension(cx509.CRLReason(cx509.ReasonFlags.unspecified), critical=False)
-    ).build()
-    builder = builder.add_revoked_certificate(rcb)
-
-    new_crl = builder.sign(private_key=ca_key, algorithm=hashes.SHA256())
-    pem_bytes = new_crl.public_bytes(encoding=serialization.Encoding.PEM)
-
-    dirn = os.path.dirname(crl_path) or "."
-    os.makedirs(dirn, exist_ok=True)
-    with open(crl_path, "wb") as f:
-        f.write(pem_bytes)
-
-
-def unrevoke(ca_key, ca_cert: cx509.Certificate, serial, crl_path: str, next_update_hours: int = 8) -> None:
-    serial_int = _serial_to_int(serial)
-
-    now = datetime.now(timezone.utc)
-    next_update = now + timedelta(hours=int(next_update_hours))
-
-    old_crl = _load_existing_crl(crl_path)
-    if not old_crl:
-        raise FileNotFoundError(f"CRL introuvable à '{crl_path}' — rien à retirer.")
-
-    crl_number = _next_crl_number(old_crl)
-
-    builder = (
-        cx509.CertificateRevocationListBuilder()
-        .issuer_name(ca_cert.subject)
-        .last_update(now)
-        .next_update(next_update)
-        .add_extension(cx509.CRLNumber(crl_number), critical=False)
-    )
-
-    for rc in _iter_revoked(old_crl):
-        if rc.serial_number == serial_int:
-            continue
-        builder = builder.add_revoked_certificate(rc)
-
-    new_crl = builder.sign(private_key=ca_key, algorithm=hashes.SHA256())
-    pem_bytes = new_crl.public_bytes(encoding=serialization.Encoding.PEM)
-
-    dirn = os.path.dirname(crl_path) or "."
-    os.makedirs(dirn, exist_ok=True)
-    with open(crl_path, "wb") as f:
-        f.write(pem_bytes)
-
-
-def resign_crl(
-    ca_key,
-    ca_cert: cx509.Certificate,
-    crl_path: str,
-    *,
-    next_update_hours: int = 8,
-    bump_number: bool = True,
-    hash_name: str = "sha256",
-) -> int:
-    now = datetime.now(timezone.utc)
-    next_update = now + timedelta(hours=int(next_update_hours))
-
-    old_crl = _load_existing_crl(crl_path)
-    revoked_list = _iter_revoked(old_crl)
-
-    if old_crl:
-        try:
-            old_num = old_crl.extensions.get_extension_for_oid(
-                cx509.ExtensionOID.CRL_NUMBER
-            ).value.crl_number
-        except Exception:
-            old_num = 1
-    else:
-        old_num = 1
-
-    new_num = (int(old_num) + 1) if bump_number else (int(old_num) if old_num else 1)
+    crl_number = _next_crl_number_persistent(crl_path, old_crl, bump=True)
 
     builder = (
         cx509.CertificateRevocationListBuilder()
@@ -1483,9 +1471,106 @@ def resign_crl(
             try:
                 builder = builder.add_extension(ext.value, ext.critical)
             except Exception:
-                pass  # tolérant selon valeurs/versions
+                pass
 
-    builder = builder.add_extension(cx509.CRLNumber(new_num), critical=False)
+    builder = builder.add_extension(cx509.CRLNumber(crl_number), critical=False)
+
+    for rc in _iter_revoked(old_crl):
+        if rc.serial_number == serial_int:
+            continue
+        builder = builder.add_revoked_certificate(rc)
+
+    rcb = (
+        cx509.RevokedCertificateBuilder()
+        .serial_number(serial_int)
+        .revocation_date(now)
+        .add_extension(cx509.CRLReason(cx509.ReasonFlags.unspecified), critical=False)
+    ).build()
+    builder = builder.add_revoked_certificate(rcb)
+
+    builder = _add_aki_if_absent(builder, ca_key)
+
+    new_crl = builder.sign(private_key=ca_key, algorithm=hashes.SHA256())
+    pem_bytes = new_crl.public_bytes(encoding=serialization.Encoding.PEM)
+    _write_crl_file(crl_path, pem_bytes)
+
+
+def unrevoke(ca_key, ca_cert: cx509.Certificate, serial, crl_path: str, next_update_hours: int = 8) -> None:
+    serial_int = _serial_to_int(serial)
+
+    now = datetime.now(timezone.utc)
+    next_update = now + timedelta(hours=int(next_update_hours))
+
+    old_crl = _load_existing_crl(crl_path)
+    if not old_crl:
+        raise FileNotFoundError(f"CRL introuvable à '{crl_path}' — rien à retirer.")
+
+    crl_number = _next_crl_number_persistent(crl_path, old_crl, bump=True)
+
+    builder = (
+        cx509.CertificateRevocationListBuilder()
+        .issuer_name(ca_cert.subject)
+        .last_update(now)
+        .next_update(next_update)
+    )
+
+    if old_crl is not None:
+        for ext in old_crl.extensions:
+            if ext.oid == cx509.ExtensionOID.CRL_NUMBER:
+                continue
+            try:
+                builder = builder.add_extension(ext.value, ext.critical)
+            except Exception:
+                pass
+
+    builder = builder.add_extension(cx509.CRLNumber(crl_number), critical=False)
+
+    for rc in _iter_revoked(old_crl):
+        if rc.serial_number == serial_int:
+            continue
+        builder = builder.add_revoked_certificate(rc)
+
+    builder = _add_aki_if_absent(builder, ca_key)
+
+    new_crl = builder.sign(private_key=ca_key, algorithm=hashes.SHA256())
+    pem_bytes = new_crl.public_bytes(encoding=serialization.Encoding.PEM)
+    _write_crl_file(crl_path, pem_bytes)
+
+
+def resign_crl(
+    ca_key,
+    ca_cert: cx509.Certificate,
+    crl_path: str,
+    *,
+    next_update_hours: int = 8,
+    bump_number: bool = True,
+    hash_name: str = "sha256",
+) -> int:
+    now = datetime.now(timezone.utc)
+    next_update = now + timedelta(hours=int(next_update_hours))
+
+    old_crl = _load_existing_crl(crl_path)
+    revoked_list = _iter_revoked(old_crl)  
+
+    new_num = _next_crl_number_persistent(crl_path, old_crl, bump=bump_number)
+
+    builder = (
+        cx509.CertificateRevocationListBuilder()
+        .issuer_name(ca_cert.subject)
+        .last_update(now)
+        .next_update(next_update)
+    )
+
+    if old_crl is not None:
+        for ext in old_crl.extensions:
+            if ext.oid == cx509.ExtensionOID.CRL_NUMBER:
+                continue
+            try:
+                builder = builder.add_extension(ext.value, ext.critical)
+            except Exception:
+                pass 
+
+    builder = builder.add_extension(cx509.CRLNumber(int(new_num)), critical=False)
 
     for rc in revoked_list:
         try:
@@ -1502,28 +1587,18 @@ def resign_crl(
             except Exception:
                 pass
 
-    try:
-        builder.extensions.get_extension_for_class(cx509.AuthorityKeyIdentifier)
-    except Exception:
-        try:
-            aki = cx509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key())
-            builder = builder.add_extension(aki, critical=False)
-        except Exception:
-            pass
+    builder = _add_aki_if_absent(builder, ca_key)
 
-    algo = {
-        "sha256": hashes.SHA256,
-        "sha384": hashes.SHA384,
-        "sha512": hashes.SHA512,
-        "sha1":   hashes.SHA1,
-    }.get(hash_name.lower(), hashes.SHA256)()
-
+    algo = _select_algo(hash_name)
     new_crl = builder.sign(private_key=ca_key, algorithm=algo)
     pem_bytes = new_crl.public_bytes(encoding=serialization.Encoding.PEM)
+    _write_crl_file(crl_path, pem_bytes)
 
-    dirn = os.path.dirname(crl_path) or "."
-    os.makedirs(dirn, exist_ok=True)
-    with open(crl_path, "wb") as f:
-        f.write(pem_bytes)
+    try:
+        written = _load_existing_crl(crl_path)
+        ext = written.extensions.get_extension_for_oid(cx509.ExtensionOID.CRL_NUMBER).value
+        assert int(ext.crl_number) == int(new_num)
+    except Exception:
+        pass
 
     return int(new_num)
