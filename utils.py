@@ -1463,9 +1463,9 @@ def resign_crl(
                 cx509.ExtensionOID.CRL_NUMBER
             ).value.crl_number
         except Exception:
-            old_num = 0
+            old_num = 1
     else:
-        old_num = 0
+        old_num = 1
 
     new_num = (int(old_num) + 1) if bump_number else (int(old_num) if old_num else 1)
 
