@@ -223,6 +223,7 @@ Launch the admin GUI, then select the target certificate to re-sign/re-issue:
 cd /opt/adcs_python
 ./manageca.py
 ```  
+![Demo TERMINAL UI](demo/ui_terminal.png "DEMO TERMINAL UI")
 
 Desired enhancements for the project.
 ==========================================
