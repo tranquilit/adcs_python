@@ -1764,9 +1764,10 @@ def issue_cert_with_new_key(
         )
 
     # SAN
-    sans = _dedup_sans(subject_sans)
-    if sans:
-        builder = builder.add_extension(cx509.SubjectAlternativeName(sans), critical=False)
+    if subject_sans:
+        sans = _dedup_sans(subject_sans)
+        if sans:
+            builder = builder.add_extension(cx509.SubjectAlternativeName(sans), critical=False)
 
     # Sign
     if isinstance(ca_key, (ed25519.Ed25519PrivateKey, ed448.Ed448PrivateKey)):
