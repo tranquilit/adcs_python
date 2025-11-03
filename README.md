@@ -81,6 +81,7 @@ apt-get install -y \
        git \
        python3-defusedxml \
        python3-pyasn1 \
+       python3-jwcrypto \
        python3-waitress
 ```
 
