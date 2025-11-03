@@ -27,6 +27,8 @@ from utils import (
 from adcs_config import load_yaml_conf, build_templates_for_policy_response
 from callback_loader import load_func
 
+from acme_api import acme_bp
+
 # ------------- SOAP parsing security -------------
 MAX_SOAP_BYTES = 2 * 1024 * 1024  # 2 MiB: hard limit to avoid OOM
 
@@ -292,8 +294,9 @@ if __name__ == '__main__':
     app.confadcs = load_yaml_conf("adcs.yaml")
     decls = app.confadcs.get("__template_decls__") or []
     print("Loaded config with", len(decls), "template declaration(s).")
-    #app.run(host='127.0.0.1', port=8080)
-    serve(app, host="127.0.0.1", port=8080)
+    app.register_blueprint(acme_bp)
+    app.run(host='127.0.0.1', port=8080)
+    #serve(app, host="127.0.0.1", port=8080)
 
 
 

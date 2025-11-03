@@ -325,6 +325,8 @@ def load_yaml_conf(path="adcs.yaml"):
     policy_provider = gbl.get("policy_provider", {})
     storage_paths_global = gbl.get("storage_paths", {}) or {}
     conf["path_list_request_id"] = gbl.get("path_list_request_id", "/opt/adcs_python/list_request_id")
+
+    conf["acme_database_url"] = gbl.get("acme_database_url", "sqlite:///acme.db")
     conf["policyid"] = policy_provider.get("policy_id")
     conf["next_update_hours"] = policy_provider.get("next_update_hours", 8)
 
@@ -406,13 +408,19 @@ def load_yaml_conf(path="adcs.yaml"):
     conf["__template_decls__"] = []
     for tdecl in cfg.get("templates", []) or []:
         cb = (tdecl.get("callback") or {})
-        cb_path = cb.get("path")
+        cb_path   = cb.get("path")
         cb_define = cb.get("define")
-        cb_issue = cb.get("issue")
+        cb_issue  = cb.get("issue")
         if not (cb_path and cb_define and cb_issue):
             raise ValueError("Each template must define callback.path / callback.define / callback.issue")
-        conf["__template_decls__"].append({"path": cb_path, "define": cb_define, "issue": cb_issue})
 
+        conf["__template_decls__"].append({
+            "path": cb_path,
+            "define": cb_define,
+            "issue": cb_issue,
+            "acme_available": bool(cb.get("acme_available", False)),
+            "acme_alias": cb.get("acme_alias"),  # peut être None si non défini
+        })
     return conf
 
 
@@ -465,6 +473,9 @@ def build_templates_for_policy_response(
             kerberos_user=kerberos_user,
             request=request
         )
+        tpl["acme_available"] = bool(cb.get("acme_available", False))
+        if cb.get("acme_alias"):
+            tpl["acme_alias"] = str(cb["acme_alias"])
         if not isinstance(tpl, dict):
             raise TypeError(f"{cb['path']}:{cb['define']} must return a dict")
 
