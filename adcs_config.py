@@ -430,7 +430,8 @@ def build_templates_for_policy_response(
     conf: dict,
     *,
     kerberos_user: str | None = None,
-    request
+    request,
+    acme_only=True
 ) -> Tuple[list[dict], list[dict]]:
     """
     Build **per-request** templates and a **per-request** OIDs registry.
@@ -467,6 +468,10 @@ def build_templates_for_policy_response(
 
     # Build each template via its "define" callback
     for cb in conf.get("__template_decls__") or []:
+        if acme_only:
+            if not bool(cb.get("acme_available", False)):
+                continue
+ 
         define_template = load_func(cb["path"], cb["define"])
         tpl = define_template(
             app_conf=conf,                 # conf remains read-only

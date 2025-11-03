@@ -253,6 +253,7 @@ def _resolve_template_for_user(caid, alias):
         current_app.confadcs,
         kerberos_user=getattr(g, "kerberos_user", None),
         request=request,
+        acme_only=True
     )
 
     # match alias across several possible keys
