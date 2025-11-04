@@ -21,7 +21,6 @@ CLI (no GUI):
   python manageca.py --resign-crl --ca-id ca-1
 """
 from __future__ import annotations
-
 import os
 import sys
 import csv
@@ -69,6 +68,9 @@ from utils_crt import (
     get_public_key_info,
     scan_cert_paths,
     revoked_serials_set,
+    _cmd_rotate_if_expiring,
+    _cli_find_ca_by_id,
+    _cmd_resign_crl
 )
 
 # =============================
@@ -1059,49 +1061,6 @@ class ADCSApp(App):
 # CLI entrypoint
 # -----------------------------
 
-def _cli_find_ca_by_id(conf: Dict[str, Any], ca_id: str) -> Optional[Dict[str, Any]]:
-    for ca in (conf.get("cas_list") or []):
-        if str(ca.get("id")) == ca_id or str(ca.get("display_name")) == ca_id:
-            return ca
-    return None
-
-def _cmd_resign_crl(ca_id: str, next_update_hours: int = 8, bump_number: bool = True) -> int:
-    try:
-        conf = load_yaml_conf("adcs.yaml")
-    except Exception as e:
-        print(f"ERROR: Unable to load adcs.yaml: {e}", file=sys.stderr)
-        return 2
-
-    ca = _cli_find_ca_by_id(conf, ca_id)
-    if not ca:
-        print(f"ERROR: CA '{ca_id}' not found in adcs.yaml", file=sys.stderr)
-        return 3
-
-    try:
-        ca_key = ca["__key_obj"]
-        ca_cert_der = ca["__certificate_der"]
-        crl_path = (ca.get("crl") or {}).get("path_crl")
-        if not crl_path:
-            raise KeyError("Missing crl.path_crl in CA config.")
-        ca_cert = x509.load_der_x509_certificate(ca_cert_der)
-    except Exception as e:
-        print(f"ERROR: CA config invalid for '{ca_id}': {e}", file=sys.stderr)
-        return 4
-
-    try:
-        new_num = resign_crl(
-            ca_key=ca_key,
-            ca_cert=ca_cert,
-            crl_path=crl_path,
-            bump_number=bump_number,
-            next_update_hours=next_update_hours,
-        )
-        print(f"CRL re-signed for '{ca_id}' -> CRLNumber {new_num} (path: {crl_path})")
-        return 0
-    except Exception as e:
-        print(f"ERROR: CRL re-sign failed for '{ca_id}': {e}", file=sys.stderr)
-        return 5
-
 def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="ADCS TUI / tools")
     p.add_argument("--resign-crl", action="store_true",
@@ -1112,11 +1071,58 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="Do not increment CRLNumber when re-signing (keep the same number).")
     p.add_argument("--next-update-hours", type=int, default=8,
                    help="Hours until NextUpdate when re-signing (default: 8).")
+    p.add_argument("--rotate-if-expiring", action="store_true",
+                   help="If the given certificate expires in ≤ threshold-days, re-issue a new key+cert with same SAN/CN using --ca-id and overwrite --crt-path/--key-path.")
+    p.add_argument("--crt-path", type=str,
+                   help="Path to the existing certificate (PEM) to check/replace.")
+    p.add_argument("--key-path", type=str,
+                   help="Path to the existing private key (PEM) to replace.")
+    p.add_argument("--threshold-days", type=int, default=30,
+                   help="Rotate when the certificate expires in ≤ this many days (default: 30).")
+    p.add_argument("--chain", action="append",
+                   help="PEM path to a chain certificate (intermediate or root). "
+                        "Repeat the option for each file, in order: leaf -> intermediate(s) -> root.")
+    p.add_argument("--fullchain-path", type=str,
+                   help="Path to write the full chain to (default: --crt-path).")
+    p.add_argument("--no-write-fullchain-to-crt", action="store_true",
+                   help="Do not write the full chain into --crt-path (useful if you want to keep only the leaf cert).")
+    p.add_argument("--valid-days", type=int,
+                   help="Validity period of the new certificate in days (takes precedence over the original duration).")
     return p
+
 
 if __name__ == "__main__":
     parser = _build_arg_parser()
     args, unknown = parser.parse_known_args()
+
+    if args.rotate_if_expiring:
+        if not args.ca_id:
+            print("ERROR: --ca-id is required with --rotate-if-expiring", file=sys.stderr)
+            sys.exit(1)
+        if not args.crt_path or not args.key_path:
+            print("ERROR: --crt-path and --key-path are required with --rotate-if-expiring", file=sys.stderr)
+            sys.exit(1)
+
+    chain_paths = []
+    if args.chain:
+        # supporte aussi une liste séparée par des virgules dans un même --chain
+        for item in args.chain:
+            parts = [p.strip() for p in item.split(",") if p.strip()]
+            chain_paths.extend(parts)
+
+    rc = _cmd_rotate_if_expiring(
+        ca_id=args.ca_id,
+        crt_path=args.crt_path,
+        key_path=args.key_path,
+        threshold_days=int(args.threshold_days),
+        conf=load_yaml_conf("adcs.yaml"),
+        chain_paths=chain_paths or None,
+        fullchain_path=args.fullchain_path,
+        write_fullchain_to_crt=(not args.no_write_fullchain_to_crt),
+        valid_days=args.valid_days if args.valid_days else 365
+    )
+    sys.exit(rc)
+
 
     if args.resign_crl:
         if not args.ca_id:

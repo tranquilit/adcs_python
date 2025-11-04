@@ -5,6 +5,9 @@ import base64
 import os
 import ipaddress
 import glob
+import tempfile
+import sys
+import stat
 from typing import Tuple, Iterable, List, Optional, Dict, Any, Set
 from datetime import datetime, timezone, timedelta
 
@@ -532,4 +535,215 @@ def revoked_serials_set(crl_path: Optional[str]) -> Set[int]:
     if not crl:
         return set()
     return {rc.serial_number for rc in _iter_revoked(crl)}
+
+def _extract_cn_and_sans(cert: cx509.Certificate) -> tuple[str, list[str]]:
+    # CN
+    try:
+        cn_attr = cert.subject.get_attributes_for_oid(cx509.NameOID.COMMON_NAME)
+        cn = cn_attr[0].value if cn_attr else ""
+    except Exception:
+        cn = ""
+
+    # SAN
+    sans_list: list[str] = []
+    try:
+        san_ext = cert.extensions.get_extension_for_class(cx509.SubjectAlternativeName).value
+        # Conserver la valeur brute (dns, ip, email, uri…)
+        for n in san_ext:
+            v = getattr(n, "value", None)
+            if v is None:
+                # IPAddress peut ne pas avoir .value ; cast en str
+                v = str(n)
+            sans_list.append(str(v))
+    except Exception:
+        pass
+
+    return cn, sans_list
+
+
+def _pick_key_params_from_existing(cert: cx509.Certificate) -> dict[str, Any]:
+    pk = cert.public_key()
+    params: dict[str, Any] = {}
+
+    try:
+        from cryptography.hazmat.primitives.asymmetric import rsa, ec, ed25519, ed448
+        # RSA
+        if hasattr(pk, "key_size") and pk.__class__.__name__.lower().startswith("rs"):
+            params["key_type"] = "rsa"
+            params["rsa_key_size"] = getattr(pk, "key_size", 2048) or 2048
+            return params
+        # EC
+        if hasattr(pk, "curve") and isinstance(getattr(pk, "curve", None), ec.EllipticCurve):
+            params["key_type"] = "ec"
+            curve = pk.curve
+            # Utiliser le nom exact si dispo (ex: secp256r1, secp384r1…)
+            curve_name = getattr(curve, "name", None)
+            params["ec_curve"] = str(curve_name or "secp256r1")
+            return params
+        # Ed25519
+        if isinstance(pk, ed25519.Ed25519PublicKey):
+            params["key_type"] = "ed25519"
+            return params
+        # Ed448
+        if isinstance(pk, ed448.Ed448PublicKey):
+            params["key_type"] = "ed448"
+            return params
+    except Exception:
+        pass
+
+    # Fallback
+    params["key_type"] = "rsa"
+    params["rsa_key_size"] = 2048
+    return params
+
+
+def _atomic_write(path: str, data: bytes, mode: int | None = None) -> None:
+    dirn = os.path.dirname(os.path.abspath(path)) or "."
+    with tempfile.NamedTemporaryFile(dir=dirn, delete=False) as tmp:
+        tmp.write(data)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        tmp_path = tmp.name
+    try:
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+    if mode is not None:
+        try:
+            os.chmod(path, mode)
+        except Exception:
+            pass
+
+
+def _cmd_rotate_if_expiring(
+    ca_id: str,
+    crt_path: str,
+    key_path: str,
+    threshold_days: int,
+    conf,
+    chain_paths: Optional[list[str]] = None,
+    fullchain_path: Optional[str] = None,
+    write_fullchain_to_crt: bool = True,
+    valid_days=365
+) -> int:
+
+    ca = _cli_find_ca_by_id(conf, ca_id)
+    if not ca:
+        print(f"ERROR: CA '{ca_id}' not found in adcs.yaml", file=sys.stderr)
+        return 3
+
+    if not os.path.isfile(crt_path):
+        print(f"ERROR: crt file not found: {crt_path}", file=sys.stderr)
+        return 4
+
+    try:
+        cert = load_certificate_file(crt_path)
+    except Exception as e:
+        print(f"ERROR: cannot parse certificate '{crt_path}': {e}", file=sys.stderr)
+        return 5
+
+    now = datetime.now(timezone.utc)
+    not_after = cert.not_valid_after_utc
+    days_left = (not_after - now).days
+    if days_left > threshold_days:
+        print(f"OK: {days_left} days left (> {threshold_days}); no rotation needed.")
+        return 0
+
+    cn, sans = _extract_cn_and_sans(cert)
+    
+    total_valid_seconds = int(
+        (cert.not_valid_after_utc - cert.not_valid_before_utc).total_seconds()
+    )
+
+    total_valid_seconds = int(valid_days * 24 * 3600)
+
+    key_params = _pick_key_params_from_existing(cert)
+
+    cert_obj, key_obj, cert_pem, key_pem = issue_cert_with_new_key(
+            ca=ca,
+            common_name=cn or "",          
+            subject_sans=sans,         
+            key_type=key_params.get("key_type", "rsa"),
+            rsa_key_size=key_params.get("rsa_key_size", 2048),
+            ec_curve=key_params.get("ec_curve", "secp256r1"),
+            validity_seconds=total_valid_seconds,
+            key_export_password=None,
+        )
+
+    _atomic_write(crt_path, cert_pem)
+
+    if chain_paths:
+        chain_bytes = _read_all_bytes(chain_paths)
+        fullchain = cert_pem + chain_bytes
+        target_path = fullchain_path or (crt_path if write_fullchain_to_crt else crt_path)
+        _atomic_write(target_path, fullchain)
+    else:
+        _atomic_write(crt_path, cert_pem)
+
+    _atomic_write(key_path, key_pem, mode=stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+
+    print(
+        f"ROTATED: cert replaced at '{crt_path}', key replaced at '{key_path}' "
+        f"(days left was {days_left} ≤ threshold {threshold_days})"
+    )
+    return 0
+
+def _cli_find_ca_by_id(conf: Dict[str, Any], ca_id: str) -> Optional[Dict[str, Any]]:
+    for ca in (conf.get("cas_list") or []):
+        if str(ca.get("id")) == ca_id or str(ca.get("display_name")) == ca_id:
+            return ca
+    return None
+
+def _cmd_resign_crl(ca_id: str, next_update_hours: int = 8, bump_number: bool = True) -> int:
+    try:
+        conf = load_yaml_conf("adcs.yaml")
+    except Exception as e:
+        print(f"ERROR: Unable to load adcs.yaml: {e}", file=sys.stderr)
+        return 2
+
+    ca = _cli_find_ca_by_id(conf, ca_id)
+    if not ca:
+        print(f"ERROR: CA '{ca_id}' not found in adcs.yaml", file=sys.stderr)
+        return 3
+
+    try:
+        ca_key = ca["__key_obj"]
+        ca_cert_der = ca["__certificate_der"]
+        crl_path = (ca.get("crl") or {}).get("path_crl")
+        if not crl_path:
+            raise KeyError("Missing crl.path_crl in CA config.")
+        ca_cert = x509.load_der_x509_certificate(ca_cert_der)
+    except Exception as e:
+        print(f"ERROR: CA config invalid for '{ca_id}': {e}", file=sys.stderr)
+        return 4
+
+    try:
+        new_num = resign_crl(
+            ca_key=ca_key,
+            ca_cert=ca_cert,
+            crl_path=crl_path,
+            bump_number=bump_number,
+            next_update_hours=next_update_hours,
+        )
+        print(f"CRL re-signed for '{ca_id}' -> CRLNumber {new_num} (path: {crl_path})")
+        return 0
+    except Exception as e:
+        print(f"ERROR: CRL re-sign failed for '{ca_id}': {e}", file=sys.stderr)
+        return 5
+
+def _read_all_bytes(paths: list[str]) -> bytes:
+    out = b""
+    for p in paths:
+        if not p:
+            continue
+        if not os.path.isfile(p):
+            raise FileNotFoundError(f"chain file not found: {p}")
+        with open(p, "rb") as f:
+            out += f.read()
+            if not out.endswith(b"\n"):
+                out += b"\n"
+    return out
 
