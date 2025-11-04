@@ -881,25 +881,6 @@ def finalize(caid, alias, oid):
         body_part_id=0,
     )
 
-    cert_val = result.get("cert")
-    if isinstance(cert_val, cx509.Certificate):
-        cert_obj = cert_val
-        cert_der = cert_val.public_bytes(serialization.Encoding.DER)
-    elif isinstance(cert_val, (bytes, bytearray, memoryview)):
-        cert_der = bytes(cert_val)
-        cert_obj = cx509.load_der_x509_certificate(cert_der)
-    else:
-        return Response("Callback(issued) must return 'cert' (x509 or DER bytes)", status=500, content_type="text/plain; charset=utf-8")
-
-    b64_leaf = format_b64_for_soap(cert_der)
-
-    with open(os.path.join(ca['__path_cert'], f"{oid}.pem"), 'w') as f:
-        f.write(
-            "-----BEGIN CERTIFICATE-----\n" +
-            "\n".join(textwrap.wrap(b64_leaf, 64)) +
-            "\n-----END CERTIFICATE-----"
-        )
-
     status = str(result.get("status", "")).lower()
     with _db() as cx:
         # re-read the order (already read above, but we want it in the same update transaction)
@@ -912,6 +893,25 @@ def finalize(caid, alias, oid):
 
         if status == "issued":
             cert_val = result.get("cert")
+            if isinstance(cert_val, cx509.Certificate):
+                cert_obj = cert_val
+                cert_der = cert_val.public_bytes(serialization.Encoding.DER)
+            elif isinstance(cert_val, (bytes, bytearray, memoryview)):
+                cert_der = bytes(cert_val)
+                cert_obj = cx509.load_der_x509_certificate(cert_der)
+            else:
+                return Response("Callback(issued) must return 'cert' (x509 or DER bytes)", status=500, content_type="text/plain; charset=utf-8")
+        
+            b64_leaf = format_b64_for_soap(cert_der)
+        
+            with open(os.path.join(ca['__path_cert'], f"{oid}.pem"), 'w') as f:
+                f.write(
+                    "-----BEGIN CERTIFICATE-----\n" +
+                    "\n".join(textwrap.wrap(b64_leaf, 64)) +
+                    "\n-----END CERTIFICATE-----"
+                )
+        
+
             try:
                 if isinstance(cert_val, cx509.Certificate):
                     cert_der = cert_val.public_bytes(ser.Encoding.DER)
@@ -948,7 +948,7 @@ def finalize(caid, alias, oid):
                 "UPDATE acme_order SET status=?, csr_der_b64=? WHERE id=?",
                 ("processing", base64.b64encode(csr_der).decode(), order_row["id"]),
             )
-            order_obj = {"status": "processing"}
+            order_obj = {"status": "pending"}
         else:
             cx.execute(
                 "UPDATE acme_order SET status=?, csr_der_b64=? WHERE id=?",
