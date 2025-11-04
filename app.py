@@ -80,7 +80,8 @@ def cep_service():
     templates_for_user, oids_for_user = build_templates_for_policy_response(
         app.confadcs,
         kerberos_user=kerberos_user,
-        request=request
+        request=request,
+        acme_only=False
     )
 
     # Keep an in-memory index (optional, no longer required by CES)

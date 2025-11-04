@@ -21,6 +21,7 @@ CLI (no GUI):
   python manageca.py --resign-crl --ca-id ca-1
 """
 from __future__ import annotations
+import uuid
 import os
 import sys
 import csv
@@ -271,8 +272,9 @@ class NewCertScreen(_BaseScreen[None]):
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_cn = "".join(c if c.isalnum() or c in ("-", "_", ".") else "_" for c in cn)
-        crt_path = os.path.join(certs_dir, f"{safe_cn}_{ts}.crt.pem")
-        key_path = os.path.join(private_dir, f"{safe_cn}_{ts}.key.pem")
+        request_id = uuid.uuid4().int
+        crt_path = os.path.join(certs_dir, f"{request_id}.pem")
+        key_path = os.path.join(private_dir, f"{request_id}.key.pem")
         try:
             with open(crt_path, "wb") as f:
                 f.write(cert_pem)
