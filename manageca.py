@@ -879,6 +879,14 @@ class ADCSApp(App):
         if not r:
             return
 
+        if not r.revoked and r.days_to_expiry > 0:
+            self.notify(
+                "Deletion blocked: you can only delete a revoked or expired certificate.",
+                severity="warning",
+                timeout=6,
+            )
+            return
+    
         cert_path = self._find_cert_path_by_filename(ca, r.filename.replace(" (ERROR)", ""))
         if not cert_path:
             self.notify("Unable to resolve certificate path.", severity="warning")
