@@ -6,7 +6,7 @@
 
 from typing import Dict
 
-#https://winprotocoldoc.z19.web.core.windows.net/MS-XCEP/%5BMS-XCEP%5D-210407.docx
+#https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cd22d3a0-f469-4a44-95ed-d10ce4dc2063
 
 # --- Full catalog (XCEP) -----------------------------------------------
 
