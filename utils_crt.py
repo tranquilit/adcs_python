@@ -8,6 +8,7 @@ import glob
 import tempfile
 import sys
 import stat
+import uuid
 from typing import Tuple, Iterable, List, Optional, Dict, Any, Set
 from datetime import datetime, timezone, timedelta
 
@@ -653,7 +654,7 @@ def _cmd_rotate_if_expiring(
         return 0
 
     cn, sans = _extract_cn_and_sans(cert)
-    
+    request_id = uuid.uuid4().int
     total_valid_seconds = int(
         (cert.not_valid_after_utc - cert.not_valid_before_utc).total_seconds()
     )
@@ -661,6 +662,7 @@ def _cmd_rotate_if_expiring(
     total_valid_seconds = int(valid_days * 24 * 3600)
 
     key_params = _pick_key_params_from_existing(cert)
+
 
     cert_obj, key_obj, cert_pem, key_pem = issue_cert_with_new_key(
             ca=ca,
@@ -673,6 +675,7 @@ def _cmd_rotate_if_expiring(
             key_export_password=None,
         )
 
+    _atomic_write(os.path.join(ca['storage_paths']['cert_dir'],f"{request_id}.pem"), cert_pem)
     _atomic_write(crt_path, cert_pem)
 
     if chain_paths:
@@ -683,6 +686,7 @@ def _cmd_rotate_if_expiring(
     else:
         _atomic_write(crt_path, cert_pem)
 
+    _atomic_write(os.path.join(ca['storage_paths']['private_dir'],f"{request_id}.key.pem"), key_pem, mode=stat.S_IRUSR | stat.S_IWUSR) 
     _atomic_write(key_path, key_pem, mode=stat.S_IRUSR | stat.S_IWUSR)  # 0o600
 
     print(
