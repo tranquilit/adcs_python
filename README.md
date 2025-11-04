@@ -214,6 +214,15 @@ cd /opt/adcs_python
 - `--ca-id` is the CA identifier (e.g., `ca-1`).
 - This updates the CRL (version number, `thisUpdate/nextUpdate`, signature).
 
+Rotate adcs Certificate When Expiring Soon 
+-----------------------------------------------------------------
+
+```bash
+cd /opt/adcs_python
+./manageca.py --rotate-if-expiring --ca-id ca1-inter --crt-path /opt/adcs_python/pki/certs/ica/testadcs.mydomain.lan.fullchain.pem  --key-path /opt/adcs_python/pki/private/ica/testadcs.mydomain.lan.key.pem --threshold-days 30 --chain /opt/adcs_python/pki/certs/ica/ica-chain.pem --valid-days 365
+```
+
+- `--ca-id` is the CA identifier (e.g., `ca-1`).
 
 Re-sign / Re-issue a Certificate (GUI)
 -----------------------------------------------------------------
@@ -225,6 +234,7 @@ cd /opt/adcs_python
 ./manageca.py
 ```  
 ![Demo TERMINAL UI](demo/ui_terminal.png "DEMO TERMINAL UI")
+
 
 Desired enhancements for the project.
 ==========================================
