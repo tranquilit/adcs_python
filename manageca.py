@@ -1103,28 +1103,26 @@ if __name__ == "__main__":
             print("ERROR: --crt-path and --key-path are required with --rotate-if-expiring", file=sys.stderr)
             sys.exit(1)
 
-        chain_paths = []
-        if args.chain:
-            # supporte aussi une liste séparée par des virgules dans un même --chain
-            for item in args.chain:
-                parts = [p.strip() for p in item.split(",") if p.strip()]
-                chain_paths.extend(parts)
-    
+    chain_paths = []
+    if args.chain:
+        # supporte aussi une liste séparée par des virgules dans un même --chain
+        for item in args.chain:
+            parts = [p.strip() for p in item.split(",") if p.strip()]
+            chain_paths.extend(parts)
 
-        rc = _cmd_rotate_if_expiring(
-            ca_id=args.ca_id,
-            crt_path=args.crt_path,
-            key_path=args.key_path,
-            threshold_days=int(args.threshold_days),
-            conf=load_yaml_conf("adcs.yaml"),
-            chain_paths=chain_paths or None,
-            fullchain_path=args.fullchain_path,
-            write_fullchain_to_crt=(not args.no_write_fullchain_to_crt),
-            valid_days=args.valid_days if args.valid_days else 365
-        )
-        sys.exit(rc)
-    
-    
+    rc = _cmd_rotate_if_expiring(
+        ca_id=args.ca_id,
+        crt_path=args.crt_path,
+        key_path=args.key_path,
+        threshold_days=int(args.threshold_days),
+        conf=load_yaml_conf("adcs.yaml"),
+        chain_paths=chain_paths or None,
+        fullchain_path=args.fullchain_path,
+        write_fullchain_to_crt=(not args.no_write_fullchain_to_crt),
+        valid_days=args.valid_days if args.valid_days else 365
+    )
+    sys.exit(rc)
+
 
     if args.resign_crl:
         if not args.ca_id:
