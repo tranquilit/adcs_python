@@ -1228,6 +1228,8 @@ if __name__ == "__main__":
             ca_id=args.ca_id,
             next_update_hours=int(args.next_update_hours),
             bump_number=(not args.no_bump_number),
+            conf=load_yaml_conf("adcs.yaml")
+
         )
         sys.exit(rc)
 
