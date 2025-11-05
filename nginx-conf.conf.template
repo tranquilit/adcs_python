@@ -45,6 +45,7 @@ server {
     add_header Strict-Transport-Security "max-age=63072000" always;
 
     ssl_client_certificate "/opt/adcs_python/pki/certs/ica/ica-chain.pem";
+    ssl_crl                "/opt/adcs_python/pki/crl/ica/intermediate.crl.pem";
     proxy_set_header X-Ssl-Authenticated $ssl_client_verify;
     proxy_set_header X-Ssl-Client-Dn $ssl_client_s_dn;
     proxy_set_header X-Ssl-Client-Sha1 $ssl_client_fingerprint;
