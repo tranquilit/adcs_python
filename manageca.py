@@ -903,6 +903,33 @@ class ADCSApp(App):
         except Exception as e:
             self.notify(f"Unrevoke failed: {e}", severity="error", timeout=8)
 
+
+    def action_resign_crl(self) -> None:
+
+
+        ca = self.current_ca
+
+        if not ca:
+            self.notify("No CA selected.", severity="warning")
+            return
+        try:
+            ca_key = ca["__key_obj"]
+            ca_cert_der = ca["__certificate_der"]
+            crl_path = (ca.get("crl") or {}).get("path_crl")
+            if not crl_path:
+                raise KeyError("Missing crl.path_crl in CA config.")
+            ca_cert = x509.load_der_x509_certificate(ca_cert_der)
+        except Exception as e:
+            self.notify(f"CRL re-sign config error: {e}", severity="error", timeout=6)
+            return
+        try:
+            new_num = resign_crl(ca_key=ca_key, ca_cert=ca_cert, crl_path=crl_path, bump_number=True)
+            self.revoked_serials = revoked_serials_set(crl_path)
+            self.load_certs()
+            self.notify(f"CRL re-signed (CRLNumber {new_num}) — {crl_path}", severity="success", timeout=6)
+        except Exception as e:
+            self.notify(f"CRL re-sign failed: {e}", severity="error", timeout=8)
+
     # -------- Delete actions --------
     def action_delete_current(self) -> None:
         """Soft-delete (move to .trash) the currently selected certificate + key."""
