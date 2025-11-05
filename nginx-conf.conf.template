@@ -44,6 +44,11 @@ server {
     # HSTS (ngx_http_headers_module is required) (63072000 seconds)
     add_header Strict-Transport-Security "max-age=63072000" always;
 
+    ssl_client_certificate "/opt/adcs_python/pki/certs/ica/ica-chain.pem";
+    proxy_set_header X-Ssl-Authenticated $ssl_client_verify;
+    proxy_set_header X-Ssl-Client-Dn $ssl_client_s_dn;
+    proxy_set_header X-Ssl-Client-Sha1 $ssl_client_fingerprint;
+    ssl_verify_client optional;
 
     gzip_min_length     1000;
     gzip_buffers        4 8k;
