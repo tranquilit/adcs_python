@@ -37,6 +37,9 @@ def auth_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         auth_header = request.headers.get('Authorization')
+        user = None
+        response_token=None
+        x_ssl_client_sha1 = request.headers.get('X-Ssl-Client-Sha1', None)
 
         MAX_SOAP_BYTES = 2 * 1024 * 1024  
         raw = request.data or b""
@@ -62,22 +65,25 @@ def auth_required(f):
         else: 
             password_xml = ''
 
-        if not auth_header and (not username_xml):
+        if not auth_header and (not username_xml) and (not x_ssl_client_sha1):
             return Response("Unauthorized", 401, {'WWW-Authenticate': 'Negotiate'})
 
         user = None
-        if current_app.confadcs["auth_kerberos"] :
+        if current_app.confadcs["auth_kerberos"] and (not x_ssl_client_sha1) :
             user, response_token = kerberos_authenticate(auth_header)
-        if not user:
+        if not user and (not x_ssl_client_sha1):
             auth_func = load_func(current_app.confadcs["auth_callbacks"]['path'], current_app.confadcs["auth_callbacks"]['func'])
             r = auth_func(username=username_xml,password=password_xml) 
             user = r
 
-        if not user:
+        if (not user) and (not x_ssl_client_sha1):
             return Response("Unauthorized", 401, {'WWW-Authenticate': 'Negotiate'})
 
         g.kerberos_user = user
-        headers = {'WWW-Authenticate': 'Negotiate ' + response_token} if response_token else {}
+        if response_token:
+            headers = {'WWW-Authenticate': 'Negotiate ' + response_token} if response_token else {}
+        else:
+            headers = {}
         resp = f(*args, **kwargs)
         if isinstance(resp, Response):
             resp.headers.update(headers)

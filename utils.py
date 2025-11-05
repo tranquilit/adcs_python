@@ -993,9 +993,14 @@ def search_user(userauth: str):
     ldap_url = f"ldap://{dc_fqdn}"
 
     samdbr = SamDB(url=ldap_url, credentials=creds, lp=lp)
+    if "@" in userauth:
+        basedn = "DC=" + userauth.split("@")[1].replace(".", ",DC=")
+    else:
+        basedn = samdbr.get_default_basedn()
+           
 
     res = samdbr.search(
-        base="DC=" + userauth.split("@")[1].replace(".", ",DC="),
+        base=basedn,
         scope=2,
         expression="(samAccountName=%s)" % userauth.split("@")[0],
     )

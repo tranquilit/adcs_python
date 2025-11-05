@@ -40,7 +40,16 @@ def define_template(*, app_conf, kerberos_user=None , request=None):
     renewal_seconds = 3628800         # 42 days
     auto_enroll = True
 
-    samdbr, sam_entry = search_user(kerberos_user)
+
+    # if ssl auth
+    XSslClientSha1 = request.headers.get('X-Ssl-Client-Sha1', None)
+    XSslAuthenticated = request.headers.get('X-Ssl-Authenticated', None)
+    XSslClientDn = request.headers.get('X-Ssl-Client-Dn', None)
+
+    if kerberos_user :
+       username = kerberos_user
+    else:
+       username = XSslClientDn.split('=',1)[1]
 
     return {
         "common_name": template_name,
@@ -179,7 +188,17 @@ def emit_certificate(
     body_part_id = None
 ) -> Dict[str, Any]:
 
-    samdbr, sam_entry = search_user(kerberos_user)
+    # if ssl auth
+    XSslClientSha1 = request.headers.get('X-Ssl-Client-Sha1', None)
+    XSslAuthenticated = request.headers.get('X-Ssl-Authenticated', None)
+    XSslClientDn = request.headers.get('X-Ssl-Client-Dn', None)
+
+    if kerberos_user :
+       username = kerberos_user
+    else:
+       username = XSslClientDn.split('=',1)[1]
+
+    samdbr, sam_entry = search_user(username)
 
     denied = False
     must_pending = False

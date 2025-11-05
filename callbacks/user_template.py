@@ -38,13 +38,20 @@ template_minor_version = 3
 auto_enroll            = True
 
 def define_template(*, app_conf, kerberos_user=None , request=None):
-
-
-    samdbr, sam_entry = search_user(kerberos_user)
-
     validity_seconds = 31536000       # 1 year
     renewal_seconds = 3628800         # 42 days
     auto_enroll = True
+
+    # if ssl auth
+    XSslClientSha1 = request.headers.get('X-Ssl-Client-Sha1', None)
+    XSslAuthenticated = request.headers.get('X-Ssl-Authenticated', None)
+    XSslClientDn = request.headers.get('X-Ssl-Client-Dn', None)
+
+    if kerberos_user :
+       username = kerberos_user
+    else:
+       username = XSslClientDn.split('=',1)[1] 
+    samdbr, sam_entry = search_user(username)
 
     # Example: special group = duration x2
     if _is_member_of(sam_entry or {}, ["CN=PKI-LongLived"]):
@@ -195,8 +202,16 @@ def emit_certificate(
     body_part_id
 ) -> Dict[str, Any]:
 
+    # if ssl auth
+    XSslClientSha1 = request.headers.get('X-Ssl-Client-Sha1', None)
+    XSslAuthenticated = request.headers.get('X-Ssl-Authenticated', None)
+    XSslClientDn = request.headers.get('X-Ssl-Client-Dn', None)
 
-    samdbr, sam_entry = search_user(kerberos_user)
+    if kerberos_user :
+       username = kerberos_user
+    else:
+       username = XSslClientDn.split('=',1)[1] 
+    samdbr, sam_entry = search_user(username)
 
     denied = False
     must_pending = False
