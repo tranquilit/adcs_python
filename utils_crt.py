@@ -701,42 +701,29 @@ def _cli_find_ca_by_id(conf: Dict[str, Any], ca_id: str) -> Optional[Dict[str, A
             return ca
     return None
 
-def _cmd_resign_crl(ca_id: str, next_update_hours: int = 8, bump_number: bool = True) -> int:
-    try:
-        conf = load_yaml_conf("adcs.yaml")
-    except Exception as e:
-        print(f"ERROR: Unable to load adcs.yaml: {e}", file=sys.stderr)
-        return 2
+def _cmd_resign_crl(ca_id: str, next_update_hours: int = 8, bump_number: bool = True,conf=None) -> int:
 
     ca = _cli_find_ca_by_id(conf, ca_id)
     if not ca:
         print(f"ERROR: CA '{ca_id}' not found in adcs.yaml", file=sys.stderr)
         return 3
 
-    try:
-        ca_key = ca["__key_obj"]
-        ca_cert_der = ca["__certificate_der"]
-        crl_path = (ca.get("crl") or {}).get("path_crl")
-        if not crl_path:
-            raise KeyError("Missing crl.path_crl in CA config.")
-        ca_cert = x509.load_der_x509_certificate(ca_cert_der)
-    except Exception as e:
-        print(f"ERROR: CA config invalid for '{ca_id}': {e}", file=sys.stderr)
-        return 4
+    ca_key = ca["__key_obj"]
+    ca_cert_der = ca["__certificate_der"]
+    crl_path = (ca.get("crl") or {}).get("path_crl")
+    if not crl_path:
+        raise KeyError("Missing crl.path_crl in CA config.")
+    ca_cert = cx509.load_der_x509_certificate(ca_cert_der)
 
-    try:
-        new_num = resign_crl(
-            ca_key=ca_key,
-            ca_cert=ca_cert,
-            crl_path=crl_path,
-            bump_number=bump_number,
-            next_update_hours=next_update_hours,
-        )
-        print(f"CRL re-signed for '{ca_id}' -> CRLNumber {new_num} (path: {crl_path})")
-        return 0
-    except Exception as e:
-        print(f"ERROR: CRL re-sign failed for '{ca_id}': {e}", file=sys.stderr)
-        return 5
+    new_num = resign_crl(
+        ca_key=ca_key,
+        ca_cert=ca_cert,
+        crl_path=crl_path,
+        bump_number=bump_number,
+        next_update_hours=next_update_hours,
+    )
+    print(f"CRL re-signed for '{ca_id}' -> CRLNumber {new_num} (path: {crl_path})")
+    return 0
 
 def _read_all_bytes(paths: list[str]) -> bytes:
     out = b""
@@ -750,4 +737,3 @@ def _read_all_bytes(paths: list[str]) -> bytes:
             if not out.endswith(b"\n"):
                 out += b"\n"
     return out
-
