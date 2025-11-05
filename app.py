@@ -148,7 +148,8 @@ def ces_service(CAID):
     templates_for_user, _ = build_templates_for_policy_response(
         app.confadcs,
         kerberos_user=kerberos_user,
-        request=request
+        request=request,
+        acme_only=False
     )
 
     tmap = { (t.get("template_oid") or {}).get("value"): t for t in templates_for_user }
@@ -299,6 +300,7 @@ if __name__ == '__main__':
         app.register_blueprint(acme_bp)
     app.run(host='127.0.0.1', port=8080)
     #serve(app, host="127.0.0.1", port=8080)
+
 
 
 
