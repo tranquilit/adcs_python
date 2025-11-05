@@ -65,11 +65,8 @@ def auth_required(f):
         else: 
             password_xml = ''
 
-        if not auth_header and (not username_xml) and (not x_ssl_client_sha1):
-            return Response("Unauthorized", 401, {'WWW-Authenticate': 'Negotiate'})
-
         user = None
-        if current_app.confadcs["auth_kerberos"] and (not x_ssl_client_sha1) :
+        if current_app.confadcs["auth_kerberos"] and (not x_ssl_client_sha1) and auth_header :
             user, response_token = kerberos_authenticate(auth_header)
         if not user and (not x_ssl_client_sha1):
             auth_func = load_func(current_app.confadcs["auth_callbacks"]['path'], current_app.confadcs["auth_callbacks"]['func'])
