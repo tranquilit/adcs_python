@@ -118,14 +118,6 @@ cp -f /opt/adcs_python/adcs.yaml.template /opt/adcs_python/adcs.yaml
 mkdir /opt/adcs_python/list_request_id
 ```
 
-Configure Nginx certificates
----------------------------------------------------------
-
-```
-cp -f /opt/adcs_python/pki/private/testadcs.mydomain.lan.key.pem /etc/nginx/key.pem
-cp -f /opt/adcs_python/pki/certs/testadcs.mydomain.lan.fullchain.pem /etc/nginx/crt.pem
-```
-
 Configure Nginx
 ---------------------------------------------------------
 
