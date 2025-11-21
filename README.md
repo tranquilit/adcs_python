@@ -130,7 +130,7 @@ cp -f /opt/adcs_python/nginx-conf.conf.template /etc/nginx/sites-enabled/default
 - Generate Diffie-Hellman parameters:
 
 ```
-openssl dhparam -out /etc/ssl/certs/dhparam.pem 2048
+openssl dhparam -out /etc/ssl/certs/dhparam.pem 4096
 ```
 
 Join the Active Directory domain
@@ -138,17 +138,27 @@ Join the Active Directory domain
 
 
 - Edit ``/etc/krb5.conf`` for your domain.
-- Test with:
 
+- Edit ``/etc/samba/smb.conf`` for your domain.
+
+```
+[global]
+  workgroup = MYDOMAIN
+  security = ADS
+  realm = MYDOMAIN.LAN
+  winbind separator = +
+  idmap config *:backend = tdb
+  idmap config *:range = 700001-800000
+  idmap config MYDOMAIN:backend  = rid
+  idmap config MYDOMAIN:range  = 10000-700000
+  winbind use default domain = yes
+  kerberos method = secrets and keytab
+```
+
+Join : 
 ```
 kinit <user>@MYDOMAIN.LAN
 net ads join
-```
-
-- In ``/etc/samba/smb.conf`` add:
-
-```
-kerberos method = secrets and keytab
 ```
 
 Manage SPN and Keytab
