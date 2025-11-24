@@ -5,10 +5,13 @@ from cryptography import x509 as cx509
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import rsa, ec, ed25519, ed448
 from cryptography.x509.oid import (
+    ExtensionOID,
     NameOID,
     AuthorityInformationAccessOID,
     ObjectIdentifier as CObjectIdentifier,
 )
+
+from cryptography.x509.extensions import ExtensionNotFound
 
 # As before
 from utils import NtdsAttr, NtdsCASecurityExt,search_user
@@ -233,6 +236,25 @@ def emit_certificate(
     ca_cert = cx509.load_der_x509_certificate(ca["__certificate_der"])
     now = datetime.utcnow() - timedelta(minutes=5)
 
+    UPN_OID = CObjectIdentifier("1.3.6.1.4.1.311.20.2.3")
+    try:
+        san = csr.extensions.get_extension_for_oid(
+            ExtensionOID.SUBJECT_ALTERNATIVE_NAME
+        ).value
+    except ExtensionNotFound :
+        san = []
+    
+    list_upn_in_csr = []
+    for name in san:
+        if isinstance(name, cx509.OtherName) and name.type_id == UPN_OID:
+            data = name.value
+            if data[0] != 0x0c:
+                raise ValueError("bad ASN.1 type")
+            length = data[1]
+            list_upn_in_csr.append(data[2:2 + length].decode("utf-8"))
+
+
+    
     # CN = sAMAccountName
     cn = (sam_entry.get("sAMAccountName") or [b"user"])[0].decode("utf-8", "ignore")
     validity_seconds = (template or {}).get("validity", {}).get("validity_seconds") or 31536000
