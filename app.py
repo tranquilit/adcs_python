@@ -255,8 +255,6 @@ def ces_service(CAID):
 
         ##https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wcce/2524682a-9587-4ac1-8adf-7e8094baa321
         if not pkcs7_der:
-            if not ca["__key_obj"] : 
-                raise ValueError('If you are in "keyless mode" your callback must return a "pkcs7_der" in the return dictionary.')
 
             pkcs7_der = build_adcs_bst_certrep(
                 cert_der,

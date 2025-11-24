@@ -525,47 +525,80 @@ def build_adcs_bst_certrep(child_der: bytes, ca_der: bytes, ca_key, cert_req_id:
         }
     )
 
-    signed_attrs = a_cms.CMSAttributes(
-        [
-            a_cms.CMSAttribute({"type": "1.2.840.113549.1.9.3", "values": [a_cms.ContentType("1.3.6.1.5.5.7.12.2")]}),
-            a_cms.CMSAttribute({"type": "1.2.840.113549.1.9.4", "values": [hashlib.sha256(certrep_der).digest()]}),
-        ]
-    )
+    certificates = [ca_cert, leaf_cert]
 
-    to_be_signed = _tbs_signed_attrs(signed_attrs)
 
-    digest_alg = a_cms.DigestAlgorithm({"algorithm": "sha256"})
-    signer_info = a_cms.SignerInfo(
-        {
-            "version": "v1",
-            "sid": a_cms.SignerIdentifier(
-                {
-                    "issuer_and_serial_number": a_cms.IssuerAndSerialNumber(
-                        {"issuer": ca_cert.issuer, "serial_number": ca_cert.serial_number}
-                    )
-                }
-            ),
-            "digest_algorithm": a_cms.DigestAlgorithm({"algorithm": "sha256"}),
-            "signed_attrs": signed_attrs,
-            "signature_algorithm": a_cms.SignedDigestAlgorithm({"algorithm": "sha256_rsa"}),
-            "signature": b"",  # filled after
-        }
-    )
+    digest_algorithms = []
+    signer_infos = []
 
-    signature = ca_key.sign(to_be_signed, padding.PKCS1v15(), hashes.SHA256())
-    signer_info["signature"] = signature
+    if ca_key is not None:
+        signed_attrs = a_cms.CMSAttributes(
+            [
+                a_cms.CMSAttribute(
+                    {
+                        "type": "1.2.840.113549.1.9.3",
+                        "values": [a_cms.ContentType("1.3.6.1.5.5.7.12.2")],
+                    }
+                ),
+                a_cms.CMSAttribute(
+                    {
+                        "type": "1.2.840.113549.1.9.4",
+                        "values": [hashlib.sha256(certrep_der).digest()],
+                    }
+                ),
+            ]
+        )
+
+        to_be_signed = _tbs_signed_attrs(signed_attrs)
+
+        digest_alg = a_cms.DigestAlgorithm({"algorithm": "sha256"})
+        signature = ca_key.sign(
+            to_be_signed,
+            padding.PKCS1v15(),
+            hashes.SHA256(),
+        )
+
+        signer_info = a_cms.SignerInfo(
+            {
+                "version": "v1",
+                "sid": a_cms.SignerIdentifier(
+                    {
+                        "issuer_and_serial_number": a_cms.IssuerAndSerialNumber(
+                            {
+                                "issuer": ca_cert.issuer,
+                                "serial_number": ca_cert.serial_number,
+                            }
+                        )
+                    }
+                ),
+                "digest_algorithm": a_cms.DigestAlgorithm({"algorithm": "sha256"}),
+                "signed_attrs": signed_attrs,
+                "signature_algorithm": a_cms.SignedDigestAlgorithm(
+                    {"algorithm": "sha256_rsa"}
+                ),
+                "signature": signature,
+            }
+        )
+
+        digest_algorithms = [digest_alg]
+        signer_infos = [signer_info]
 
     signed_data = a_cms.SignedData(
         {
             "version": 3,
-            "digest_algorithms": [digest_alg],
+            "digest_algorithms": digest_algorithms,
             "encap_content_info": encap_content_info,
-            "certificates": [ca_cert, leaf_cert],
-            "signer_infos": [signer_info],
+            "certificates": certificates,
+            "signer_infos": signer_infos,
         }
     )
 
-    content_info = a_cms.ContentInfo({"content_type": "signed_data", "content": signed_data})
+    content_info = a_cms.ContentInfo(
+        {
+            "content_type": "signed_data",
+            "content": signed_data,
+        }
+    )
     return content_info.dump()
 
 
