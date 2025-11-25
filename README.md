@@ -295,3 +295,22 @@ It is up to you to implement and validate the authentication logic (for example,
 
 ⚠️ **Important:**  
 Make sure your authentication process responds **within the allowed time frame** - otherwise, the request will **timeout** and fail.
+
+
+Can this project be used as a gateway/proxy to another PKI without holding a private key?
+-----------------------------------------------------------------------------------------------------
+
+Yes.
+
+You can run this ADCS Python server as a pass-through gateway, where it does not hold the CA private key itself. Instead, it simply forwards the CSR to another PKI system and then wraps the returned certificate in a response that looks like Microsoft ADCS.
+
+In practice, the ADCS web enrollment client expects a PKCS#7/CMS response containing the issued certificate (and optionally the chain).
+From my tests, the PKCS#7 structure can be “degenerate” (i.e. contain the certificate but no signature / no signers) and it will still be accepted by the Windows client.
+
+However, a real Microsoft ADCS instance signs the PKCS#7 it returns, so this behavior is somewhat fragile and could change between versions or environments.
+
+To do things cleanly and stay as close as possible to actual ADCS behavior, you should also ensure that:
+
+The certificate template OID corresponding to the requested template is correctly added as an extension on the issued certificate.
+
+In short: yes, you can use this project as a stateless gateway in front of another PKI, but be aware that relying on unsigned (“degenerate”) PKCS#7 responses is a bit touchy and should be tested carefully in your environment.
