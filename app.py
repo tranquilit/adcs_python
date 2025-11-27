@@ -296,8 +296,9 @@ if __name__ == '__main__':
     print("Loaded config with", len(decls), "template declaration(s).")
     if [t for t in app.confadcs.get("__template_decls__") if t['acme_available']]:
         app.register_blueprint(acme_bp)
-    app.run(host='127.0.0.1', port=8080)
-    #serve(app, host="127.0.0.1", port=8080)
+    #app.run(host='127.0.0.1', port=8080)
+    serve(app, host="127.0.0.1", port=8080)
+
 
 
 
