@@ -139,6 +139,13 @@ Join the Active Directory domain
 
 - Edit ``/etc/krb5.conf`` for your domain.
 
+```
+[libdefaults]
+dns_lookup_realm = false
+dns_lookup_kdc = true
+default_realm = MYDOMAIN.LAN
+```
+
 - Edit ``/etc/samba/smb.conf`` for your domain.
 
 ```
