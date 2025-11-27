@@ -183,7 +183,13 @@ HTTP/testadcs.mydomain.lan
 net ads keytab create
 ```
 
-- Add the machine FQDN and IP address to ``/etc/hosts``.
+Checking if http is present in the keytab :
+
+```
+klist -k -K /etc/krb5.keytab |grep HTTP
+```
+
+- Add the machine FQDN and IP address to ``/etc/hosts``   **important**.
 
 Start the ADCS Python server
 ---------------------------------------------------------
