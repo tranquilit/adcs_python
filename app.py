@@ -291,13 +291,14 @@ def ces_service(CAID):
 # ---------------- Main ----------------
 
 if __name__ == '__main__':
-    app.confadcs = load_yaml_conf("adcs.yaml")
+    app.confadcs = load_yaml_conf(os.path.join(os.path.dirname(os.path.realpath(__file__)),"adcs.yaml"))
     decls = app.confadcs.get("__template_decls__") or []
     print("Loaded config with", len(decls), "template declaration(s).")
     if [t for t in app.confadcs.get("__template_decls__") if t['acme_available']]:
         app.register_blueprint(acme_bp)
     app.run(host='127.0.0.1', port=8080)
     #serve(app, host="127.0.0.1", port=8080)
+
 
 
 
