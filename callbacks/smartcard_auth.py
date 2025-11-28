@@ -99,7 +99,7 @@ def define_template(*, app_conf, kerberos_user=None , request=None):
                 "include_symmetric_algorithms": True,
                 "publish_to_ds": True,
                 "auto_enrollment": auto_enroll,
-                "user_interaction_required": False,
+                "user_interaction_required": True,
                 "pend_all_requests": False,
                 "publish_to_kra_container": False,
                 "auto_enrollment_check_user_ds_certificate": False,

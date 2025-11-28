@@ -532,7 +532,7 @@ class ADCSApp(App):
             pass
 
         try:
-            self.confadcs = load_yaml_conf("adcs.yaml")
+            self.confadcs = load_yaml_conf(os.path.join(os.path.dirname(os.path.realpath(__file__)),"adcs.yaml"))
         except Exception as e:
             self.notify(f"Unable to load adcs.yaml: {e}", severity="error")
             raise
@@ -1210,7 +1210,7 @@ if __name__ == "__main__":
             crt_path=args.crt_path,
             key_path=args.key_path,
             threshold_days=int(args.threshold_days),
-            conf=load_yaml_conf("adcs.yaml"),
+            conf=load_yaml_conf(os.path.join(os.path.dirname(os.path.realpath(__file__)),"adcs.yaml")),
             chain_paths=chain_paths or None,
             fullchain_path=args.fullchain_path,
             write_fullchain_to_crt=(not args.no_write_fullchain_to_crt),
@@ -1228,7 +1228,7 @@ if __name__ == "__main__":
             ca_id=args.ca_id,
             next_update_hours=int(args.next_update_hours),
             bump_number=(not args.no_bump_number),
-            conf=load_yaml_conf("adcs.yaml")
+            conf=load_yaml_conf(os.path.join(os.path.dirname(os.path.realpath(__file__)),"adcs.yaml"))
 
         )
         sys.exit(rc)

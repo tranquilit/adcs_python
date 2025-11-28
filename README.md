@@ -139,6 +139,13 @@ Join the Active Directory domain
 
 - Edit ``/etc/krb5.conf`` for your domain.
 
+```
+[libdefaults]
+dns_lookup_realm = false
+dns_lookup_kdc = true
+default_realm = MYDOMAIN.LAN
+```
+
 - Edit ``/etc/samba/smb.conf`` for your domain.
 
 ```
@@ -176,7 +183,13 @@ HTTP/testadcs.mydomain.lan
 net ads keytab create
 ```
 
-- Add the machine FQDN and IP address to ``/etc/hosts``.
+Checking if http is present in the keytab :
+
+```
+klist -k -K /etc/krb5.keytab |grep HTTP
+```
+
+- Add the machine FQDN and IP address to ``/etc/hosts``   **important**.
 
 Start the ADCS Python server
 ---------------------------------------------------------
