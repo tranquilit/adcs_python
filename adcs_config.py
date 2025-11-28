@@ -3,6 +3,7 @@
 
 import base64
 import yaml
+import os
 from typing import Tuple
 
 from asn1crypto import x509 as a_x509, core as a_core
@@ -472,7 +473,12 @@ def build_templates_for_policy_response(
             if not bool(cb.get("acme_available", False)):
                 continue
  
-        define_template = load_func(cb["path"], cb["define"])
+        if cb["path"].startswith('/'):
+            cb_path = cb["path"]
+        else:
+            cb_path = os.path.join(os.path.dirname(os.path.realpath(__file__)),cb["path"])
+
+        define_template = load_func(cb_path, cb["define"])
         tpl = define_template(
             app_conf=conf,                 # conf remains read-only
             kerberos_user=kerberos_user,
