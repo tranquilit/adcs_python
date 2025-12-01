@@ -46,12 +46,23 @@ cas:
     crl:
       path_crl: /opt/adcs_python/pki/crl/root/root.crl.pem
 
+############# TPM ###################
 #    hsm:
 #      pkcs11_lib: "/usr/lib/x86_64-linux-gnu/pkcs11/libtpm2_pkcs11.so.1"
 #      token_label: "CA-TOKEN-2"
 #      key_id: "30623531666439663333306165376463"
-#      key_label: "CA-KEY-ICA2-1761401895"   # facultatif mais utile si un module a un comportement exotique
+#      key_label: "CA-KEY-ICA2-1761401895"   
 #      user_pin_file: "/opt/adcs_python/secret/hsm_pin.txt"
+
+############# YUBIKEY ###################
+### pkcs11-tool --module /usr/lib/x86_64-linux-gnu/libykcs11.so -L|grep label
+### pkcs11-tool --module /usr/lib/x86_64-linux-gnu/libykcs11.so --login --pin "123456" --list-objects --type privkey
+#     hsm:
+#       pkcs11_lib: "/usr/lib/x86_64-linux-gnu/libykcs11.so"
+#       token_label: "YubiKey PIV #99999999"
+#       key_id: "02"
+#       user_pin_file: "/opt/adcs_python/secret/hsm_pin.txt"
+
     
     enroll_permission: true
     storage_paths:
