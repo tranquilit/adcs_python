@@ -417,13 +417,18 @@ class HSMRSAPrivateKey(rsa.RSAPrivateKey):
         """
         Supports:
             - PKCS#1 v1.5 (SHA1/224/256/384/512)
-            - RSASSA-PSS (SHA256/384/512) if supported by the HSM
+            - RSASSA-PSS (SHA256/384/512) if supported by the HSM / token
+
+        For tokens like YubiKey PIV with CKA_ALWAYS_AUTHENTICATE, we rely on
+        python-pkcs11's "pin=" parameter, which internally performs a
+        CONTEXT_SPECIFIC login (C_Login) after SignInit() for that operation.
         """
-        # Local import (keeps top-level deps light and avoids storing Mechanism on self)
         from pkcs11 import Mechanism
+        from pkcs11.exceptions import UserNotLoggedIn
 
-        self._context_login_if_needed()
+        pin = self._user_pin or None  # may be None if no PIN
 
+        # --- PKCS#1 v1.5 ---
         if isinstance(padding, asym_padding.PKCS1v15):
             mech = {
                 hashes.SHA1:   Mechanism.SHA1_RSA_PKCS,
@@ -434,10 +439,22 @@ class HSMRSAPrivateKey(rsa.RSAPrivateKey):
             }.get(type(algorithm))
             if mech is None:
                 raise ValueError("Hash not supported for PKCS#1 v1.5")
-            return self._priv.sign(data, mechanism=mech)
 
+            try:
+                # Newer python-pkcs11: supports pin= for ALWAYS_AUTHENTICATE keys
+                return self._priv.sign(data, mechanism=mech, pin=pin)
+            except TypeError:
+                # Older python-pkcs11 without pin= support
+                return self._priv.sign(data, mechanism=mech)
+            except UserNotLoggedIn:
+                # If the token still claims "not logged in", retry once
+                # (helps when the first C_Login consumed state)
+                return self._priv.sign(data, mechanism=mech, pin=pin)
+
+        # --- RSASSA-PSS ---
         if isinstance(padding, asym_padding.PSS):
             from pkcs11.util.rsa import RsaPssParams
+
             hash_mech = {
                 hashes.SHA256: Mechanism.SHA256,
                 hashes.SHA384: Mechanism.SHA384,
@@ -445,8 +462,29 @@ class HSMRSAPrivateKey(rsa.RSAPrivateKey):
             }.get(type(algorithm))
             if hash_mech is None:
                 raise ValueError("Hash not supported for PSS")
+
             params = RsaPssParams(hash_mech, algorithm.digest_size, hash_mech)
-            return self._priv.sign(data, mechanism=Mechanism.RSA_PKCS_PSS, mechanism_param=params)
+
+            try:
+                return self._priv.sign(
+                    data,
+                    mechanism=Mechanism.RSA_PKCS_PSS,
+                    mechanism_param=params,
+                    pin=pin,
+                )
+            except TypeError:
+                return self._priv.sign(
+                    data,
+                    mechanism=Mechanism.RSA_PKCS_PSS,
+                    mechanism_param=params,
+                )
+            except UserNotLoggedIn:
+                return self._priv.sign(
+                    data,
+                    mechanism=Mechanism.RSA_PKCS_PSS,
+                    mechanism_param=params,
+                    pin=pin,
+                )
 
         raise ValueError("Unsupported signing padding (expect PKCS1v15 or PSS).")
 
@@ -455,16 +493,27 @@ class HSMRSAPrivateKey(rsa.RSAPrivateKey):
         """
         Supports:
             - RSAES-PKCS1 v1.5
-            - RSAES-OAEP (SHA1/224/256/384/512) if supported by the HSM
+            - RSAES-OAEP (SHA1/224/256/384/512) if supported by the HSM / token
+
+        For ALWAYS_AUTHENTICATE private keys, we pass pin= to python-pkcs11
+        so it can perform a context-specific login for each decrypt operation.
         """
         from pkcs11 import Mechanism
         from pkcs11.util.rsa import RsaOaepParams
+        from pkcs11.exceptions import UserNotLoggedIn
 
-        self._context_login_if_needed()
+        pin = self._user_pin or None
 
+        # --- PKCS#1 v1.5 ---
         if isinstance(padding, asym_padding.PKCS1v15):
-            return self._priv.decrypt(ciphertext, mechanism=Mechanism.RSA_PKCS)
+            try:
+                return self._priv.decrypt(ciphertext, mechanism=Mechanism.RSA_PKCS, pin=pin)
+            except TypeError:
+                return self._priv.decrypt(ciphertext, mechanism=Mechanism.RSA_PKCS)
+            except UserNotLoggedIn:
+                return self._priv.decrypt(ciphertext, mechanism=Mechanism.RSA_PKCS, pin=pin)
 
+        # --- OAEP ---
         if isinstance(padding, asym_padding.OAEP):
             # cryptography stores OAEP hash on padding._mgf._algorithm
             hash_algo = getattr(padding._mgf, "_algorithm", None)
@@ -478,10 +527,32 @@ class HSMRSAPrivateKey(rsa.RSAPrivateKey):
             mech_hash = hash_map.get(type(hash_algo))
             if mech_hash is None:
                 raise ValueError("OAEP hash not supported by the HSM")
+
             params = RsaOaepParams(mech_hash, mech_hash, None)  # label=None, MGF1(hash)
-            return self._priv.decrypt(ciphertext, mechanism=Mechanism.RSA_PKCS_OAEP, mechanism_param=params)
+
+            try:
+                return self._priv.decrypt(
+                    ciphertext,
+                    mechanism=Mechanism.RSA_PKCS_OAEP,
+                    mechanism_param=params,
+                    pin=pin,
+                )
+            except TypeError:
+                return self._priv.decrypt(
+                    ciphertext,
+                    mechanism=Mechanism.RSA_PKCS_OAEP,
+                    mechanism_param=params,
+                )
+            except UserNotLoggedIn:
+                return self._priv.decrypt(
+                    ciphertext,
+                    mechanism=Mechanism.RSA_PKCS_OAEP,
+                    mechanism_param=params,
+                    pin=pin,
+                )
 
         raise ValueError("Unsupported decryption padding (expect PKCS1v15 or OAEP).")
+
 
     # --- Non exportable ---
     def private_numbers(self):  # type: ignore[override]
@@ -519,4 +590,3 @@ class HSMRSAPrivateKey(rsa.RSAPrivateKey):
             }
         except Exception:
             return {}
-
