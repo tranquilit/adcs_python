@@ -205,7 +205,7 @@ def _compile_flags_value_bool_first(val, table: dict, *, field_name: str) -> int
     )
 
 
-def _compile_flags_block(flags: dict | None, aliases_root: dict) -> dict:
+def _compile_flags_block(flags, aliases_root: dict) -> dict:
     """
     Compile the 4 flag families to integers, using the canonical table.
     """
@@ -430,7 +430,7 @@ def load_yaml_conf(path="adcs.yaml"):
 def build_templates_for_policy_response(
     conf: dict,
     *,
-    kerberos_user: str | None = None,
+    kerberos_user = None,
     request,
     acme_only=True
 ) -> Tuple[list[dict], list[dict]]:
@@ -446,7 +446,7 @@ def build_templates_for_policy_response(
     oids_list: list[dict] = []
     next_oid_refid = 1
 
-    def register_oid(value: str, group: int = 6, default_name: str | None = None) -> int:
+    def register_oid(value: str, group: int = 6, default_name = None) -> int:
         nonlocal next_oid_refid
         if not value:
             raise ValueError("register_oid: empty value")

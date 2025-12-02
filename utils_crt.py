@@ -598,7 +598,7 @@ def _pick_key_params_from_existing(cert: cx509.Certificate) -> dict[str, Any]:
     return params
 
 
-def _atomic_write(path: str, data: bytes, mode: int | None = None) -> None:
+def _atomic_write(path: str, data: bytes, mode = None) -> None:
     dirn = os.path.dirname(os.path.abspath(path)) or "."
     with tempfile.NamedTemporaryFile(dir=dirn, delete=False) as tmp:
         tmp.write(data)

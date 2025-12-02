@@ -220,7 +220,7 @@ def _apply_headers(resp, headers: dict):
     return resp
 
 
-def _error(caid, alias, err_type: str, code: int, detail: str | None = None):
+def _error(caid, alias, err_type: str, code: int, detail = None):
     body = {"type": err_type}
     if detail:
         body["detail"] = detail
