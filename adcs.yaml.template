@@ -67,7 +67,7 @@ cas:
 ### pkcs11-tool --module --module /usr/lib/x86_64-linux-gnu/opensc-pkcs11.so -L|grep label
 ### pkcs11-tool --module --module /usr/lib/x86_64-linux-gnu/opensc-pkcs11.so --login --pin "123456" --list-objects --type privkey
 #     hsm:
-#       pkcs11_lib: "--module /usr/lib/x86_64-linux-gnu/opensc-pkcs11.so"
+#       pkcs11_lib: "/usr/lib/x86_64-linux-gnu/opensc-pkcs11.so"
 #       token_label: "SmartCard-HSM"
 #       key_id: "01"
 #       user_pin_file: "/opt/adcs_python/secret/hsm_pin.txt"
