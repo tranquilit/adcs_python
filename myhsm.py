@@ -104,6 +104,7 @@ class HSMRSAPrivateKey(rsa.RSAPrivateKey):
         try:
             import pkcs11
             from pkcs11 import Attribute, ObjectClass, UserType
+            from pkcs11.exceptions import UserAlreadyLoggedIn
         except Exception as e:
             raise HSMError(f"python-pkcs11 not found or invalid: {e}") from e
 
@@ -179,6 +180,8 @@ class HSMRSAPrivateKey(rsa.RSAPrivateKey):
                 rw=rw,
                 user_pin=(self._user_pin if (login_on_init and self._user_pin) else None)
             )
+        except UserAlreadyLoggedIn:
+            self._session = self._token.open(rw=rw, user_pin=None)
         except Exception as e:
             raise HSMError(f"Cannot open PKCS#11 session: {e}") from e
 
