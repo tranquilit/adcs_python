@@ -62,122 +62,224 @@ def define_template(*, app_conf, kerberos_user=None , request=None):
         renewal_seconds *= 2
 
     return {
-        "common_name": template_name,
-        "template_oid": {
-            "value": template_oid,
-            "name":  template_name,
-            "major_version": template_major_version,
-            "minor_version": template_minor_version,
-        },
-        "ca_references": ["ca1-inter"],
+    # MS-XCEP Attributes/commonName: friendly/unique name of a CertificateEnrollmentPolicy within a GetPoliciesResponse
+    # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cd22d3a0-f469-4a44-95ed-d10ce4dc2063
+    "common_name": template_name,
 
-        "policy_schema": 2,
-        "revision": {"major": template_major_version, "minor": template_minor_version},
-        "validity": {"validity_seconds": validity_seconds, "renewal_seconds": renewal_seconds},
-        "permissions": {"enroll": True, "auto_enroll": auto_enroll},
+    "template_oid": {
+        # MS-CRTD msPKI-Cert-Template-OID: the certificate template OID
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/4849b1d6-b6bf-405c-8e9c-28ede1874efa
+        "value": template_oid,
 
-        "flags": {
-            "private_key_flags": {
-                "exportable_key": False,
-            },
-            "subject_name_flags": {
-                "add_dns_to_san": True,
-                "add_upn_to_san": True,
-                "add_email_to_san": True,
-                "subject_require_directory_path": True,
-                "subject_require_email": True,
-                "subject_require_common_name": False,
-                "subject_dns_as_cn": False,
-                "enrollee_supplies_subject": False,
-                "enrollee_supplies_san": False,
-                "old_cert_supplies_subject_and_alt_name": False,
-                "add_domain_dns_to_san": False,
-                "add_spn_to_san": False,
-                "add_directory_guid_to_san": False,
-            },
-            "enrollment_flags": {
-                "include_symmetric_algorithms": True,
-                "publish_to_ds": True,
-                "auto_enrollment": auto_enroll,
-                "user_interaction_required": True,
-                "pend_all_requests": False,
-                "publish_to_kra_container": False,
-                "auto_enrollment_check_user_ds_certificate": False,
-                "previous_approval_validate_reenrollment": False,
-                "add_ocsp_nocheck": False,
-                "enable_key_reuse_on_nt_token_keyset_storage_full": False,
-                "no_revocation_info_in_issued_certs": False,
-                "include_basic_constraints_for_ee_certs": False,
-                "allow_enroll_on_behalf_of": False,
-                "allow_previous_approval_keybasedrenewal_validate_reenroll": False,
-                "issuance_policies_from_request": False,
-                "skip_auto_renewal": False,
-                "remove_invalid_certificate_from_personal_store": False,
-            },
-            "general_flags": {
-                "machine_type": False,
-                "ca_type": False,
-                "cross_ca": False,
-            },
-        },
+        # MS-CRTD overview (template structures): template name/display name you expose in policy
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/4c6950e4-1dc2-4ae3-98c3-b8919bb73822
+        "name": template_name,
 
-        "private_key_attributes": {
-            "minimal_key_length": 2048,
-            "key_spec": 1,
-            "algorithm_oid_reference": None,
+        # MS-CRTD msPKI-Template-Schema-Version: template schema version
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/bf5bd40c-0d4d-44bd-870e-8a6bdea3ca88
+        "major_version": template_major_version,
 
+        # MS-CRTD msPKI-Template-Minor-Revision: template minor revision
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/3c315531-7cb0-44de-afb9-5c6f9a8aea49
+        "minor_version": template_minor_version,
+    },
 
-            # smartcard (test with yubikey)
-             "crypto_providers": [
-                 "Microsoft Smart Card Key Storage Provider",
-                 "Microsoft Base Smart Card Crypto Provider"
-             ],
+    # MS-XCEP CAReferenceCollection: references to issuing CAs returned by the policy response
+    # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/95baab3d-2f0b-42ad-897a-26565c5f723f
+    "ca_references": ["ca1-inter"],
+
+    # MS-XCEP Attributes/policySchema: schema version for the policy object
+    # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cd22d3a0-f469-4a44-95ed-d10ce4dc2063
+    "policy_schema": 2,
+
+    "revision": {
+        # MS-XCEP Revision/majorRevision: major revision of the policy item
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/fc1bb552-591f-45bc-9b18-67e1fb20b394
+        "major": template_major_version,
+
+        # MS-XCEP Revision/minorRevision: minor revision of the policy item
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/fc1bb552-591f-45bc-9b18-67e1fb20b394
+        "minor": template_minor_version,
+    },
+
+    "validity": {
+        # MS-XCEP CertificateValidity/validityPeriodSeconds: requested certificate validity (seconds)
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/97bc077a-8f4b-4ab4-b78e-6b312a7642f9
+        "validity_seconds": validity_seconds,
+
+        # MS-XCEP CertificateValidity/renewalPeriodSeconds: renewal window (seconds)
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/97bc077a-8f4b-4ab4-b78e-6b312a7642f9
+        "renewal_seconds": renewal_seconds,
+    },
+
+    "permissions": {
+        # MS-XCEP EnrollmentPermission/enroll: whether the principal can enroll
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cc5a0298-fd6b-41f1-a700-dad9f8e95842
+        "enroll": True,
+
+        # MS-XCEP EnrollmentPermission/autoEnroll: whether the principal can auto-enroll
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cc5a0298-fd6b-41f1-a700-dad9f8e95842
+        "auto_enroll": auto_enroll,
+    },
+
+    "flags": {
+        "private_key_flags": {
+            # MS-XCEP privateKeyFlags: private key behavior flags (bitmask)
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cd22d3a0-f469-4a44-95ed-d10ce4dc2063
+            #
+            # AD CS equivalent: MS-CRTD msPKI-Private-Key-Flag (CT_FLAG_EXPORTABLE_KEY = 0x00000010)
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/f6122d87-b999-4b92-bff8-f465e8949667
+            "exportable_key": False,  # disallow exporting the private key
         },
 
-        # IMPORTANT: no NTDS here (dynamic on issuance side)
-        "required_extensions": [
-            {  # Certificate Template Information
-                "oid": "1.3.6.1.4.1.311.21.7",
-                "critical": False,
-                "template_info": {
-                    "oid": template_oid,
-                    "major_version": template_major_version,
-                    "minor_version": template_minor_version,
-                },
-            },
-            {  # EKU: ClientAuth + Smartcard Logon
-                "oid": "2.5.29.37",
-                "critical": False,
-                "eku_oids": [
-                    "1.3.6.1.5.5.7.3.2",        # clientAuth
-                    "1.3.6.1.4.1.311.20.2.2",   # msSmartcardLogin
-                ],
-            },
-            {  # KeyUsage
-                "oid": "2.5.29.15",
-                "critical": True,
-                "key_usage": {
-                    "digital_signature": True,
-                    "content_commitment": True,   # ≈ nonRepudiation
-                    "key_encipherment": True,
-                    "data_encipherment": False,
-                    "key_agreement": False,
-                    "key_cert_sign": False,
-                    "crl_sign": False,
-                    "encipher_only": False,
-                    "decipher_only": False,
-                },
-            },
-            {  # Aligned Application Policies (ClientAuth + Smartcard Logon)
-                "oid": "1.3.6.1.4.1.311.21.10",
-                "critical": False,
-                "app_policies": [
-                    "1.3.6.1.5.5.7.3.2",        # clientAuth
-                    "1.3.6.1.4.1.311.20.2.2",   # msSmartcardLogin
-                ],
-            },
+        "subject_name_flags": {
+            # MS-XCEP subjectNameFlags: Subject/SAN population rules (bitmask)
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cd22d3a0-f469-4a44-95ed-d10ce4dc2063
+            #
+            # AD CS equivalent list: MS-CRTD msPKI-Certificate-Name-Flag (CT_FLAG_*)
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/1192823c-d839-4bc3-9b6b-fa8c53507ae1
+            #
+            # CA-side semantics: MS-WCCE msPKI-Certificate-Name-Flag
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wcce/a1f27ffb-7f74-4fa1-8841-7cde4ba0bcfe
+            "add_dns_to_san": True,               # require/add DNS in SAN (directory-sourced)
+            "add_upn_to_san": True,               # require/add UPN in SAN (directory-sourced)
+            "add_email_to_san": True,             # require/add email in SAN (directory-sourced)
+
+            "subject_require_directory_path": True,  # require directory path in Subject
+            "subject_require_email": True,           # require email in Subject
+
+            "subject_require_common_name": False,    # require CN in Subject (disabled)
+            "subject_dns_as_cn": False,              # use DNS as Subject CN (disabled)
+
+            "enrollee_supplies_subject": False,      # enrollee supplies Subject in CSR (disabled)
+            "enrollee_supplies_san": False,          # enrollee supplies SAN in CSR (disabled)
+            "old_cert_supplies_subject_and_alt_name": False,  # renewal reuses old Subject+SAN (disabled)
+
+            "add_domain_dns_to_san": False,          # require/add root domain DNS in SAN (disabled)
+            "add_spn_to_san": False,                 # require/add SPN in SAN (disabled)
+            "add_directory_guid_to_san": False,      # require/add directory GUID in SAN (disabled)
+        },
+
+        "enrollment_flags": {
+            # MS-XCEP enrollmentFlags: enrollment behavior flags (bitmask)
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cd22d3a0-f469-4a44-95ed-d10ce4dc2063
+            #
+            # AD CS equivalent list: MS-CRTD msPKI-Enrollment-Flag (CT_FLAG_*)
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/ec71fd43-61c2-407b-83c9-b52272dec8a1
+            "include_symmetric_algorithms": True,     # include symmetric algorithms (S/MIME-related)
+            "publish_to_ds": True,                    # publish issued cert to directory
+            "auto_enrollment": auto_enroll,           # allow auto-enrollment
+
+            # AD CS: CT_FLAG_USER_INTERACTION_REQUIRED -> user consent/prompt required during enrollment
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/ec71fd43-61c2-407b-83c9-b52272dec8a1
+            "user_interaction_required": True,
+
+            "pend_all_requests": False,               # all requests go pending (manager approval)
+            "publish_to_kra_container": False,        # publish to KRA container
+            "auto_enrollment_check_user_ds_certificate": False,  # block auto-enroll if valid cert exists
+            "previous_approval_validate_reenrollment": False,    # reenrollment validation behavior
+            "add_ocsp_nocheck": False,                # add id-pkix-ocsp-nocheck
+            "enable_key_reuse_on_nt_token_keyset_storage_full": False,  # allow key reuse if token storage full
+            "no_revocation_info_in_issued_certs": False,         # omit revocation info
+            "include_basic_constraints_for_ee_certs": False,     # include basic constraints for EE certs
+            "allow_enroll_on_behalf_of": False,       # allow enroll-on-behalf-of
+            "allow_previous_approval_keybasedrenewal_validate_reenroll": False,  # key-based renewal behavior
+            "issuance_policies_from_request": False,   # take issuance policies from CSR
+            "skip_auto_renewal": False,               # disable auto-renewal
+            "remove_invalid_certificate_from_personal_store": False,  # cleanup invalid certs from personal store
+        },
+
+        "general_flags": {
+            # MS-XCEP generalFlags: general template flags (machine/CA/cross-CA)
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cd22d3a0-f469-4a44-95ed-d10ce4dc2063
+            #
+            # Client processing semantics: MS-WCCE Certificate.Template.flags
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wcce/c07fc301-a7c1-4a61-ba91-142b751ad114
+            "machine_type": False,  # not a machine template
+            "ca_type": False,       # not a CA request template
+            "cross_ca": False,      # not a cross-cert template
+        },
+    },
+
+    "private_key_attributes": {
+        # MS-XCEP PrivateKeyAttributes: private key generation requirements advertised by the policy
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cf7610a9-26cb-4172-a4c5-895066acf191
+        "minimal_key_length": 2048,  # minimalKeyLength (bits)
+
+        # MS-CRTD pKIDefaultKeySpec: default key spec (AT_KEYEXCHANGE/AT_SIGNATURE)
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/ee5d75a7-8416-4a92-b708-ee8f6e8baffb
+        "key_spec": 1,  # 1 = AT_KEYEXCHANGE
+
+        # MS-XCEP PrivateKeyAttributes/algorithmOIDReference: optional reference into the XCEP OID table
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cf7610a9-26cb-4172-a4c5-895066acf191
+        "algorithm_oid_reference": None,
+
+        # Smart card providers (CSP/KSP) advertised to the client
+        # MS-XCEP CryptoProviders
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/808caee4-e016-4f9e-ad0a-076ce83c86c7
+        "crypto_providers": [
+            "Microsoft Smart Card Key Storage Provider",
+            "Microsoft Base Smart Card Crypto Provider",
         ],
-    }
+    },
+
+    # IMPORTANT: no NTDS here (dynamic on issuance side)
+    "required_extensions": [
+        {  # Certificate Template Information
+            # MS-WCCE szOID_CERTIFICATE_TEMPLATE: OID 1.3.6.1.4.1.311.21.7
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wcce/9da866e5-9ce9-4a83-9064-0d20af8b2ccf
+            "oid": "1.3.6.1.4.1.311.21.7",
+            "critical": False,
+            "template_info": {
+                # Template OID carried in the extension (maps to msPKI-Cert-Template-OID)
+                # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/4849b1d6-b6bf-405c-8e9c-28ede1874efa
+                "oid": template_oid,
+
+                # Version fields carried in the extension
+                # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wcce/9da866e5-9ce9-4a83-9064-0d20af8b2ccf
+                "major_version": template_major_version,
+                "minor_version": template_minor_version,
+            },
+        },
+        {  # EKU: ClientAuth + Smartcard Logon
+            # MS-WCCE pKIExtendedKeyUsage: server MUST add EKU(s) specified by the template
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wcce/1c1d7aaa-281b-48f2-babc-1bc42dd3ed37
+            "oid": "2.5.29.37",
+            "critical": False,
+            "eku_oids": [
+                "1.3.6.1.5.5.7.3.2",        # id-kp-clientAuth
+                "1.3.6.1.4.1.311.20.2.2",   # Microsoft Smartcard Logon (msSmartcardLogin)
+            ],
+        },
+        {  # KeyUsage
+            # MS-WCCE pKIKeyUsage: server SHOULD build Key Usage from template attributes
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wcce/98626a7c-31eb-46f4-9c44-3cfb29e6c823
+            "oid": "2.5.29.15",
+            "critical": True,
+            "key_usage": {
+                "digital_signature": True,     # digitalSignature
+                "content_commitment": True,    # nonRepudiation/contentCommitment
+                "key_encipherment": True,      # keyEncipherment
+                "data_encipherment": False,    # dataEncipherment
+                "key_agreement": False,        # keyAgreement
+                "key_cert_sign": False,        # keyCertSign
+                "crl_sign": False,             # cRLSign
+                "encipher_only": False,        # encipherOnly
+                "decipher_only": False,        # decipherOnly
+            },
+        },
+        {  # Aligned Application Policies (ClientAuth + Smartcard Logon)
+            # MS-WCCE: Certificate Application Policy Extension (OID 1.3.6.1.4.1.311.21.10)
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wcce/160b96b1-c431-457a-8eed-27c11873f378
+            "oid": "1.3.6.1.4.1.311.21.10",
+            "critical": False,
+            "app_policies": [
+                "1.3.6.1.5.5.7.3.2",        # id-kp-clientAuth
+                "1.3.6.1.4.1.311.20.2.2",   # msSmartcardLogin
+            ],
+        },
+    ],
+}
 
 
 # =======================================
