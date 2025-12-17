@@ -52,123 +52,219 @@ def define_template(*, app_conf, kerberos_user=None , request=None):
        username = XSslClientDn.split('=',1)[1]
 
     return {
-        "common_name": template_name,
-        "template_oid": {
-            "value": template_oid,
-            "name":  template_name,
-            "major_version": template_major_version,
-            "minor_version": template_minor_version,
+    # MS-XCEP Attributes/commonName: friendly/unique name of a CertificateEnrollmentPolicy within a GetPoliciesResponse
+    # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cd22d3a0-f469-4a44-95ed-d10ce4dc2063
+    "common_name": template_name,
+
+    "template_oid": {
+        # MS-CRTD msPKI-Cert-Template-OID: the template OID
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/4849b1d6-b6bf-405c-8e9c-28ede1874efa
+        "value": template_oid,
+
+        # MS-CRTD (template structures overview): template name/display name you expose
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/4c6950e4-1dc2-4ae3-98c3-b8919bb73822
+        "name": template_name,
+
+        # MS-CRTD msPKI-Template-Schema-Version: template schema version (1..4)
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/bf5bd40c-0d4d-44bd-870e-8a6bdea3ca88
+        "major_version": template_major_version,
+
+        # MS-CRTD msPKI-Template-Minor-Revision: template minor revision (0..0x7fffffff)
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/3c315531-7cb0-44de-afb9-5c6f9a8aea49
+        "minor_version": template_minor_version,
+    },
+
+    # MS-XCEP CAReferenceCollection: references to issuing CAs returned by the policy response
+    # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/95baab3d-2f0b-42ad-897a-26565c5f723f
+    "ca_references": ["ca1-inter"],
+
+    # MS-XCEP Attributes/policySchema: schema version for the policy object (SHOULD be 1,2,3)
+    # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cd22d3a0-f469-4a44-95ed-d10ce4dc2063
+    "policy_schema": 2,
+
+    "revision": {
+        # MS-XCEP Revision/majorRevision: populated from MS-CRTD "revision" attribute
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/fc1bb552-591f-45bc-9b18-67e1fb20b394
+        "major": template_major_version,
+
+        # MS-XCEP Revision/minorRevision: populated from MS-CRTD msPKI-Template-Minor-Revision
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/fc1bb552-591f-45bc-9b18-67e1fb20b394
+        "minor": template_minor_version,
+    },
+
+    "validity": {
+        # MS-XCEP CertificateValidity/validityPeriodSeconds: expected certificate validity (seconds)
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/97bc077a-8f4b-4ab4-b78e-6b312a7642f9
+        "validity_seconds": validity_seconds,
+
+        # MS-XCEP CertificateValidity/renewalPeriodSeconds: recommended renewal window (seconds)
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/97bc077a-8f4b-4ab4-b78e-6b312a7642f9
+        "renewal_seconds": renewal_seconds,
+    },
+
+    "permissions": {
+        # MS-XCEP EnrollmentPermission/enroll: requester has permission to enroll
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cc5a0298-fd6b-41f1-a700-dad9f8e95842
+        "enroll": True,
+
+        # MS-XCEP EnrollmentPermission/autoEnroll: requester has permission to auto-enroll
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cc5a0298-fd6b-41f1-a700-dad9f8e95842
+        "auto_enroll": auto_enroll,
+    },
+
+    # FLAGS: booleans only
+    "flags": {
+        "private_key_flags": {
+            # MS-XCEP Attributes/privateKeyFlags: bitmask of private key flags
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cd22d3a0-f469-4a44-95ed-d10ce4dc2063
+            #
+            # AD CS equivalent: MS-CRTD msPKI-Private-Key-Flag (CT_FLAG_EXPORTABLE_KEY = 0x00000010)
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/f6122d87-b999-4b92-bff8-f465e8949667
+            "exportable_key": True,
         },
-        "ca_references": ["ca1-inter"],
 
-        "policy_schema": 2,
-        "revision": {"major": template_major_version, "minor": template_minor_version},
-        "validity": {"validity_seconds": validity_seconds, "renewal_seconds": renewal_seconds},
-        "permissions": {"enroll": True, "auto_enroll": auto_enroll},
-
-        # ⚙️ FLAGS: booleans only
-        "flags": {
-            "private_key_flags": {
-                "exportable_key": True,
-            },
-            "subject_name_flags": {
-                "add_dns_to_san": True,
-                "subject_dns_as_cn": True,
-                "enrollee_supplies_subject": False,
-                "enrollee_supplies_san": False,
-                "old_cert_supplies_subject_and_alt_name": False,
-                "add_domain_dns_to_san": False,
-                "add_spn_to_san": False,
-                "add_directory_guid_to_san": False,
-                "add_upn_to_san": False,
-                "add_email_to_san": False,
-                "subject_require_email": False,
-                "subject_require_common_name": False,
-                "subject_require_directory_path": False,
-            },
-            "enrollment_flags": {
-                "include_symmetric_algorithms": True,
-                "publish_to_ds": True,
-                "auto_enrollment": auto_enroll,
-                "user_interaction_required": False,
-                "pend_all_requests": False,
-                "publish_to_kra_container": False,
-                "auto_enrollment_check_user_ds_certificate": False,
-                "previous_approval_validate_reenrollment": False,
-                "add_ocsp_nocheck": False,
-                "enable_key_reuse_on_nt_token_keyset_storage_full": False,
-                "no_revocation_info_in_issued_certs": False,
-                "include_basic_constraints_for_ee_certs": False,
-                "allow_enroll_on_behalf_of": False,
-                "allow_previous_approval_keybasedrenewal_validate_reenroll": False,
-                "issuance_policies_from_request": False,
-                "skip_auto_renewal": False,
-                "remove_invalid_certificate_from_personal_store": False,
-            },
-            "general_flags": {
-                "machine_type": True,
-                "ca_type": False,
-                "cross_ca": False,
-            },
+        "subject_name_flags": {
+            # MS-XCEP Attributes/subjectNameFlags: bitmask controlling Subject/SAN population rules
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cd22d3a0-f469-4a44-95ed-d10ce4dc2063
+            #
+            # AD CS equivalent list: MS-CRTD msPKI-Certificate-Name-Flag (CT_FLAG_*)
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/1192823c-d839-4bc3-9b6b-fa8c53507ae1
+            #
+            # Processing rules (CA-side): MS-WCCE msPKI-Certificate-Name-Flag
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wcce/a1f27ffb-7f74-4fa1-8841-7cde4ba0bcfe
+            "add_dns_to_san": True,               # require/add DNS in SAN (directory-sourced)
+            "subject_dns_as_cn": True,            # use DNS as CN in Subject (when applicable)
+            "enrollee_supplies_subject": False,   # enrollee supplies Subject in CSR
+            "enrollee_supplies_san": False,       # enrollee supplies SAN in CSR
+            "old_cert_supplies_subject_and_alt_name": False,  # renewal reuses old Subject+SAN
+            "add_domain_dns_to_san": False,       # require/add root domain DNS in SAN
+            "add_spn_to_san": False,              # require/add SPN in SAN
+            "add_directory_guid_to_san": False,   # require/add directory GUID (objectGUID) in SAN
+            "add_upn_to_san": False,              # require/add UPN in SAN
+            "add_email_to_san": False,            # require/add email in SAN
+            "subject_require_email": False,       # require email attribute in Subject
+            "subject_require_common_name": False, # require CN in Subject
+            "subject_require_directory_path": False, # require directory path in Subject
         },
 
-        "private_key_attributes": {
-            "minimal_key_length": 2048,
-            "key_spec": 1,  # 1 = AT_KEYEXCHANGE
-            "algorithm_oid_reference": None,
-            "crypto_providers": [
-                "Microsoft Software Key Storage Provider",
-                "Microsoft Platform Crypto Provider",
-                "Microsoft Enhanced Cryptographic Provider v1.0",
-                "Microsoft Base Cryptographic Provider v1.0",
+        "enrollment_flags": {
+            # MS-XCEP Attributes/enrollmentFlags: bitmask controlling enrollment behavior
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cd22d3a0-f469-4a44-95ed-d10ce4dc2063
+            #
+            # AD CS equivalent list: MS-CRTD msPKI-Enrollment-Flag (CT_FLAG_*)
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/ec71fd43-61c2-407b-83c9-b52272dec8a1
+            "include_symmetric_algorithms": True,     # CT_FLAG_INCLUDE_SYMMETRIC_ALGORITHMS
+            "publish_to_ds": True,                    # CT_FLAG_PUBLISH_TO_DS
+            "auto_enrollment": auto_enroll,           # CT_FLAG_AUTO_ENROLLMENT
+            "user_interaction_required": False,       # CT_FLAG_USER_INTERACTION_REQUIRED
+            "pend_all_requests": False,               # CT_FLAG_PEND_ALL_REQUESTS
+            "publish_to_kra_container": False,        # CT_FLAG_PUBLISH_TO_KRA_CONTAINER
+            "auto_enrollment_check_user_ds_certificate": False,  # CT_FLAG_AUTO_ENROLLMENT_CHECK_USER_DS_CERTIFICATE
+            "previous_approval_validate_reenrollment": False,    # CT_FLAG_PREVIOUS_APPROVAL_VALIDATE_REENROLLMENT
+            "add_ocsp_nocheck": False,                # CT_FLAG_ADD_OCSP_NOCHECK
+            "enable_key_reuse_on_nt_token_keyset_storage_full": False,  # CT_FLAG_ENABLE_KEY_REUSE_ON_NT_TOKEN_KEYSET_STORAGE_FULL
+            "no_revocation_info_in_issued_certs": False,         # CT_FLAG_NO_REVOCATION_INFO_IN_ISSUED_CERTS
+            "include_basic_constraints_for_ee_certs": False,     # CT_FLAG_INCLUDE_BASIC_CONSTRAINTS_FOR_EE_CERTS
+            "allow_enroll_on_behalf_of": False,       # CT_FLAG_ALLOW_ENROLL_ON_BEHALF_OF
+            "allow_previous_approval_keybasedrenewal_validate_reenroll": False,  # CT_FLAG_ALLOW_PREVIOUS_APPROVAL_KEYBASEDRENEWAL_VALIDATE_REENROLL
+            "issuance_policies_from_request": False,   # CT_FLAG_ISSUANCE_POLICIES_FROM_REQUEST
+            "skip_auto_renewal": False,               # CT_FLAG_SKIP_AUTO_RENEWAL
+            "remove_invalid_certificate_from_personal_store": False,  # CT_FLAG_REMOVE_INVALID_CERTIFICATE_FROM_PERSONAL_STORE
+        },
+
+        "general_flags": {
+            # MS-XCEP Attributes/generalFlags: general template flags (machine/CA/cross-CA)
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cd22d3a0-f469-4a44-95ed-d10ce4dc2063
+            #
+            # Client processing rules: MS-WCCE Certificate.Template.flags (CT_FLAG_MACHINE_TYPE, etc.)
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wcce/c07fc301-a7c1-4a61-ba91-142b751ad114
+            "machine_type": True,  # CT_FLAG_MACHINE_TYPE: machine enrollment template
+            "ca_type": False,      # CT_FLAG_IS_CA: CA request template
+            "cross_ca": False,     # CT_FLAG_IS_CROSS_CA: cross-cert template
+        },
+    },
+
+    "private_key_attributes": {
+        # MS-XCEP PrivateKeyAttributes: private key generation requirements advertised by the policy
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cf7610a9-26cb-4172-a4c5-895066acf191
+        "minimal_key_length": 3072,  # minimalKeyLength (bits)
+
+        # MS-CRTD pKIDefaultKeySpec: allowed values for default key spec (AT_KEYEXCHANGE/AT_SIGNATURE)
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/ee5d75a7-8416-4a92-b708-ee8f6e8baffb
+        "key_spec": 1,  # 1 = AT_KEYEXCHANGE
+
+        # MS-XCEP PrivateKeyAttributes/algorithmOIDReference: optional reference into the OID table returned by XCEP
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cf7610a9-26cb-4172-a4c5-895066acf191
+        "algorithm_oid_reference": None,
+
+        "crypto_providers": [
+            # MS-XCEP CryptoProviders: list of allowed CSP/KSP provider names
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/808caee4-e016-4f9e-ad0a-076ce83c86c7
+            "Microsoft Software Key Storage Provider",
+            "Microsoft Platform Crypto Provider",
+            "Microsoft Enhanced Cryptographic Provider v1.0",
+            "Microsoft Base Cryptographic Provider v1.0",
+        ],
+    },
+
+    # Static extensions (re-applied at issuance)
+    "required_extensions": [
+        {  # Certificate Template Information
+            # MS-WCCE szOID_CERTIFICATE_TEMPLATE: OID 1.3.6.1.4.1.311.21.7 (critical SHOULD be FALSE)
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wcce/9da866e5-9ce9-4a83-9064-0d20af8b2ccf
+            "oid": "1.3.6.1.4.1.311.21.7",
+            "critical": False,
+            "template_info": {
+                # TemplateID maps to MS-CRTD msPKI-Cert-Template-OID
+                # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/4849b1d6-b6bf-405c-8e9c-28ede1874efa
+                "oid": template_oid,
+
+                # MS-WCCE szOID_CERTIFICATE_TEMPLATE: major/minor template version carried in the extension
+                # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wcce/9da866e5-9ce9-4a83-9064-0d20af8b2ccf
+                "major_version": template_major_version,
+                "minor_version": template_minor_version,
+            },
+        },
+        {  # EKU: ClientAuth + Secure Email + EFS
+            # MS-WCCE pKIExtendedKeyUsage: server MUST add EKU OIDs specified by the template
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wcce/1c1d7aaa-281b-48f2-babc-1bc42dd3ed37
+            "oid": "2.5.29.37",
+            "critical": False,
+            "eku_oids": [
+                "1.3.6.1.5.5.7.3.2",        # id-kp-clientAuth
+                "1.3.6.1.5.5.7.3.4",        # id-kp-emailProtection (Secure Email)
+                "1.3.6.1.4.1.311.10.3.4",   # Microsoft EFS
             ],
         },
-
-        # Static extensions (re-applied at issuance)
-        "required_extensions": [
-            {  # Certificate Template Information
-                "oid": "1.3.6.1.4.1.311.21.7",
-                "critical": False,
-                "template_info": {
-                    "oid": template_oid,
-                    "major_version": template_major_version,
-                    "minor_version": template_minor_version,
-                },
+        {  # KeyUsage
+            # MS-WCCE pKIKeyUsage: server SHOULD build Key Usage from the template attribute
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wcce/98626a7c-31eb-46f4-9c44-3cfb29e6c823
+            "oid": "2.5.29.15",
+            "critical": True,
+            "key_usage": {
+                "digital_signature": True,     # digitalSignature
+                "content_commitment": False,   # nonRepudiation/contentCommitment
+                "key_encipherment": True,      # keyEncipherment
+                "data_encipherment": False,    # dataEncipherment
+                "key_agreement": False,        # keyAgreement
+                "key_cert_sign": False,        # keyCertSign
+                "crl_sign": False,             # cRLSign
+                "encipher_only": False,        # encipherOnly
+                "decipher_only": False,        # decipherOnly
             },
-            {  # EKU: ClientAuth + Secure Email + EFS
-                "oid": "2.5.29.37",
-                "critical": False,
-                "eku_oids": [
-                    "1.3.6.1.5.5.7.3.2",
-                    "1.3.6.1.5.5.7.3.4",
-                    "1.3.6.1.4.1.311.10.3.4",
-                ],
-            },
-            {  # KeyUsage
-                "oid": "2.5.29.15",
-                "critical": True,
-                "key_usage": {
-                    "digital_signature": True,
-                    "content_commitment": False,
-                    "key_encipherment": True,
-                    "data_encipherment": False,
-                    "key_agreement": False,
-                    "key_cert_sign": False,
-                    "crl_sign": False,
-                    "encipher_only": False,
-                    "decipher_only": False,
-                },
-            },
-            {  # Application Policies
-                "oid": "1.3.6.1.4.1.311.21.10",
-                "critical": False,
-                "app_policies": [
-                    "1.3.6.1.5.5.7.3.2",
-                    "1.3.6.1.4.1.311.10.3.4",
-                ],
-            },
-        ],
-    }
+        },
+        {  # Application Policies
+            # MS-WCCE: Certificate Application Policy Extension (OID 1.3.6.1.4.1.311.21.10)
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wcce/160b96b1-c431-457a-8eed-27c11873f378
+            "oid": "1.3.6.1.4.1.311.21.10",
+            "critical": False,
+            "app_policies": [
+                "1.3.6.1.5.5.7.3.2",        # ClientAuth
+                "1.3.6.1.4.1.311.10.3.4",   # Microsoft EFS
+            ],
+        },
+    ],
+}
 
 
 # ======================
