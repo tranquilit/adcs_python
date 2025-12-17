@@ -199,7 +199,7 @@ def define_template(*, app_conf, kerberos_user=None , request=None):
     "private_key_attributes": {
         # MS-XCEP PrivateKeyAttributes: key generation requirements sent by CEP/XCEP
         # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cf7610a9-26cb-4172-a4c5-895066acf191
-        "minimal_key_length": 2048,          # minimalKeyLength (in bits)
+        "minimal_key_length": 3072,          # minimalKeyLength (in bits)
         "key_spec": 1,                       # keySpec (default key spec semantics are described in MS-WCCE)
         "algorithm_oid_reference": None,      # algorithmOIDReference (reference into the OID table in XCEP)
 
