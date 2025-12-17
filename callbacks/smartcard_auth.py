@@ -204,7 +204,7 @@ def define_template(*, app_conf, kerberos_user=None , request=None):
     "private_key_attributes": {
         # MS-XCEP PrivateKeyAttributes: private key generation requirements advertised by the policy
         # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cf7610a9-26cb-4172-a4c5-895066acf191
-        "minimal_key_length": 2048,  # minimalKeyLength (bits)
+        "minimal_key_length": 3072,  # minimalKeyLength (bits)
 
         # MS-CRTD pKIDefaultKeySpec: default key spec (AT_KEYEXCHANGE/AT_SIGNATURE)
         # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/ee5d75a7-8416-4a92-b708-ee8f6e8baffb
