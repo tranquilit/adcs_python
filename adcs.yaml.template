@@ -92,16 +92,13 @@ templates:
       path: "callbacks/user_template.py"     # must expose define_template() and emit_certificate()
       define: "define_template"
       issue:  "emit_certificate"
-      acme_available: false
   - callback:
       path: "callbacks/computer_template.py"     # must expose define_template() and emit_certificate()
       define: "define_template"
       issue:  "emit_certificate"
-      acme_available: false
   - callback:
       path: "callbacks/acme_san.py"
       define: "define_template"
       issue:  "emit_certificate"
-      acme_available: true
 
 
