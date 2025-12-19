@@ -96,9 +96,5 @@ templates:
       path: "callbacks/computer_template.py"     # must expose define_template() and emit_certificate()
       define: "define_template"
       issue:  "emit_certificate"
-  - callback:
-      path: "callbacks/acme_san.py"
-      define: "define_template"
-      issue:  "emit_certificate"
 
 
