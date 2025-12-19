@@ -327,7 +327,6 @@ def load_yaml_conf(path="adcs.yaml"):
     storage_paths_global = gbl.get("storage_paths", {}) or {}
     conf["path_list_request_id"] = gbl.get("path_list_request_id", "/opt/adcs_python/list_request_id")
 
-    conf["acme_database_url"] = gbl.get("acme_database_url", "sqlite:///acme.db")
     conf["policyid"] = policy_provider.get("policy_id")
     conf["next_update_hours"] = policy_provider.get("next_update_hours", 8)
 
@@ -418,9 +417,7 @@ def load_yaml_conf(path="adcs.yaml"):
         conf["__template_decls__"].append({
             "path": cb_path,
             "define": cb_define,
-            "issue": cb_issue,
-            "acme_available": bool(cb.get("acme_available", False)),
-            "acme_alias": cb.get("acme_alias"),  # peut être None si non défini
+            "issue": cb_issue
         })
     return conf
 
@@ -431,8 +428,7 @@ def build_templates_for_policy_response(
     conf: dict,
     *,
     kerberos_user = None,
-    request,
-    acme_only=True
+    request
 ) -> Tuple[list[dict], list[dict]]:
     """
     Build **per-request** templates and a **per-request** OIDs registry.
@@ -469,10 +465,7 @@ def build_templates_for_policy_response(
 
     # Build each template via its "define" callback
     for cb in conf.get("__template_decls__") or []:
-        if acme_only:
-            if not bool(cb.get("acme_available", False)):
-                continue
- 
+
         if cb["path"].startswith('/'):
             cb_path = cb["path"]
         else:
@@ -484,9 +477,6 @@ def build_templates_for_policy_response(
             kerberos_user=kerberos_user,
             request=request
         )
-        tpl["acme_available"] = bool(cb.get("acme_available", False))
-        if cb.get("acme_alias"):
-            tpl["acme_alias"] = str(cb["acme_alias"])
         if not isinstance(tpl, dict):
             raise TypeError(f"{cb['path']}:{cb['define']} must return a dict")
 

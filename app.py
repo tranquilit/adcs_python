@@ -27,7 +27,6 @@ from utils import (
 from adcs_config import load_yaml_conf, build_templates_for_policy_response
 from callback_loader import load_func
 
-from acme_api import acme_bp
 
 # ------------- SOAP parsing security -------------
 MAX_SOAP_BYTES = 2 * 1024 * 1024  # 2 MiB: hard limit to avoid OOM
@@ -80,8 +79,7 @@ def cep_service():
     templates_for_user, oids_for_user = build_templates_for_policy_response(
         app.confadcs,
         kerberos_user=kerberos_user,
-        request=request,
-        acme_only=False
+        request=request
     )
 
     # Keep an in-memory index (optional, no longer required by CES)
@@ -148,8 +146,7 @@ def ces_service(CAID):
     templates_for_user, _ = build_templates_for_policy_response(
         app.confadcs,
         kerberos_user=kerberos_user,
-        request=request,
-        acme_only=False
+        request=request
     )
 
     tmap = { (t.get("template_oid") or {}).get("value"): t for t in templates_for_user }
@@ -159,10 +156,10 @@ def ces_service(CAID):
         tpl = tmap.get(info.get('oid'))
     else:
         tpl = tmap_name.get(info.get('name'))
-    if not tpl : 
-        return Response("The requested template is not valid", 403)        
+    if not tpl :
+        return Response("The requested template is not valid", 403)
     if not CAID in tpl['ca_references']:
-        return Response('%s not in ca_references for template %s' % (CAID, tpl['template_oid']['value']) , 403)        
+        return Response('%s not in ca_references for template %s' % (CAID, tpl['template_oid']['value']) , 403)
     dict_id_ca = {u['id'] : u for u in app.confadcs['cas_list']}
 
     ca = dict_id_ca[CAID]
@@ -198,7 +195,7 @@ def ces_service(CAID):
 
         with open(csr_path, 'w') as f:
             f.write(pem_csr)
-    
+
     status = str(result["status"]).lower()
 
 
@@ -210,7 +207,7 @@ def ces_service(CAID):
 
         status_text = (result.get("status_text") or
                        ("Waiting for processing" if status == "pending" else "Denied"))
-    
+
 
         if not pkcs7_der:
             pkcs7_der = build_adcs_bst_pkiresponse(
@@ -221,8 +218,8 @@ def ces_service(CAID):
                 status_text=status_text,
                 body_part_id=body_part_id
             )
-        
-    
+
+
         xml_body, http_code = build_ws_trust_response(
             pkcs7_der=pkcs7_der,
             relates_to=f"urn:uuid:{uuid_request}",
@@ -235,7 +232,7 @@ def ces_service(CAID):
             invalid_request=True,
             lang="fr-FR",
         )
-    
+
         return Response(
             xml_body.decode("utf-8"),
             content_type="application/soap+xml; charset=utf-8",
@@ -262,7 +259,7 @@ def ces_service(CAID):
                 ca["__key_obj"],
                 body_part_id
             )
-    
+
         b64_p7 = format_b64_for_soap(pkcs7_der)
         b64_leaf = format_b64_for_soap(cert_der)
 
@@ -294,8 +291,6 @@ if __name__ == '__main__':
     app.confadcs = load_yaml_conf(os.path.join(os.path.dirname(os.path.realpath(__file__)),"adcs.yaml"))
     decls = app.confadcs.get("__template_decls__") or []
     print("Loaded config with", len(decls), "template declaration(s).")
-    if [t for t in app.confadcs.get("__template_decls__") if t['acme_available']]:
-        app.register_blueprint(acme_bp)
     #app.run(host='127.0.0.1', port=8080)
     serve(app, host="127.0.0.1", port=8080)
 
