@@ -52,7 +52,7 @@ def cep_service():
         xml_data = raw.decode('utf-8', errors='replace')
     except Exception:
         return Response("Invalid encoding", status=400, content_type="text/plain; charset=utf-8")
-    print(f"[CEP] Request from {g.kerberos_user} (len={len(raw)} bytes)")
+    print(f"[CEP] Request from {g.username} (len={len(raw)} bytes)")
 
     rst_xml = xml_data
     uuid_request = ''
@@ -73,12 +73,12 @@ def cep_service():
     relates_to = uuid_request or uuid_random
 
     # User resolution for CEP (same as for CES)
-    kerberos_user = g.kerberos_user
+    username = g.username
 
     # Build templates + OIDs for THIS CEP response (user-dependent)
     templates_for_user, oids_for_user = build_templates_for_policy_response(
         app.confadcs,
-        kerberos_user=kerberos_user,
+        username=username,
         request=request
     )
 
@@ -140,12 +140,12 @@ def ces_service(CAID):
 
     csr_der, body_part_id, info = exct_csr_from_cmc(p7_der)
 
-    kerberos_user = g.kerberos_user
+    username = g.username
 
     # --- IMPORTANT: (re)build templates FOR THIS CES request
     templates_for_user, _ = build_templates_for_policy_response(
         app.confadcs,
-        kerberos_user=kerberos_user,
+        username=username,
         request=request
     )
 
@@ -174,7 +174,7 @@ def ces_service(CAID):
     result = emit_certificate(
         csr_der=csr_der,
         request_id=request_id,
-        kerberos_user=kerberos_user,
+        username=username,
         ca=ca,
         template=tpl,
         info=info,

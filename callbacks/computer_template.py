@@ -35,7 +35,7 @@ template_major_version = 100
 template_minor_version = 3
 auto_enroll            = True
 
-def define_template(*, app_conf, kerberos_user=None , request=None):
+def define_template(*, app_conf, username=None , request=None):
     validity_seconds = 31536000       # 1 year
     renewal_seconds = 3628800         # 42 days
     auto_enroll = True
@@ -46,8 +46,8 @@ def define_template(*, app_conf, kerberos_user=None , request=None):
     XSslAuthenticated = request.headers.get('X-Ssl-Authenticated', None)
     XSslClientDn = request.headers.get('X-Ssl-Client-Dn', None)
 
-    if kerberos_user :
-       username = kerberos_user
+    if username :
+       username = username
     else:
        username = XSslClientDn.split('=',1)[1]
 
@@ -274,7 +274,7 @@ def emit_certificate(
     *,
     csr_der: Optional[bytes],
     request_id: Optional[int],
-    kerberos_user: str,
+    username: str,
     ca: dict,
     template: Optional[dict],
     info: dict,
@@ -289,8 +289,8 @@ def emit_certificate(
     XSslAuthenticated = request.headers.get('X-Ssl-Authenticated', None)
     XSslClientDn = request.headers.get('X-Ssl-Client-Dn', None)
 
-    if kerberos_user :
-       username = kerberos_user
+    if username :
+       username = username
     else:
        username = XSslClientDn.split('=',1)[1]
 

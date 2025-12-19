@@ -76,7 +76,7 @@ def auth_required(f):
         if (not user) and (not x_ssl_client_sha1):
             return Response("Unauthorized", 401, {'WWW-Authenticate': 'Negotiate'})
 
-        g.kerberos_user = user
+        g.username = user
         if response_token:
             headers = {'WWW-Authenticate': 'Negotiate ' + response_token} if response_token else {}
         else:

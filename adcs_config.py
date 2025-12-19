@@ -427,7 +427,7 @@ def load_yaml_conf(path="adcs.yaml"):
 def build_templates_for_policy_response(
     conf: dict,
     *,
-    kerberos_user = None,
+    username = None,
     request
 ) -> Tuple[list[dict], list[dict]]:
     """
@@ -474,7 +474,7 @@ def build_templates_for_policy_response(
         define_template = load_func(cb_path, cb["define"])
         tpl = define_template(
             app_conf=conf,                 # conf remains read-only
-            kerberos_user=kerberos_user,
+            username=username,
             request=request
         )
         if not isinstance(tpl, dict):
