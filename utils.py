@@ -1190,7 +1190,11 @@ def build_get_policies_response(
     policies = ET.SubElement(response, ET.QName(NS_EP['ep'], 'policies'))
 
     # --- templates -> policies/policy ---
+    dict_ca_allowed = {}
     for t in templates:
+        if t['permissions']['enroll']:
+            for c in t['ca_references']:
+                dict_ca_allowed[c] = None
         policy = ET.SubElement(policies, ET.QName(NS_EP['ep'], 'policy'))
         text(ET.SubElement(policy, ET.QName(NS_EP['ep'], 'policyOIDReference')), t["__policy_oid_reference"])
 
@@ -1277,7 +1281,7 @@ def build_get_policies_response(
         text(ET.SubElement(cauri, ET.QName(NS_EP['ep'], 'renewalOnly')), "false")
 
         text(ET.SubElement(ca_el, ET.QName(NS_EP['ep'], 'certificate')), ca["__certificate_b64"])
-        text(ET.SubElement(ca_el, ET.QName(NS_EP['ep'], 'enrollPermission')), tbool(ca["enroll_permission"]))
+        text(ET.SubElement(ca_el, ET.QName(NS_EP['ep'], 'enrollPermission')), tbool(bool(ca['id'] in dict_ca_allowed)))
         text(ET.SubElement(ca_el, ET.QName(NS_EP['ep'], 'cAReferenceID')), ca["__refid"])
 
     # --- oIDs ---
