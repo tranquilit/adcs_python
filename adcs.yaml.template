@@ -14,17 +14,17 @@ cas:
       crl_http:        "http://testadcs.mydomain.lan/crl/ica/intermediate.crl.pem"
       ca_issuers_http: "http://testadcs.mydomain.lan/certs/ica/ica.crt.pem"
     pem:
-      certificate_path_pem: /opt/adcs_python/pki/certs/ica/ica.crt.pem
-      key_path_pem:         /opt/adcs_python/pki/private/ica/ica.key.pem
+      certificate_path_pem: /var/lib/adcs/pki/certs/ica/ica.crt.pem
+      key_path_pem:         /var/lib/adcs/pki/private/ica/ica.key.pem
       key_passphrase: null
 
     crl:
-      path_crl: /opt/adcs_python/pki/crl/ica/intermediate.crl.pem
+      path_crl: /var/lib/pki/crl/ica/intermediate.crl.pem
 
     storage_paths:
-      cert_dir: /opt/adcs_python/pki/newcerts/ica/
-      csr_dir:  /opt/adcs_python/pki/csr/ica/
-      private_dir: /opt/adcs_python/pki/private/ica/
+      cert_dir: /var/lib/adcs/pki/newcerts/ica/
+      csr_dir:  /var/lib/pki/csr/ica/
+      private_dir: /var/lib/adcs/pki/private/ica/
 
 
   - id: "ca1-root"
@@ -34,17 +34,17 @@ cas:
       ca_issuers_http: "http://testadcs.mydomain.lan/certs/root/ca.crt.pem"
 
     pem:
-      certificate_path_pem: /opt/adcs_python/pki/certs/root/ca.crt.pem
-      key_path_pem:         /opt/adcs_python/pki/private/root/ca.key.pem
+      certificate_path_pem: /var/lib/adcs/pki/certs/root/ca.crt.pem
+      key_path_pem:         /var/lib/adcs/pki/private/root/ca.key.pem
       key_passphrase: null
 
     crl:
-      path_crl: /opt/adcs_python/pki/crl/root/root.crl.pem
+      path_crl: /var/lib/adcs/pki/crl/root/root.crl.pem
 
     storage_paths:
-      cert_dir: /opt/adcs_python/pki/newcerts/root/
-      csr_dir:  /opt/adcs_python/pki/csr/root/
-      private_dir: /opt/adcs_python/pki/private/root/
+      cert_dir: /var/lib/adcs/pki/newcerts/root/
+      csr_dir:  /var/lib/adcs/pki/csr/root/
+      private_dir: /var/lib/adcs/pki/private/root/
 
 ############# TPM (if not key_path_pem and key_passphrase) ###################
 #    hsm:
@@ -75,11 +75,11 @@ cas:
 
 templates:
   - callback:
-      path: "/opt/adcs_python/callbacks/user_template.py"    
+      path: "/etc/adcs/callbacks/user_template.py"    
   - callback:
-      path: "/opt/adcs_python/callbacks/computer_template.py"    
+      path: "/etc/adcs/callbacks/computer_template.py"    
 
 auth:
   - kerberos: true
   - callback:
-      path: "/opt/adcs_python/callbacks/auth_basic_template.py"
+      path: "/etc/adcs/callbacks/auth_basic_template.py"
