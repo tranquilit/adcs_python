@@ -27,8 +27,8 @@ server {
     access_log "/var/log/nginx/access.log" combined_ssl;
 
 
-    ssl_certificate             "/var/lib/adcs/pki/certs/ica/testadcs.mydomain.lan.fullchain.pem";
-    ssl_certificate_key         "/var/lib/adcs/pki/private/ica/testadcs.mydomain.lan.key.pem";
+    ssl_certificate             "/etc/nginx/crt.pem";
+    ssl_certificate_key         "/etc/nginx/key.pem";
     ssl_protocols               TLSv1.2 TLSv1.3;
 
     ssl_dhparam                 "/etc/ssl/certs/dhparam.pem";
