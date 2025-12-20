@@ -1157,7 +1157,7 @@ class ADCSApp(App):
 def _build_arg_parser() -> argparse.ArgumentParser:  
     """Build the CLI parser for non-GUI utilities."""
     p = argparse.ArgumentParser(description="ADCS TUI / tools")
-    p.add_argument("--confadcs",default=os.path.join(os.path.dirname(os.path.realpath(__file__)),"adcs.yaml"),
+    p.add_argument("--confadcs",default="/etc/adcs/adcs.yaml"),
                    help="Path to the adcs.yaml file (default: adcs.yaml next to this script)") 
     p.add_argument("--resign-crl", action="store_true",
                    help="Re-sign the CRL of the specified CA and exit (no GUI).")
