@@ -90,7 +90,7 @@ Retrieve the project
 
 ```
 cd /opt
-git clone https://github.com/sfonteneau/adcs_python.git
+git clone https://github.com/tranquilit/adcs_python.git
 cd adcs_python
 ```   
 
