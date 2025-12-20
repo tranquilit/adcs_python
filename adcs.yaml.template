@@ -19,7 +19,7 @@ cas:
       key_passphrase: null
 
     crl:
-      path_crl: /var/lib/pki/crl/ica/intermediate.crl.pem
+      path_crl: /var/lib/adcs/pki/crl/ica/intermediate.crl.pem
 
     storage_paths:
       cert_dir: /var/lib/adcs/pki/newcerts/ica/
