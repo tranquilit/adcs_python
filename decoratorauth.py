@@ -50,10 +50,14 @@ def auth_required(f):
         NS = {
             'o': 'http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd'
         }
-        root = ET.fromstring(xml_text)
+        if 'Username' in xml_text: 
+            root = ET.fromstring(xml_text)
         
-        username_el = root.find('.//o:Username', NS)
-        password_el = root.find('.//o:Password', NS)
+            username_el = root.find('.//o:Username', NS)
+            password_el = root.find('.//o:Password', NS)
+        else:
+            username_el = None
+            password_el = None
 
         if username_el != None:    
             username_xml = username_el.text
