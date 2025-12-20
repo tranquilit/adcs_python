@@ -215,8 +215,8 @@ cd /opt/adcs_python && python3 app.py
 Test on a Windows client
 ---------------------------------------------------------
 
-- Install the root CA generated: ``/opt/adcs_python/pki/certs/ca.crt.pem``  
-- Install the intermediate CA generated: ``/opt/adcs_python/pki/certs/ica.crt.pem``  
+- Install the root CA generated: ``/var/lib/adcs/pki/certs/ca.crt.pem``  
+- Install the intermediate CA generated: ``/var/lib/adcs/pki/certs/ica.crt.pem``  
 
 - In the Windows **MMC Certificates** console → **Personal** → **Certificates** → *Request a certificate*  
   → Provide the service URL, for example:
@@ -246,7 +246,7 @@ Rotate adcs Certificate When Expiring Soon
 
 ```bash
 cd /opt/adcs_python
-./manageca.py --rotate-if-expiring --ca-id ca1-inter --crt-path /opt/adcs_python/pki/certs/ica/testadcs.mydomain.lan.fullchain.pem  --key-path /opt/adcs_python/pki/private/ica/testadcs.mydomain.lan.key.pem --threshold-days 30 --chain /opt/adcs_python/pki/certs/ica/ica-chain.pem --valid-days 365
+./manageca.py --rotate-if-expiring --ca-id ca1-inter --crt-path /var/lib/adcs/pki/certs/ica/testadcs.mydomain.lan.fullchain.pem  --key-path /var/lib/adcs/pki/private/ica/testadcs.mydomain.lan.key.pem --threshold-days 30 --chain /var/lib/adcs/pki/certs/ica/ica-chain.pem --valid-days 365
 ```
 
 - `--ca-id` is the CA identifier (e.g., `ca-1`).
