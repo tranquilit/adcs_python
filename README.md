@@ -253,7 +253,7 @@ Rotate adcs Certificate When Expiring Soon
 
 ```bash
 cd /opt/adcs_python
-./manageca.py --rotate-if-expiring --ca-id ca1-inter --crt-path /var/lib/adcs/pki/certs/ica/testadcs.mydomain.lan.fullchain.pem  --key-path /var/lib/adcs/pki/private/ica/testadcs.mydomain.lan.key.pem --threshold-days 30 --chain /var/lib/adcs/pki/certs/ica/ica-chain.pem --valid-days 365
+./manageca.py --rotate-if-expiring --ca-id ca1-inter --crt-path /etc/nginx/crt.pem  --key-path /etc/nginx/key.pem --threshold-days 30 --chain /var/lib/adcs/pki/certs/ica/ica-chain.pem --valid-days 365
 ```
 
 - `--ca-id` is the CA identifier (e.g., `ca-1`).
