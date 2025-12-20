@@ -8,7 +8,7 @@ global:
     policy_id: "{1158087D-44BE-436A-897B-EA76BA39CF5F}"
     next_update_hours: 8
 
-  path_list_request_id : list_request_id
+  path_list_request_id : /opt/adcs_python/list_request_id
 
 cas:
 
