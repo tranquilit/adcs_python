@@ -291,10 +291,7 @@ def ces_service(CAID):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
-    default_confadcs = os.path.join(
-        os.path.dirname(os.path.realpath(__file__)),
-        "adcs.yaml"
-    )
+    default_confadcs = "/etc/adcs/adcs.yaml"
 
     parser.add_argument(
         "--confadcs",
@@ -308,6 +305,7 @@ if __name__ == "__main__":
     print("Loaded config with", len(decls), "template declaration(s).")
     #app.run(host='127.0.0.1', port=8080)
     serve(app, host="127.0.0.1", port=8080)
+
 
 
 
