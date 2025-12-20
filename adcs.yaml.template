@@ -77,9 +77,9 @@ templates:
   - callback:
       path: "/opt/adcs_python/callbacks/user_template.py"    
   - callback:
-      path: "/opt/adcs_python/computer_template.py"    
+      path: "/opt/adcs_python/callbacks/computer_template.py"    
 
 auth:
   - kerberos: true
   - callback:
-      path: "/opt/adcs_python/auth_basic_template.py"
+      path: "/opt/adcs_python/callbacks/auth_basic_template.py"
