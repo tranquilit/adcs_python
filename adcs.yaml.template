@@ -52,7 +52,7 @@ cas:
 #      token_label: "CA-TOKEN-2"
 #      key_id: "30623531666439663333306165376463"
 #      key_label: "CA-KEY-ICA2-1761401895"   
-#      user_pin_file: "/opt/adcs_python/secret/hsm_pin.txt"
+#      user_pin_file: "/etc/adcs/secret/hsm_pin.txt"
 
 ############# YUBIKEY ###################
 ### pkcs11-tool --module /usr/lib/x86_64-linux-gnu/libykcs11.so -L|grep label
@@ -61,7 +61,7 @@ cas:
 #       pkcs11_lib: "/usr/lib/x86_64-linux-gnu/libykcs11.so"
 #       token_label: "YubiKey PIV #99999999"
 #       key_id: "02"
-#       user_pin_file: "/opt/adcs_python/secret/hsm_pin.txt"
+#       user_pin_file: "/etc/adcs/secret/hsm_pin.txt"
 
 ############# NITROKEY HSM ###################
 ### pkcs11-tool --module --module /usr/lib/x86_64-linux-gnu/opensc-pkcs11.so -L|grep label
@@ -70,7 +70,7 @@ cas:
 #       pkcs11_lib: "/usr/lib/x86_64-linux-gnu/opensc-pkcs11.so"
 #       token_label: "SmartCard-HSM"
 #       key_id: "01"
-#       user_pin_file: "/opt/adcs_python/secret/hsm_pin.txt"
+#       user_pin_file: "/etc/adcs/secret/hsm_pin.txt"
 
 
 templates:
