@@ -107,7 +107,8 @@ Initial configuration
 - Copy the configuration template:
 
 ```
-cp -f /opt/adcs_python/adcs.yaml.template /opt/adcs_python/adcs.yaml
+mkdir /etc/adcs
+cp -f /opt/adcs_python/adcs.yaml.template /etc/adcs/adcs.yaml
 ```
 
 - Edit ``adcs.yaml`` if needed.
