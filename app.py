@@ -4,6 +4,7 @@
 from flask import Flask, request, Response, g
 from waitress import serve
 import os
+import argparse
 import uuid
 import base64
 import textwrap
@@ -287,12 +288,27 @@ def ces_service(CAID):
 
 # ---------------- Main ----------------
 
-if __name__ == '__main__':
-    app.confadcs = load_yaml_conf(os.path.join(os.path.dirname(os.path.realpath(__file__)),"adcs.yaml"))
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+
+    default_confadcs = os.path.join(
+        os.path.dirname(os.path.realpath(__file__)),
+        "adcs.yaml"
+    )
+
+    parser.add_argument(
+        "--confadcs",
+        default=default_confadcs,
+        help="Path to the adcs.yaml file (default: adcs.yaml next to this script)"
+    )
+    args = parser.parse_args()
+
+    app.confadcs = load_yaml_conf(args.confadcs)    
     decls = app.confadcs.get("__template_decls__") or []
     print("Loaded config with", len(decls), "template declaration(s).")
     #app.run(host='127.0.0.1', port=8080)
     serve(app, host="127.0.0.1", port=8080)
+
 
 
 
