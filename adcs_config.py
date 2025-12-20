@@ -342,7 +342,7 @@ def load_yaml_conf(path="adcs.yaml"):
         cb_path = cb.get("path")
         if not cb_path :
             continue
-        cb_func = cb.get("func")
+        cb_func = cb.get("func",'check_auth')
         conf["auth_callbacks"] = {"path": cb_path, "func": cb_func}
 
     # Global fallbacks for storage
