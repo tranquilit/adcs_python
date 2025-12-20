@@ -25,7 +25,6 @@ cas:
     crl:
       path_crl: /opt/adcs_python/pki/crl/ica/intermediate.crl.pem
 
-    enroll_permission: true
     storage_paths:
       cert_dir: /opt/adcs_python/pki/newcerts/ica/
       csr_dir:  /opt/adcs_python/pki/csr/ica/
@@ -73,7 +72,6 @@ cas:
 #       user_pin_file: "/opt/adcs_python/secret/hsm_pin.txt"
 
     
-    enroll_permission: true
     storage_paths:
       cert_dir: /opt/adcs_python/pki/newcerts/root/
       csr_dir:  /opt/adcs_python/pki/csr/root/
