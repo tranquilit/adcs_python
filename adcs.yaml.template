@@ -75,11 +75,11 @@ cas:
 
 templates:
   - callback:
-      path: "callbacks/user_template.py"    
+      path: "/opt/adcs_python/callbacks/user_template.py"    
   - callback:
-      path: "callbacks/computer_template.py"    
+      path: "/opt/adcs_python/computer_template.py"    
 
 auth:
   - kerberos: true
   - callback:
-      path: "callbacks/auth_basic_template.py"
+      path: "/opt/adcs_python/auth_basic_template.py"
