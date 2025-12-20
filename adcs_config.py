@@ -409,8 +409,8 @@ def load_yaml_conf(path="adcs.yaml"):
     for tdecl in cfg.get("templates", []) or []:
         cb = (tdecl.get("callback") or {})
         cb_path   = cb.get("path")
-        cb_define = cb.get("define")
-        cb_issue  = cb.get("issue")
+        cb_define = cb.get("define",'define_template')
+        cb_issue  = cb.get("issue",'emit_certificate')
         if not (cb_path and cb_define and cb_issue):
             raise ValueError("Each template must define callback.path / callback.define / callback.issue")
 
