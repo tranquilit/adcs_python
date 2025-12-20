@@ -23,7 +23,7 @@ cas:
 
     storage_paths:
       cert_dir: /var/lib/adcs/pki/newcerts/ica/
-      csr_dir:  /var/lib/pki/csr/ica/
+      csr_dir:  /var/lib/adcs/pki/csr/ica/
       private_dir: /var/lib/adcs/pki/private/ica/
 
 
