@@ -98,7 +98,10 @@ Create a local CA (for testing)
 ---------------------------------------------------------
  
 ```
+mkdir /var/lib/adcs/
+cd /opt/adcs_python
 bash create_ca.sh
+mv /opt/adcs_python/pki /var/lib/adcs/pki
 ```
 
 Initial configuration
@@ -115,8 +118,16 @@ cp -f /opt/adcs_python/adcs.yaml.template /etc/adcs/adcs.yaml
 
 - Create the request directory:
 
+Copy template exemple, and edit if needed:
+
 ```
-mkdir /opt/adcs_python/list_request_id
+cp -r /opt/adcs_python/callbacks /etc/adcs/callbacks
+```
+
+Create list_request_id folder:
+
+```
+mkdir /var/lib/adcs/list_request_id
 ```
 
 Configure Nginx
