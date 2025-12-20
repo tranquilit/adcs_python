@@ -11,12 +11,28 @@ log_format combined_ssl '$remote_addr $ssl_client_s_dn $ssl_client_verify $remot
                     '"$request" $status $body_bytes_sent '
                     '"$http_referer" "$http_user_agent"';
 
-server {
 
-    listen                      80;
-    
-    listen                      [::]:80;
-    
+server {
+    listen 80;
+    listen [::]:80;
+
+    access_log "/var/log/nginx/access.log" combined_ssl;
+
+    location /crl {
+        root /var/lib/adcs/pki;
+    }
+
+    location /certs {
+        root /var/lib/adcs/pki;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+
+server {
  
     listen                      443 ssl;
     
