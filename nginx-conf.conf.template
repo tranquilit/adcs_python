@@ -27,8 +27,8 @@ server {
     access_log "/var/log/nginx/access.log" combined_ssl;
 
 
-    ssl_certificate             "/opt/adcs_python/pki/certs/ica/testadcs.mydomain.lan.fullchain.pem";
-    ssl_certificate_key         "/opt/adcs_python/pki/private/ica/testadcs.mydomain.lan.key.pem";
+    ssl_certificate             "/var/lib/adcs/pki/certs/ica/testadcs.mydomain.lan.fullchain.pem";
+    ssl_certificate_key         "/var/lib/adcs/pki/private/ica/testadcs.mydomain.lan.key.pem";
     ssl_protocols               TLSv1.2 TLSv1.3;
 
     ssl_dhparam                 "/etc/ssl/certs/dhparam.pem";
@@ -44,8 +44,8 @@ server {
     # HSTS (ngx_http_headers_module is required) (63072000 seconds)
     add_header Strict-Transport-Security "max-age=63072000" always;
 
-    ssl_client_certificate "/opt/adcs_python/pki/certs/ica/ica-chain.pem";
-    ssl_crl                "/opt/adcs_python/pki/crl/ica/intermediate.crl.pem";
+    ssl_client_certificate "/var/lib/adcs/pki/certs/ica/ica-chain.pem";
+    ssl_crl                "/var/lib/adcs/pki/crl/ica/intermediate.crl.pem";
     proxy_set_header X-Ssl-Authenticated $ssl_client_verify;
     proxy_set_header X-Ssl-Client-Dn $ssl_client_s_dn;
     proxy_set_header X-Ssl-Client-Sha1 $ssl_client_fingerprint;
@@ -76,11 +76,11 @@ server {
     proxy_set_header X-Forwarded-Proto $scheme;
 
     location /crl {
-        root /opt/adcs_python/pki ;
+        root /var/lib/adcs/pki ;
     }
 
     location /certs {
-        root /opt/adcs_python/pki ;
+        root /var/lib/adcs/pki ;
     }
 
     
