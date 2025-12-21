@@ -301,10 +301,12 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     app.confadcs = load_yaml_conf(args.confadcs)    
+    os.makedirs(app.confadcs['path_list_request_id'], exist_ok=True)
     decls = app.confadcs.get("__template_decls__") or []
     print("Loaded config with", len(decls), "template declaration(s).")
     #app.run(host='127.0.0.1', port=8080)
     serve(app, host="127.0.0.1", port=8080)
+
 
 
 
