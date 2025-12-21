@@ -136,8 +136,6 @@ def ces_service(CAID):
         bst_node = root.find('.//wsse:BinarySecurityToken', ns_wsse)
         p7_der = base64.b64decode(bst_node.text)
         request_id = uuid.uuid4().int
-        with open (os.path.join(app.confadcs['path_list_request_id'],str(request_id)) ,'wb') as f:
-            f.write(p7_der)
 
     csr_der, body_part_id, info = exct_csr_from_cmc(p7_der)
 
@@ -203,6 +201,14 @@ def ces_service(CAID):
     ces_uri = f"{_https_base_url()}/CES/{CAID}"
 
     pkcs7_der = result.get("pkcs7_der")
+
+    if status != 'pending':
+        p7_path = os.path.join(app.confadcs['path_list_request_id'], str(request_id))
+        if os.path.exists(p7_path):
+            os.remove(p7_path)
+    else:
+        with open (os.path.join(app.confadcs['path_list_request_id'],str(request_id)) ,'wb') as f:
+            f.write(p7_der)
 
     if status in ("pending", "denied"):
 
@@ -306,6 +312,7 @@ if __name__ == "__main__":
     print("Loaded config with", len(decls), "template declaration(s).")
     #app.run(host='127.0.0.1', port=8080)
     serve(app, host="127.0.0.1", port=8080)
+
 
 
 
