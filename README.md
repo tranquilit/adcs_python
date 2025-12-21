@@ -116,19 +116,12 @@ cp -f /opt/adcs_python/adcs.yaml.template /etc/adcs/adcs.yaml
 
 - Edit ``adcs.yaml`` if needed.
 
-- Create the request directory:
-
 Copy template exemple, and edit if needed:
 
 ```
 cp -r /opt/adcs_python/callbacks /etc/adcs/callbacks
 ```
 
-Create list_request_id folder:
-
-```
-mkdir /var/lib/adcs/list_request_id
-```
 
 Configure Nginx
 ---------------------------------------------------------
