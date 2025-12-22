@@ -129,6 +129,13 @@ def ces_service(CAID):
     req_id_elem = root.find(".//enr:RequestID", {"enr": "http://schemas.microsoft.com/windows/pki/2009/01/enrollment"})
     if req_id_elem is not None and (req_id_elem.text or "").strip():
         request_id = int(req_id_elem.text.strip())
+        if not os.path.isfile(os.path.join(app.confadcs['path_list_request_id'],str(request_id))):
+            app.logger.error("File not found: %s", os.path.join(app.confadcs['path_list_request_id'],str(request_id)))
+            return Response(
+                'File %s not foud in path_list_request_id' % str(request_id),
+                content_type="application/soap+xml; charset=utf-8",
+                status=500
+            )
         with open (os.path.join(app.confadcs['path_list_request_id'],str(request_id)) ,'rb') as f:
             p7_der = f.read()
     else:
@@ -312,6 +319,7 @@ if __name__ == "__main__":
     print("Loaded config with", len(decls), "template declaration(s).")
     #app.run(host='127.0.0.1', port=8080)
     serve(app, host="127.0.0.1", port=8080)
+
 
 
 
