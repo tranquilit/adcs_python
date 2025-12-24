@@ -43,6 +43,7 @@ def _https_base_url():
 # ---------------- Endpoints ----------------
 
 @app.route('/CEP', methods=['POST', 'GET'])
+@app.route('/ADPolicyProvider_CEP_Kerberos/service.svc/CEP', methods=['POST', 'GET'])
 @auth_required
 def cep_service():
     host_url = request.host_url.rsplit('/', 1)[0]
@@ -321,6 +322,7 @@ if __name__ == "__main__":
     print("Loaded config with", len(decls), "template declaration(s).")
     #app.run(host='127.0.0.1', port=8080)
     serve(app, host="127.0.0.1", port=8080)
+
 
 
 
