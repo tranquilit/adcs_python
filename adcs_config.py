@@ -477,6 +477,8 @@ def build_templates_for_policy_response(
             username=username,
             request=request
         )
+        if not tpl:
+            continue
         if not isinstance(tpl, dict):
             raise TypeError(f"{cb['path']}:{cb['define']} must return a dict")
 
