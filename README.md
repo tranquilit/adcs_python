@@ -156,6 +156,10 @@ Join the Active Directory domain
 dns_lookup_realm = false
 dns_lookup_kdc = true
 default_realm = MYDOMAIN.LAN
+allow_weak_crypto = false
+permitted_enctypes = aes256-cts-hmac-sha1-96 aes128-cts-hmac-sha1-96
+default_tkt_enctypes = aes256-cts-hmac-sha1-96 aes128-cts-hmac-sha1-96
+default_tgs_enctypes = aes256-cts-hmac-sha1-96 aes128-cts-hmac-sha1-96
 ```
 
 - Edit ``/etc/samba/smb.conf`` for your domain.
@@ -183,10 +187,11 @@ net ads join
 Manage SPN and Keytab
 ---------------------------------------------------------
 
-- In Active Directory, register the HTTP SPN for the machine account:
+- In Active Directory, register the HTTP SPN and msDS-SupportedEncryptionTypes for the machine account:
 
 ```
-HTTP/testadcs.mydomain.lan
+servicePrincipalName: HTTP/testadcs.mydomain.lan
+msDS-SupportedEncryptionTypes: 24
 ```
 
 - Generate the keytab:
