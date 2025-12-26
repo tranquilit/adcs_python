@@ -222,7 +222,7 @@ Test on a Windows client
   → Provide the service URL, for example:
 
 ```
-https://testadcs.mydomain.lan/CEP
+https://testadcs.mydomain.lan/ADPolicyProvider_CEP_Kerberos/service.svc/CEP
 ```
 
   *(The URL can be configured via GPO.)*
