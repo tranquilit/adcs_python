@@ -80,7 +80,7 @@ def define_template(*, app_conf, username=None , request=None):
 
     # MS-XCEP Attributes/policySchema: schema version for the policy object (SHOULD be 1,2,3)
     # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cd22d3a0-f469-4a44-95ed-d10ce4dc2063
-    "policy_schema": 2,
+    "policy_schema": 3,
 
     "revision": {
         # MS-XCEP Revision/majorRevision: populated from MS-CRTD "revision" attribute
@@ -120,7 +120,7 @@ def define_template(*, app_conf, username=None , request=None):
             #
             # AD CS equivalent: MS-CRTD msPKI-Private-Key-Flag (CT_FLAG_EXPORTABLE_KEY = 0x00000010)
             # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/f6122d87-b999-4b92-bff8-f465e8949667
-            "exportable_key": True,
+            "exportable_key": False,
         },
 
         "subject_name_flags": {
@@ -200,10 +200,8 @@ def define_template(*, app_conf, username=None , request=None):
         "crypto_providers": [
             # MS-XCEP CryptoProviders: list of allowed CSP/KSP provider names
             # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/808caee4-e016-4f9e-ad0a-076ce83c86c7
-            "Microsoft Software Key Storage Provider",
             "Microsoft Platform Crypto Provider",
-            "Microsoft Enhanced Cryptographic Provider v1.0",
-            "Microsoft Base Cryptographic Provider v1.0",
+            "Microsoft Software Key Storage Provider"
         ],
     },
 
