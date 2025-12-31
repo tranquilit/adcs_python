@@ -168,6 +168,12 @@ def emit_certificate(
 ) -> Dict[str, Any]:
 
 
+    ca_url="https://ca.mydomain.lan"
+    root_pem_path="/root/roots.pem"
+    provisioner="x5c"
+    x5c_cert_path='/etc/step-ca/certs/idra-token-signer.crt'
+    x5c_key_path="/etc/step-ca/secrets/idra-token-signer.key"
+    step_bin = "step"
 
     csr      = cx509.load_der_x509_csr(csr_der)
     csr_pem = csr.public_bytes(crypto_serialization.Encoding.PEM).decode("utf-8")
@@ -236,15 +242,6 @@ def _step_ca_token_x5c(
     x5c_key_path: str,
     template_vars: Dict[str, str],
 ) -> str:
-
-
-    ca_url="https://ca.mydomain.lan"
-    root_pem_path="/root/roots.pem"
-    provisioner="x5c"
-    x5c_cert_path='/etc/step-ca/certs/idra-token-signer.crt'
-    x5c_key_path="/etc/step-ca/secrets/idra-token-signer.key"
-    step_bin = "step"
-    
 
 
     cmd = [
