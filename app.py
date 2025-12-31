@@ -94,7 +94,7 @@ def cep_service():
     response_xml = build_get_policies_response(
         uuid_request=relates_to,
         uuid_random=uuid_random,
-        hosturl=host_url.replace('http://', 'https://'),
+        hosturl= host_url.replace('http://', 'https://') + ':' + request.headers.get('X-Forwarded-Port','443') ,
         policyid=app.confadcs['policyid'],
         next_update_hours=app.confadcs['next_update_hours'],
         cas=app.confadcs['cas_list'],
@@ -324,6 +324,7 @@ if __name__ == "__main__":
     print("Loaded config with", len(decls), "template declaration(s).")
     #app.run(host='127.0.0.1', port=8080)
     serve(app, host="127.0.0.1", port=8080)
+
 
 
 
