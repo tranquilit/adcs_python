@@ -1004,7 +1004,7 @@ def build_ws_trust_response(
 # Active Directory user resolution (SAMBA/LDAP)
 # -----------------------------------------------------------------------------
 
-def search_user(userauth: str):
+def search_user(userauth: str,ldap_filter='',dc_fqdn=None,basedn=None):
     """
     Resolve the SAM/LDAP entry for the Kerberos user 'user@REALM'.
     Returns (SamDB, entry) if found.
@@ -1018,24 +1018,27 @@ def search_user(userauth: str):
     creds.set_machine_account(lp)
 
     realm = lp.get("realm")
-    net = Net(creds=creds, lp=lp)
-    flags = nbt.NBT_SERVER_LDAP
-    dc_info = net.finddc(domain=realm, flags=flags)
-    dc_fqdn = str(dc_info.pdc_dns_name)
+    if not dc_fqdn:
+        net = Net(creds=creds, lp=lp)
+        flags = nbt.NBT_SERVER_LDAP
+        dc_info = net.finddc(domain=realm, flags=flags)
+        dc_fqdn = str(dc_info.pdc_dns_name)
 
     ldap_url = f"ldap://{dc_fqdn}"
 
     samdbr = SamDB(url=ldap_url, credentials=creds, lp=lp)
-    if "@" in userauth:
-        basedn = "DC=" + userauth.split("@")[1].replace(".", ",DC=")
-    else:
-        basedn = samdbr.get_default_basedn()
-           
+    if not basedn:
+        if "@" in userauth:
+            basedn = "DC=" + userauth.split("@")[1].replace(".", ",DC=")
+        else:
+            basedn = samdbr.get_default_basedn()
+        
+    ldap_filter = "(&(samAccountName=%s)%s)" % (userauth.split("@")[0],ldap_filter)
 
     res = samdbr.search(
         base=basedn,
         scope=2,
-        expression="(samAccountName=%s)" % userauth.split("@")[0],
+        expression=ldap_filter
     )
 
     for entry in res:
