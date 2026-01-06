@@ -1272,20 +1272,54 @@ def build_get_policies_response(
             text(ET.SubElement(e, ET.QName(NS_EP['ep'], 'critical')), tbool(ext["critical"]))
             text(ET.SubElement(e, ET.QName(NS_EP['ep'], 'value')), ext["value_b64"])
 
-    # --- cAs (response) ---
     ep_cas = ET.SubElement(gpr, ET.QName(NS_EP['ep'], 'cAs'))
-    for i, ca in enumerate(cas, start=1):
+
+    AUTH_MAP = {
+        "anonymous": 1,
+        "kerberos": 2,
+        "username_password": 4,
+        "x509": 8,
+    }
+
+    DEFAULT_AUTH_METHODS = [
+        {"method": "kerberos", "renewal_only": False},
+#        {"method": "username_password", "renewal_only": False},
+#        {"method": "x509", "renewal_only": False},
+    ]
+    
+    priority = 1 
+    
+    for ca in cas:
         ca_el = ET.SubElement(ep_cas, ET.QName(NS_EP['ep'], 'cA'))
         uris = ET.SubElement(ca_el, ET.QName(NS_EP['ep'], 'uris'))
-        cauri = ET.SubElement(uris, ET.QName(NS_EP['ep'], 'cAURI'))
-        text(ET.SubElement(cauri, ET.QName(NS_EP['ep'], 'clientAuthentication')), 2)
-        text(ET.SubElement(cauri, ET.QName(NS_EP['ep'], 'uri')), f"{hosturl}{ca['__ces_path']}")
-        text(ET.SubElement(cauri, ET.QName(NS_EP['ep'], 'priority')), i)
-        text(ET.SubElement(cauri, ET.QName(NS_EP['ep'], 'renewalOnly')), "false")
+    
+        auth_entries = ca.get("auth_methods") or DEFAULT_AUTH_METHODS
+        seen = set()
+    
+        for entry in auth_entries:
+            method = (entry.get("method") or "").strip().lower()
+            renewal_only = bool(entry.get("renewal_only", False))
+    
+            if method not in AUTH_MAP:
+                raise ValueError(f"Unknown auth method '{method}' for CA '{ca.get('id', '?')}'")
+
+            auth_type = AUTH_MAP[method]
+
+            if auth_type in seen:
+                continue
+            seen.add(auth_type)
+
+            cauri = ET.SubElement(uris, ET.QName(NS_EP['ep'], 'cAURI'))
+            text(ET.SubElement(cauri, ET.QName(NS_EP['ep'], 'clientAuthentication')), auth_type)
+            text(ET.SubElement(cauri, ET.QName(NS_EP['ep'], 'uri')), f"{hosturl}{ca['__ces_path']}")
+            text(ET.SubElement(cauri, ET.QName(NS_EP['ep'], 'priority')), priority)
+            text(ET.SubElement(cauri, ET.QName(NS_EP['ep'], 'renewalOnly')), "true" if renewal_only else "false")
+            priority += 1
 
         text(ET.SubElement(ca_el, ET.QName(NS_EP['ep'], 'certificate')), ca["__certificate_b64"])
         text(ET.SubElement(ca_el, ET.QName(NS_EP['ep'], 'enrollPermission')), tbool(bool(ca['id'] in dict_ca_allowed)))
         text(ET.SubElement(ca_el, ET.QName(NS_EP['ep'], 'cAReferenceID')), ca["__refid"])
+
 
     # --- oIDs ---
     ep_oids = ET.SubElement(gpr, ET.QName(NS_EP['ep'], 'oIDs'))
