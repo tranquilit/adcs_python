@@ -65,6 +65,7 @@ server {
     proxy_set_header X-Ssl-Authenticated $ssl_client_verify;
     proxy_set_header X-Ssl-Client-Dn $ssl_client_s_dn;
     proxy_set_header X-Ssl-Client-Sha1 $ssl_client_fingerprint;
+    proxy_set_header X-Ssl-Client-Cert $ssl_client_cert;
     ssl_verify_client optional;
 
     gzip_min_length     1000;
