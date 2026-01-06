@@ -25,6 +25,14 @@ cas:
       csr_dir:  /var/lib/adcs/pki/csr/ica/
       private_dir: /var/lib/adcs/pki/private/ica/
 
+#    auth_methods:
+#      - method: kerberos
+#        renewal_only: false
+#      - method: username_password
+#        renewal_only: false
+#      - method: x509
+#        renewal_only: false
+
 
   - id: "ca1-root"
     display_name: "root CA"
