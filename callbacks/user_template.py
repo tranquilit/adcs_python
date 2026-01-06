@@ -49,6 +49,7 @@ def define_template(*, app_conf, username=None , request=None):
     XSslClientSha1 = request.headers.get('X-Ssl-Client-Sha1', None)
     XSslAuthenticated = request.headers.get('X-Ssl-Authenticated', None)
     XSslClientDn = request.headers.get('X-Ssl-Client-Dn', None)
+    XSslClientCert = request.headers.get('X-Ssl-Client-Cert', None)
 
     if username :
        username = username
@@ -302,6 +303,7 @@ def emit_certificate(
     XSslClientSha1 = request.headers.get('X-Ssl-Client-Sha1', None)
     XSslAuthenticated = request.headers.get('X-Ssl-Authenticated', None)
     XSslClientDn = request.headers.get('X-Ssl-Client-Dn', None)
+    XSslClientCert = request.headers.get('X-Ssl-Client-Cert', None)
 
     if username :
        username = username
