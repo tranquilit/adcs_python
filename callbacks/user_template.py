@@ -34,6 +34,9 @@ def _is_member_of(sam_entry: dict, groups: Iterable[str]) -> bool:
 # 1) Template definition for CEP (dynamic per user)
 # ============================================================
 
+# It would be interesting to add a user's RID (sid) to the template_oid on the CEP side. This will help the session determine whether it needs to enroll, as the RID is unique to each user.
+# This is not very conventional.
+
 template_oid           = "1.3.6.1.4.1.311.21.8.999.1"
 template_name          = "adcswebuser"
 template_major_version = 100
