@@ -184,20 +184,20 @@ def define_template(*, app_conf, username=None , request=None):
             "cross_ca": False,     # CT_FLAG_IS_CROSS_CA: cross-cert template
         },
     },
-
+        
+    "hash_algorithm":"sha256",
     "private_key_attributes": {
+
+        "algorithm": "ecdsa",
+        
         # MS-XCEP PrivateKeyAttributes: private key generation requirements advertised by the policy
         # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cf7610a9-26cb-4172-a4c5-895066acf191
-        "minimal_key_length": 3072,  # minimalKeyLength (bits)
+        "minimal_key_length": 256,  # minimalKeyLength (bits)
 
         # MS-CRTD pKIDefaultKeySpec: allowed values for default key spec (AT_KEYEXCHANGE/AT_SIGNATURE)
         # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/ee5d75a7-8416-4a92-b708-ee8f6e8baffb
-        "key_spec": 1,  # 1 = AT_KEYEXCHANGE
-
-        # MS-XCEP PrivateKeyAttributes/algorithmOIDReference: optional reference into the OID table returned by XCEP
-        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cf7610a9-26cb-4172-a4c5-895066acf191
-        "algorithm_oid_reference": None,
-
+        "key_spec": 2, 
+        
         "crypto_providers": [
             # MS-XCEP CryptoProviders: list of allowed CSP/KSP provider names
             # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/808caee4-e016-4f9e-ad0a-076ce83c86c7
