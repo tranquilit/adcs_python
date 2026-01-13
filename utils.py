@@ -1157,6 +1157,76 @@ def build_get_policies_response(
     templates: list,
     oids: list,
 ) -> str:
+    # --- helpers for dynamic OID refs ---
+    def _to_int_or_none(x):
+        try:
+            return int(str(x))
+        except Exception:
+            return None
+
+    def _next_free_refid(oids_list: list) -> int:
+        used = set()
+        for oo in oids_list:
+            v = oo.get("__refid") or oo.get("oIDReferenceID") or oo.get("refid")
+            iv = _to_int_or_none(v)
+            if iv is not None:
+                used.add(iv)
+        return (max(used) + 1) if used else 1
+
+    def _find_oid_refid(oids_list: list, value: str, group: int, default_name: str):
+        for oo in oids_list:
+            if (
+                str(oo.get("value")) == value
+                and str(oo.get("group")) == str(group)
+                and str(oo.get("default_name")) == default_name
+            ):
+                return oo.get("__refid")
+        return None
+
+    def _ensure_oid(oids_list: list, value: str, group: int, default_name: str, refid: int | None = None) -> int:
+        existing = _find_oid_refid(oids_list, value, group, default_name)
+        if existing is not None:
+            return int(existing)
+
+        if refid is None:
+            refid = _next_free_refid(oids_list)
+
+        oids_list.append({
+            "value": value,
+            "group": group,
+            "__refid": refid,
+            "default_name": default_name,
+        })
+        return refid
+
+    # --- ECDSA curves mapping by minimalKeyLength ---
+    # Note: ECC uses 256/384/521. If you pass 512 we map to 521.
+    ECDSA_CURVES = {
+        256: {"value": "1.2.840.10045.3.1.7", "group": 3, "default_name": "ECDSA_P256"},
+        384: {"value": "1.3.132.0.34",       "group": 3, "default_name": "ECDSA_P384"},
+        521: {"value": "1.3.132.0.35",       "group": 3, "default_name": "ECDSA_P521"},
+    }
+
+    # --- Supported algorithms (RSA/DSA are single OID entries) ---
+    ALGO_OIDS = {
+        "rsa": {"value": "1.2.840.113549.1.1.1", "group": 3, "default_name": "RSA"},
+        "dsa": {"value": "1.2.840.10040.4.1",    "group": 3, "default_name": "DSA"},
+        # ecdsa handled separately via curves + minimalKeyLength
+    }
+
+    # --- Hash algorithms OIDs (for hashAlgorithmOIDReference) ---
+    # group=1 matches what ADCS emits for hash OIDs in XCEP responses
+    HASH_OIDS = {
+        "SHA1":   {"value": "1.3.14.3.2.26",            "group": 1, "default_name": "SHA1"},
+        "SHA256": {"value": "2.16.840.1.101.3.4.2.1",   "group": 1, "default_name": "SHA256"},
+        "SHA384": {"value": "2.16.840.1.101.3.4.2.2",   "group": 1, "default_name": "SHA384"},
+        "SHA512": {"value": "2.16.840.1.101.3.4.2.3",   "group": 1, "default_name": "SHA512"},
+    }
+
+    # map algo_key -> allocated refid (reuse same refid across templates)
+    # (algo_key = "rsa", "dsa", or "ecdsa:256"/"ecdsa:384"/"ecdsa:521")
+    algo_refids: dict[str, int] = {}
+
     # <s:Envelope>
     env = ET.Element(ET.QName(NS_EP['s'], 'Envelope'))
 
@@ -1168,8 +1238,12 @@ def build_get_policies_response(
     relates = ET.SubElement(hdr, ET.QName(NS_EP['a'], 'RelatesTo'))
     relates.text = f"urn:uuid:{uuid_request}"
 
-    # ActivityId (Diagnostics ns)
-    act = ET.SubElement(hdr, ET.QName(NS_EP['diag'], 'ActivityId'), {"CorrelationId": str(uuid_random)})
+    # ActivityId (Diagnostics ns) — keep it in diag ns like ADCS
+    act = ET.SubElement(
+        hdr,
+        "ActivityId",
+        {"CorrelationId": str(uuid_random), "xmlns": NS_EP["diag"]},
+    )
     act.text = "00000000-0000-0000-0000-000000000000"
 
     # <s:Body>
@@ -1231,11 +1305,64 @@ def build_get_policies_response(
         pk_perms = ET.SubElement(pka, ET.QName(NS_EP['ep'], 'permissions'))
         set_xsi_nil(pk_perms, True)
 
-        alg = ET.SubElement(pka, ET.QName(NS_EP['ep'], 'algorithmOIDReference'))
-        alg_ref = t["private_key_attributes"].get("algorithm_oid_reference")
-        set_xsi_nil(alg, False if alg_ref else True)
-        if alg_ref:
-            alg.text = str(alg_ref)
+        # --- algorithmOIDReference (RSA/ECDSA/DSA) ---
+        algo = (t.get("private_key_attributes", {}).get("algorithm") or "").strip().lower()
+
+        if algo == "ecdsa":
+            bits = _to_int_or_none(t.get("private_key_attributes", {}).get("minimal_key_length"))
+            if bits == 512:
+                bits = 521  # tolerate "512" for P-521
+            if bits not in ECDSA_CURVES:
+                raise ValueError(f"Unsupported ECDSA minimalKeyLength={bits}. Expected 256/384/521 (or 512->521).")
+
+            meta = ECDSA_CURVES[bits]
+            algo_key = f"ecdsa:{bits}"
+
+            if algo_key not in algo_refids:
+                existing = _find_oid_refid(oids, meta["value"], meta["group"], meta["default_name"])
+                if existing is not None:
+                    algo_refids[algo_key] = int(existing)
+                else:
+                    algo_refids[algo_key] = _ensure_oid(
+                        oids,
+                        meta["value"],
+                        meta["group"],
+                        meta["default_name"],
+                        refid=_next_free_refid(oids),
+                    )
+
+            refid = algo_refids[algo_key]
+            alg_el = ET.SubElement(pka, ET.QName(NS_EP["ep"], "algorithmOIDReference"))
+            alg_el.text = str(refid)
+
+        elif algo in ALGO_OIDS:
+            meta = ALGO_OIDS[algo]
+            algo_key = algo
+
+            if algo_key not in algo_refids:
+                existing = _find_oid_refid(oids, meta["value"], meta["group"], meta["default_name"])
+                if existing is not None:
+                    algo_refids[algo_key] = int(existing)
+                else:
+                    algo_refids[algo_key] = _ensure_oid(
+                        oids,
+                        meta["value"],
+                        meta["group"],
+                        meta["default_name"],
+                        refid=_next_free_refid(oids),
+                    )
+
+            refid = algo_refids[algo_key]
+            alg_el = ET.SubElement(pka, ET.QName(NS_EP["ep"], "algorithmOIDReference"))
+            alg_el.text = str(refid)
+
+        else:
+            # default / existing behavior
+            alg_el = ET.SubElement(pka, ET.QName(NS_EP['ep'], 'algorithmOIDReference'))
+            alg_ref = t["private_key_attributes"].get("algorithm_oid_reference")
+            set_xsi_nil(alg_el, False if alg_ref else True)
+            if alg_ref:
+                alg_el.text = str(alg_ref)
 
         cp = ET.SubElement(pka, ET.QName(NS_EP['ep'], 'cryptoProviders'))
         for prov in t["private_key_attributes"].get("crypto_providers", []):
@@ -1253,9 +1380,39 @@ def build_get_policies_response(
         text(ET.SubElement(attrs, ET.QName(NS_EP['ep'], 'enrollmentFlags')), t["flags"]["enrollment_flags"])
         text(ET.SubElement(attrs, ET.QName(NS_EP['ep'], 'generalFlags')), t["flags"]["general_flags"])
 
+        # --- hashAlgorithmOIDReference (optional) ---
+        # priority:
+        #   1) t["hash_algorithm"] (ex: "SHA256") -> allocate OID + set ref
+        #   2) fallback: t["flags"]["hash_algorithm_oid_reference"] (existing behavior)
+        desired_hash = (t.get("hash_algorithm") or t.get("flags", {}).get("hash_algorithm") or "").strip()
+        hash_ref = None
+
+        if desired_hash:
+            key = desired_hash.upper()
+            if key not in HASH_OIDS:
+                raise ValueError(f"Unsupported hash_algorithm='{desired_hash}'. Expected one of {', '.join(HASH_OIDS.keys())}")
+
+            meta = HASH_OIDS[key]
+            existing = _find_oid_refid(oids, meta["value"], meta["group"], meta["default_name"])
+            if existing is not None:
+                hash_ref = int(existing)
+            else:
+                hash_ref = _ensure_oid(
+                    oids,
+                    meta["value"],
+                    meta["group"],
+                    meta["default_name"],
+                    refid=_next_free_refid(oids),
+                )
+
+            # keep it also in flags for traceability/debug
+            t.setdefault("flags", {})["hash_algorithm_oid_reference"] = hash_ref
+        else:
+            hash_ref = t.get("flags", {}).get("hash_algorithm_oid_reference")
+
         hash_alg = ET.SubElement(attrs, ET.QName(NS_EP['ep'], 'hashAlgorithmOIDReference'))
-        hash_ref = t["flags"].get("hash_algorithm_oid_reference")
-        set_xsi_nil(hash_alg, False if hash_ref else True)
+        if not hash_ref:
+            set_xsi_nil(hash_alg, False if hash_ref else True)
         if hash_ref:
             hash_alg.text = str(hash_ref)
 
