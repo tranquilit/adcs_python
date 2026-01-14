@@ -196,7 +196,7 @@ def define_template(*, app_conf, username=None , request=None):
 
         # MS-CRTD pKIDefaultKeySpec: allowed values for default key spec (AT_KEYEXCHANGE/AT_SIGNATURE)
         # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/ee5d75a7-8416-4a92-b708-ee8f6e8baffb
-        "key_spec": 2, 
+        "key_spec": 2,     #2 If ECDSA   1 IF ECDH
         
         "crypto_providers": [
             # MS-XCEP CryptoProviders: list of allowed CSP/KSP provider names
