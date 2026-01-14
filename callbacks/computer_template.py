@@ -245,7 +245,7 @@ def define_template(*, app_conf, username=None , request=None):
                 "content_commitment": False,   # nonRepudiation/contentCommitment
                 "key_encipherment": False,     # keyEncipherment
                 "data_encipherment": False,    # dataEncipherment
-                "key_agreement": False,        # keyAgreement
+                "key_agreement": False,        # keyAgreement  False if EDCSA True If ECDH
                 "key_cert_sign": False,        # keyCertSign
                 "crl_sign": False,             # cRLSign
                 "encipher_only": False,        # encipherOnly
