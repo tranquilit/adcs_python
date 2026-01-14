@@ -1199,19 +1199,24 @@ def build_get_policies_response(
         })
         return refid
 
-    # --- ECDSA curves mapping by minimalKeyLength ---
+    # --- ECDSA/ECDH curves mapping by minimalKeyLength ---
     # Note: ECC uses 256/384/521. If you pass 512 we map to 521.
     ECDSA_CURVES = {
         256: {"value": "1.2.840.10045.3.1.7", "group": 3, "default_name": "ECDSA_P256"},
         384: {"value": "1.3.132.0.34",       "group": 3, "default_name": "ECDSA_P384"},
         521: {"value": "1.3.132.0.35",       "group": 3, "default_name": "ECDSA_P521"},
     }
+    ECDH_CURVES = {
+        256: {"value": "1.2.840.10045.3.1.7", "group": 3, "default_name": "ECDH_P256"},
+        384: {"value": "1.3.132.0.34",       "group": 3, "default_name": "ECDH_P384"},
+        521: {"value": "1.3.132.0.35",       "group": 3, "default_name": "ECDH_P521"},
+    }
 
     # --- Supported algorithms (RSA/DSA are single OID entries) ---
     ALGO_OIDS = {
         "rsa": {"value": "1.2.840.113549.1.1.1", "group": 3, "default_name": "RSA"},
         "dsa": {"value": "1.2.840.10040.4.1",    "group": 3, "default_name": "DSA"},
-        # ecdsa handled separately via curves + minimalKeyLength
+        # ecc handled separately via curves + minimalKeyLength (+ keySpec for ECDH)
     }
 
     # --- Hash algorithms OIDs (for hashAlgorithmOIDReference) ---
@@ -1224,7 +1229,7 @@ def build_get_policies_response(
     }
 
     # map algo_key -> allocated refid (reuse same refid across templates)
-    # (algo_key = "rsa", "dsa", or "ecdsa:256"/"ecdsa:384"/"ecdsa:521")
+    # (algo_key = "rsa", "dsa", or "ecdsa:256"/"ecdh:256"/...)
     algo_refids: dict[str, int] = {}
 
     # <s:Envelope>
@@ -1305,18 +1310,33 @@ def build_get_policies_response(
         pk_perms = ET.SubElement(pka, ET.QName(NS_EP['ep'], 'permissions'))
         set_xsi_nil(pk_perms, True)
 
-        # --- algorithmOIDReference (RSA/ECDSA/DSA) ---
+        # --- algorithmOIDReference (RSA/ECDSA/ECDH/DSA) ---
         algo = (t.get("private_key_attributes", {}).get("algorithm") or "").strip().lower()
 
-        if algo == "ecdsa":
+        # Decide EC signature vs key-exchange:
+        # - If algo explicitly "ecdh" => ECDH
+        # - If algo is "ecdsa" => ECDSA (but if keySpec indicates key exchange, switch to ECDH to mimic ADCS template behavior)
+        # - Otherwise keep existing behavior
+        key_spec = _to_int_or_none(t.get("private_key_attributes", {}).get("key_spec"))
+        ec_mode = None  # "ecdsa" or "ecdh"
+        if algo == "ecdh":
+            ec_mode = "ecdh"
+        elif algo == "ecdsa":
+            # ADCS templates: keySpec=1 typically means key exchange, keySpec=2 means signature
+            if key_spec == 1:
+                ec_mode = "ecdh"
+            else:
+                ec_mode = "ecdsa"
+
+        if ec_mode in ("ecdsa", "ecdh"):
             bits = _to_int_or_none(t.get("private_key_attributes", {}).get("minimal_key_length"))
             if bits == 512:
                 bits = 521  # tolerate "512" for P-521
-            if bits not in ECDSA_CURVES:
-                raise ValueError(f"Unsupported ECDSA minimalKeyLength={bits}. Expected 256/384/521 (or 512->521).")
+            if bits not in (256, 384, 521):
+                raise ValueError(f"Unsupported EC minimalKeyLength={bits}. Expected 256/384/521 (or 512->521).")
 
-            meta = ECDSA_CURVES[bits]
-            algo_key = f"ecdsa:{bits}"
+            meta = (ECDH_CURVES if ec_mode == "ecdh" else ECDSA_CURVES)[bits]
+            algo_key = f"{ec_mode}:{bits}"
 
             if algo_key not in algo_refids:
                 existing = _find_oid_refid(oids, meta["value"], meta["group"], meta["default_name"])
@@ -1566,4 +1586,3 @@ def build_ces_response(uuid_request: str, uuid_random: str, p7b_der: str, leaf_d
 
     raw = ET.tostring(env, encoding="utf-8", xml_declaration=True)
     return _prettify(raw)
-
