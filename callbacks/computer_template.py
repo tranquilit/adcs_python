@@ -243,7 +243,7 @@ def define_template(*, app_conf, username=None , request=None):
             "key_usage": {
                 "digital_signature": True,     # digitalSignature
                 "content_commitment": False,   # nonRepudiation/contentCommitment
-                "key_encipherment": True,      # keyEncipherment
+                "key_encipherment": False,     # keyEncipherment
                 "data_encipherment": False,    # dataEncipherment
                 "key_agreement": False,        # keyAgreement
                 "key_cert_sign": False,        # keyCertSign
