@@ -326,6 +326,7 @@ def load_yaml_conf(path="adcs.yaml"):
     policy_provider = gbl.get("policy_provider", {})
     storage_paths_global = gbl.get("storage_paths", {}) or {}
     conf["path_list_request_id"] = gbl.get("path_list_request_id", "/var/lib/adcs/list_request_id")
+    conf["next_update_hours_crl"] = gbl.get("next_update_hours_crl", 8)
 
     conf["policyid"] = policy_provider.get("policy_id")
     conf["next_update_hours"] = policy_provider.get("next_update_hours", 8)
