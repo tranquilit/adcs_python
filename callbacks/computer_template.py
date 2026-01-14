@@ -188,12 +188,12 @@ def define_template(*, app_conf, username=None , request=None):
     "hash_algorithm":"sha256",
     "private_key_attributes": {
 
-        "algorithm": "ecdsa",
+        "algorithm": "ecdsa", #rsa available
         
         # MS-XCEP PrivateKeyAttributes: private key generation requirements advertised by the policy
         # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cf7610a9-26cb-4172-a4c5-895066acf191
-        "minimal_key_length": 256,  # minimalKeyLength (bits)
-
+        "minimal_key_length": 256,  # minimalKeyLength (bits) (2048 if rsa)
+        
         # MS-CRTD pKIDefaultKeySpec: allowed values for default key spec (AT_KEYEXCHANGE/AT_SIGNATURE)
         # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/ee5d75a7-8416-4a92-b708-ee8f6e8baffb
         "key_spec": 2,     #2 If ECDSA   1 IF ECDH
