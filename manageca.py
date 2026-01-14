@@ -854,7 +854,7 @@ class ADCSApp(App):
 
         serial = r.serial_nox
         try:
-            revoke(ca_key=ca_key, ca_cert=ca_cert, serial=serial, crl_path=crl_path)
+            revoke(ca_key=ca_key, ca_cert=ca_cert, serial=serial, crl_path=crl_path,next_update_hours=self.confadcs['next_update_hours'])
             self.revoked_serials = revoked_serials_set(crl_path)
             # NEW: request reselection of the same row after reload
             self._request_reselect(selected_filename)
@@ -894,7 +894,7 @@ class ADCSApp(App):
 
         serial = r.serial_nox
         try:
-            unrevoke(ca_key=ca_key, ca_cert=ca_cert, serial=serial, crl_path=crl_path)
+            unrevoke(ca_key=ca_key, ca_cert=ca_cert, serial=serial, crl_path=crl_path,next_update_hours=self.confadcs['next_update_hours'])
             self.revoked_serials = revoked_serials_set(crl_path)
             # NEW: request reselection of the same row after reload
             self._request_reselect(selected_filename)
@@ -923,7 +923,7 @@ class ADCSApp(App):
             self.notify(f"CRL re-sign config error: {e}", severity="error", timeout=6)
             return
         try:
-            new_num = resign_crl(ca_key=ca_key, ca_cert=ca_cert, crl_path=crl_path, bump_number=True)
+            new_num = resign_crl(ca_key=ca_key, ca_cert=ca_cert, crl_path=crl_path, bump_number=True,next_update_hours=self.confadcs['next_update_hours'])
             self.revoked_serials = revoked_serials_set(crl_path)
             self.load_certs()
             self.notify(f"CRL re-signed (CRLNumber {new_num}) — {crl_path}", severity="success", timeout=6)
@@ -1165,8 +1165,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="CA identifier as defined in adcs.yaml (field 'id' or 'display_name').")
     p.add_argument("--no-bump-number", action="store_true",
                    help="Do not increment CRLNumber when re-signing (keep the same number).")
-    p.add_argument("--next-update-hours", type=int, default=8,
-                   help="Hours until NextUpdate when re-signing (default: 8).")
+    p.add_argument("--next-update-hours", default=None,
+                   help="Hours until NextUpdate when re-signing (default: next_update_hours in confadcs).")
     p.add_argument("--rotate-if-expiring", action="store_true",
                    help="If the given certificate expires in ≤ threshold-days, re-issue a new key+cert with same SAN/CN using --ca-id and overwrite --crt-path/--key-path.")
     p.add_argument("--crt-path", type=str,
@@ -1226,11 +1226,16 @@ if __name__ == "__main__":
         if not args.ca_id:
             print("ERROR: --ca-id is required with --resign-crl", file=sys.stderr)
             sys.exit(1)
+        confadcs = load_yaml_conf(args.confadcs)
+        if not args.next_update_hours:
+            next_update_hours = int(confadcs['next_update_hours'])
+        else:
+            next_update_hours = int(args.next_update_hours)
         rc = _cmd_resign_crl(
             ca_id=args.ca_id,
-            next_update_hours=int(args.next_update_hours),
+            next_update_hours=int(next_update_hours),
             bump_number=(not args.no_bump_number),
-            conf=load_yaml_conf(args.confadcs)
+            conf=confadcs
 
         )
         sys.exit(rc)
