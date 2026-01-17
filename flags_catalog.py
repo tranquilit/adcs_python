@@ -109,29 +109,4 @@ FLAG_CATALOG: Dict[str, Dict[str, int]] = {
 }
 
 
-# --- Helpers ----------------------------------------------------------------
 
-def flags_from_bools(bools: Dict[str, bool], catalog: Dict[str, int]) -> int:
-    """
-    Convert a dict {flag_name: bool} into an integer mask using
-    the submap of the catalog (e.g. FLAG_CATALOG["subject_name_flags"]).
-    Unknown keys are ignored to remain permissive.
-    """
-    mask = 0
-    if not bools:
-        return 0
-    for k, v in bools.items():
-        if v and k in catalog:
-            mask |= catalog[k]
-    return mask
-
-
-def bools_from_mask(mask: int, catalog: Dict[str, int]) -> Dict[str, bool]:
-    """
-    Inverse of flags_from_bools: return a dict {flag_name: bool}
-    from a mask and a catalog submap.
-    """
-    out: Dict[str, bool] = {}
-    for name, bit in catalog.items():
-        out[name] = bool(mask & bit)
-    return out
