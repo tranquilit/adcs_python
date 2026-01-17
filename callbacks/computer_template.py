@@ -127,7 +127,6 @@ def define_template(*, app_conf, username=None, request=None):
                 "attest_preferred": False,                      # Prefer TPM key attestation (if client can)
                 "attest_required": False,                       # Require TPM key attestation (fail if not)
                 "attestation_without_policy": False,            # Attest but do not add issuance policy OID
-                "attest_none": False,                           # Explicit "none" (readability only)
 
                 # EK trust model (AD CS)
                 "ek_trust_on_use": False,                       # Trust-on-use / credentials-based
