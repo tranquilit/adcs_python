@@ -245,15 +245,13 @@ def define_template(*, app_conf, username=None, request=None):
                     "minor_version": template_minor_version,
                 },
             },
-            {  # EKU: ClientAuth + Secure Email + EFS
+            {  # EKU: ClientAuth 
                 # MS-WCCE pKIExtendedKeyUsage: server MUST add EKU OIDs specified by the template
                 # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wcce/1c1d7aaa-281b-48f2-babc-1bc42dd3ed37
                 "oid": "2.5.29.37",
                 "critical": False,
                 "eku_oids": [
                     "1.3.6.1.5.5.7.3.2",        # id-kp-clientAuth
-                    "1.3.6.1.5.5.7.3.4",        # id-kp-emailProtection (Secure Email)
-                    "1.3.6.1.4.1.311.10.3.4",   # Microsoft EFS
                 ],
             },
             {  # KeyUsage
@@ -280,7 +278,6 @@ def define_template(*, app_conf, username=None, request=None):
                 "critical": False,
                 "app_policies": [
                     "1.3.6.1.5.5.7.3.2",        # ClientAuth
-                    "1.3.6.1.4.1.311.10.3.4",   # Microsoft EFS
                 ],
             },
         ],
