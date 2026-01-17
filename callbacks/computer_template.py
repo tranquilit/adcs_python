@@ -111,14 +111,12 @@ def define_template(*, app_conf, username=None, request=None):
             "auto_enroll": auto_enroll,
         },
 
-        # FLAGS: booleans only
-        # NOTE: Added missing keys (set to False) so compiled results remain unchanged.
+
         "flags": {
             "private_key_flags": {
-                # --- Existing (unchanged intent) ---
+
                 "exportable_key": False,
 
-                # --- Missing keys added (all False => no mask change) ---
                 "archive_private_key": False,                   # Archive private key (KRA)
                 "protect_private_key": False,                   # Strong private key protection prompt/policy
                 "require_alternate_signature_algorithm": False, # Require alternate signature algorithm/format
@@ -141,7 +139,7 @@ def define_template(*, app_conf, username=None, request=None):
             },
 
             "subject_name_flags": {
-                # --- Existing (unchanged intent) ---
+
                 "add_dns_to_san": True,               # require/add DNS in SAN (directory-sourced)
                 "subject_dns_as_cn": True,            # use DNS as CN in Subject (when applicable)
                 "enrollee_supplies_subject": False,   # enrollee supplies Subject in CSR
@@ -156,12 +154,10 @@ def define_template(*, app_conf, username=None, request=None):
                 "subject_require_common_name": False, # require CN in Subject
                 "subject_require_directory_path": False, # require directory path in Subject
 
-                # --- Missing keys added (all False => no mask change) ---
-                # (Nothing else missing from the catalog for this family)
             },
 
             "enrollment_flags": {
-                # --- Existing (unchanged intent) ---
+
                 "include_symmetric_algorithms": True,     # CT_FLAG_INCLUDE_SYMMETRIC_ALGORITHMS
                 "publish_to_ds": True,                    # CT_FLAG_PUBLISH_TO_DS
                 "auto_enrollment": auto_enroll,           # CT_FLAG_AUTO_ENROLLMENT
@@ -179,27 +175,20 @@ def define_template(*, app_conf, username=None, request=None):
                 "issuance_policies_from_request": False,   # CT_FLAG_ISSUANCE_POLICIES_FROM_REQUEST
                 "skip_auto_renewal": False,               # CT_FLAG_SKIP_AUTO_RENEWAL
                 "remove_invalid_certificate_from_personal_store": False,  # CT_FLAG_REMOVE_INVALID_CERTIFICATE_FROM_PERSONAL_STORE
-
-                # --- Missing keys added (all False => no mask change) ---
                 "do_not_include_sid_extension": False,    # Alias for no_security_extension (same bit)
                 "no_security_extension": False,           # Do not include security extension (SID mapping ext) in issued cert
             },
 
             "general_flags": {
-                # --- Existing (unchanged intent) ---
                 "machine_type": True,  # CT_FLAG_MACHINE_TYPE: machine enrollment template
                 "ca_type": False,      # CT_FLAG_IS_CA: CA request template
                 "cross_ca": False,     # CT_FLAG_IS_CROSS_CA: cross-cert template
-
-                # --- Missing keys added (all False => no mask change) ---
                 "is_ca": False,                        # Alias for ca_type (same bit)
                 "auto_enrollment": auto_enroll,        # General auto-enrollment flag
                 "add_template_name": False,            # Add template name extension
                 "do_not_persist_in_db": False,         # Do not persist in CA DB
                 "is_default": False,                   # Template marked default
                 "is_modified": False,                  # Template marked modified
-
-                # Reserved/MUST ignore (kept for completeness)
                 "add_email_reserved_ignore": False,
                 "publish_to_ds_reserved_ignore": False,
                 "exportable_key_reserved_ignore": False,
