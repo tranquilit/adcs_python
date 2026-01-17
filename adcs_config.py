@@ -205,16 +205,43 @@ def _compile_flags_value_bool_first(val, table: dict, *, field_name: str) -> int
     )
 
 
+SERVER_MASK = 0x000F0000
+CLIENT_MASK = 0x0F000000
+SERVER_SHIFT = 16
+CLIENT_SHIFT = 24
+
+def _set_nibble(mask: int, *, value: int, shift: int, field_mask: int) -> int:
+    if value is None:
+        return mask
+    v = int(value)
+    if not (0 <= v <= 15):
+        raise ValueError(f"compat nibble must be 0..15, got {value}")
+    mask &= ~field_mask
+    mask |= (v & 0xF) << shift
+    return mask
+
+
 def _compile_flags_block(flags, aliases_root: dict) -> dict:
     """
     Compile the 4 flag families to integers, using the canonical table.
+    Also inject privateKeyFlags compatibility nibbles (server/client) if provided.
     """
     flags = dict(flags or {})
+
+    # Compile bool flags -> int
     for key in ("private_key_flags", "subject_name_flags", "enrollment_flags", "general_flags"):
         table = aliases_root.get(key, {})
         flags[key] = _compile_flags_value_bool_first(flags.get(key), table, field_name=key)
-    return flags
 
+    # Optional: inject compatibility bitfields into private_key_flags
+    compat = flags.get("private_key_compat") or {}
+    if compat:
+        pk = int(flags.get("private_key_flags", 0))
+        pk = _set_nibble(pk, value=compat.get("min_ca", 0), shift=SERVER_SHIFT, field_mask=SERVER_MASK)
+        pk = _set_nibble(pk, value=compat.get("min_client", 0), shift=CLIENT_SHIFT, field_mask=CLIENT_MASK)
+        flags["private_key_flags"] = pk
+
+    return flags
 
 # ---------------- YAML loading & runtime context ----------------
 
