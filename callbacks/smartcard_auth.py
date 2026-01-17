@@ -130,6 +130,27 @@ def define_template(*, app_conf, username=None , request=None):
             # AD CS equivalent: MS-CRTD msPKI-Private-Key-Flag (CT_FLAG_EXPORTABLE_KEY = 0x00000010)
             # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/f6122d87-b999-4b92-bff8-f465e8949667
             "exportable_key": False,  # disallow exporting the private key
+
+            # Added missing flags (all False => no behavior/mask change)
+            "archive_private_key": False,                   # Archive the private key (KRA)
+            "protect_private_key": False,                   # Strong private key protection
+            "require_alternate_signature_algorithm": False, # Require alternate signature algorithm
+            "require_same_key_renewal": False,              # Require same key on renewal
+            "use_legacy_provider": False,                   # Use legacy provider (CSP)
+
+            # TPM Key Attestation (AD CS)
+            "attest_preferred": False,                      # Prefer key attestation if client can
+            "attest_required": False,                       # Require key attestation
+            "attestation_without_policy": False,            # Attest but do not add issuance policy
+            "attest_none": False,                           # Explicit none (readability)
+
+            # EK trust model (AD CS)
+            "ek_trust_on_use": False,                       # EK trust on first use / credentials
+            "ek_validate_cert": False,                      # Validate EK certificate (EKCert)
+            "ek_validate_key": False,                       # Validate EK public key (allowlist)
+
+            # Windows Hello
+            "hello_logon_key": False,                       # Windows Hello for Business logon key
         },
 
         "subject_name_flags": {
@@ -187,6 +208,10 @@ def define_template(*, app_conf, username=None , request=None):
             "issuance_policies_from_request": False,   # take issuance policies from CSR
             "skip_auto_renewal": False,               # disable auto-renewal
             "remove_invalid_certificate_from_personal_store": False,  # cleanup invalid certs from personal store
+
+            # Added missing flags (all False => no behavior/mask change)
+            "no_security_extension": False,           # Do not include security extension
+            "do_not_include_sid_extension": False,    # Alias of no_security_extension (same bit)
         },
 
         "general_flags": {
@@ -198,6 +223,19 @@ def define_template(*, app_conf, username=None , request=None):
             "machine_type": False,  # not a machine template
             "ca_type": False,       # not a CA request template
             "cross_ca": False,      # not a cross-cert template
+
+            # Added missing flags (all False => no behavior/mask change)
+            "is_ca": False,                        # Alias for ca_type
+            "auto_enrollment": False,              # General auto-enrollment flag
+            "add_template_name": False,            # Add template name extension
+            "do_not_persist_in_db": False,         # Do not persist in CA DB
+            "is_default": False,                   # Template marked default
+            "is_modified": False,                  # Template marked modified
+
+            # Reserved/MUST ignore (kept for completeness/decoding)
+            "add_email_reserved_ignore": False,
+            "publish_to_ds_reserved_ignore": False,
+            "exportable_key_reserved_ignore": False,
         },
     },
 
