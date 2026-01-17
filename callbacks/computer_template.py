@@ -194,7 +194,7 @@ def define_template(*, app_conf, username=None, request=None):
 
                 # --- Missing keys added (all False => no mask change) ---
                 "is_ca": False,                        # Alias for ca_type (same bit)
-                "auto_enrollment": False,              # General auto-enrollment flag
+                "auto_enrollment": auto_enroll,        # General auto-enrollment flag
                 "add_template_name": False,            # Add template name extension
                 "do_not_persist_in_db": False,         # Do not persist in CA DB
                 "is_default": False,                   # Template marked default
