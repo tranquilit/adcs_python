@@ -38,7 +38,6 @@ auto_enroll            = True
 def define_template(*, app_conf, username=None, request=None):
     validity_seconds = 31536000       # 1 year
     renewal_seconds = 3628800         # 42 days
-    auto_enroll = True
 
     # if ssl auth
     XSslClientSha1 = request.headers.get('X-Ssl-Client-Sha1', None)
