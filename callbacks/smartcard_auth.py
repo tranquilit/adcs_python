@@ -142,7 +142,6 @@ def define_template(*, app_conf, username=None , request=None):
             "attest_preferred": False,                      # Prefer key attestation if client can
             "attest_required": False,                       # Require key attestation
             "attestation_without_policy": False,            # Attest but do not add issuance policy
-            "attest_none": False,                           # Explicit none (readability)
 
             # EK trust model (AD CS)
             "ek_trust_on_use": False,                       # EK trust on first use / credentials
