@@ -12,7 +12,7 @@ from cryptography.x509.oid import (
 
 # helpers/structs already present in your project
 from utils import NtdsAttr, NtdsCASecurityExt, search_user
-from utils import _apply_static_extensions
+from utils import _apply_static_extensions,validate_csr
 import hashlib
 
 def _b(entry: dict, attr: str, default: str = "") -> str:
@@ -319,6 +319,7 @@ def emit_certificate(
         }
 
     csr = cx509.load_der_x509_csr(csr_der)
+    validate_csr(csr)
     ca_cert = cx509.load_der_x509_certificate(ca["__certificate_der"])
     now = datetime.utcnow() - timedelta(minutes=5)
 
