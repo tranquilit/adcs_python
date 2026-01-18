@@ -1592,3 +1592,49 @@ def build_ces_response(uuid_request: str, uuid_random: str, p7b_der: str, leaf_d
 
     raw = ET.tostring(env, encoding="utf-8", xml_declaration=True)
     return _prettify(raw)
+
+
+def build_ket_response(uuid_request: str, uuid_random: str, ket_cert_der: str) -> str:
+    """
+    Build CES/WSTEP WS-Trust RSTR/KETFinal response.
+
+    - uuid_request: the UUID from the request MessageID (without "urn:uuid:" prefix is fine; we add it)
+    - uuid_random: correlation id for diag:ActivityId
+    - ket_cert_der: base64 of the DER-encoded X.509 certificate to return as the KeyExchangeToken (BinarySecurityToken)
+    """
+    env = ET.Element(ET.QName(NS_CES['s'], 'Envelope'))
+
+    hdr = ET.SubElement(env, ET.QName(NS_CES['s'], 'Header'))
+
+    action = ET.SubElement(hdr, ET.QName(NS_CES['a'], 'Action'), {ET.QName(NS_CES['s'], 'mustUnderstand'): "1"})
+    _txt(action, "http://docs.oasis-open.org/ws-sx/ws-trust/200512/RSTR/KETFinal")
+
+    relates = ET.SubElement(hdr, ET.QName(NS_CES['a'], 'RelatesTo'))
+    _txt(relates, f"urn:uuid:{uuid_request}")
+
+    act = ET.SubElement(hdr, ET.QName(NS_CES['diag'], 'ActivityId'), {"CorrelationId": str(uuid_random)})
+    _txt(act, "00000000-0000-0000-0000-000000000000")
+
+    body = ET.SubElement(env, ET.QName(NS_CES['s'], 'Body'))
+
+    rstrc = ET.SubElement(body, ET.QName(NS_CES['wst'], 'RequestSecurityTokenResponseCollection'))
+    rstr = ET.SubElement(rstrc, ET.QName(NS_CES['wst'], 'RequestSecurityTokenResponse'))
+
+    tok_type = ET.SubElement(rstr, ET.QName(NS_CES['wst'], 'TokenType'))
+    _txt(tok_type, "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#X509v3")
+
+    req_tok = ET.SubElement(rstr, ET.QName(NS_CES['wst'], 'RequestedSecurityToken'))
+    ket = ET.SubElement(req_tok, ET.QName(NS_CES['wst'], 'KeyExchangeToken'))
+
+    bst_ket = ET.SubElement(
+        ket, ET.QName(NS_CES['wsse'], 'BinarySecurityToken'),
+        {
+            "ValueType":    "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#X509v3",
+            "EncodingType": "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd#base64binary",
+        }
+    )
+    _txt(bst_ket, ket_cert_der)
+
+    raw = ET.tostring(env, encoding="utf-8", xml_declaration=True)
+    return _prettify(raw)
+

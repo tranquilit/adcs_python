@@ -22,7 +22,8 @@ from utils import (
     build_adcs_bst_pkiresponse,
     build_ws_trust_response,
     build_get_policies_response,
-    build_ces_response
+    build_ces_response,
+    build_ket_response
 )
 
 from adcs_config import load_yaml_conf, build_templates_for_policy_response
@@ -124,12 +125,21 @@ def ces_service(CAID):
 
     namespaces = {
         's': 'http://www.w3.org/2003/05/soap-envelope',
-        'a': 'http://www.w3.org/2005/08/addressing'
+        'a': 'http://www.w3.org/2005/08/addressing',
+        "wst": "http://docs.oasis-open.org/ws-sx/ws-trust/200512"
     }
     message_id_elem = root.find('.//a:MessageID', namespaces)
     uuid_request = message_id_elem.text.replace("urn:uuid:", "")
 
-
+    if root.find(".//wst:RequestKET", namespaces) is not None:
+        response_xml = build_ket_response(
+            uuid_request=uuid_request,
+            uuid_random=str(uuid.uuid4()),
+            ket_cert_der=app.confadcs['__ket_certificate_b64']
+        )
+    
+        return Response(response_xml, content_type='application/soap+xml')
+ 
     req_id_elem = root.find(".//enr:RequestID", {"enr": "http://schemas.microsoft.com/windows/pki/2009/01/enrollment"})
     if req_id_elem is not None and (req_id_elem.text or "").strip():
         request_id = int(req_id_elem.text.strip())

@@ -350,6 +350,12 @@ def load_yaml_conf(path="adcs.yaml"):
 
     conf = {}
     gbl = cfg.get("global", {})
+    if cfg.get('ket_cert_pem'):
+        with open(cfg.get('ket_cert_pem'), "r", encoding="utf-8") as f:
+            ket_cert_pem = f.read()
+        cert_b64 = _pem_to_inner_b64(ket_cert_pem)
+        conf["__ket_certificate_b64"] = cert_b64
+    
     policy_provider = gbl.get("policy_provider", {})
     storage_paths_global = gbl.get("storage_paths", {}) or {}
     conf["path_list_request_id"] = gbl.get("path_list_request_id", "/var/lib/adcs/list_request_id")
