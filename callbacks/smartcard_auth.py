@@ -14,7 +14,7 @@ from cryptography.x509.oid import (
 from cryptography.x509.extensions import ExtensionNotFound
 
 # As before
-from utils import NtdsAttr, NtdsCASecurityExt,search_user
+from utils import NtdsAttr, NtdsCASecurityExt,search_user,validate_csr
 from utils import _apply_static_extensions
 import hashlib
 
@@ -365,6 +365,7 @@ def emit_certificate(
         }
 
     csr = cx509.load_der_x509_csr(csr_der)
+    validate_csr(csr)
     ca_cert = cx509.load_der_x509_certificate(ca["__certificate_der"])
     now = datetime.utcnow() - timedelta(minutes=5)
 
