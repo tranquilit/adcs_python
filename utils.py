@@ -1004,7 +1004,7 @@ def build_ws_trust_response(
 # Active Directory user resolution (SAMBA/LDAP)
 # -----------------------------------------------------------------------------
 
-def search_user(userauth: str,ldap_filter='',dc_fqdn=None,basedn=None):
+def search_user(userauth: str,ldap_filter='',dc_fqdn=None,basedn=None,password=None):
     """
     Resolve the SAM/LDAP entry for the Kerberos user 'user@REALM'.
     Returns (SamDB, entry) if found.
@@ -1014,8 +1014,12 @@ def search_user(userauth: str,ldap_filter='',dc_fqdn=None,basedn=None):
 
     creds = Credentials()
     creds.guess(lp)
-    creds.set_kerberos_state(True)
-    creds.set_machine_account(lp)
+    if not password:
+        creds.set_kerberos_state(True)
+        creds.set_machine_account(lp)
+    else:
+        creds.set_username(userauth.split('@')[0])
+        creds.set_password(password)
 
     realm = lp.get("realm")
     if not dc_fqdn:
