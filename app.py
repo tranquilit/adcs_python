@@ -131,11 +131,15 @@ def ces_service(CAID):
     message_id_elem = root.find('.//a:MessageID', namespaces)
     uuid_request = message_id_elem.text.replace("urn:uuid:", "")
 
+    ca_match = [u for u in app.confadcs['cas_list'] if u['id'] == CAID]
+    if not ca_match:
+        return Response("CAID not found", 403)
+
     if root.find(".//wst:RequestKET", namespaces) is not None:
         response_xml = build_ket_response(
             uuid_request=uuid_request,
             uuid_random=str(uuid.uuid4()),
-            ket_cert_der=app.confadcs['__ket_certificate_b64']
+            ket_cert_der=ca_match[0]['__ket_certificate_b64']
         )
     
         return Response(response_xml, content_type='application/soap+xml')

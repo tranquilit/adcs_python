@@ -350,11 +350,6 @@ def load_yaml_conf(path="adcs.yaml"):
 
     conf = {}
     gbl = cfg.get("global", {})
-    if cfg.get('ket_cert_pem'):
-        with open(cfg.get('ket_cert_pem'), "r", encoding="utf-8") as f:
-            ket_cert_pem = f.read()
-        cert_b64 = _pem_to_inner_b64(ket_cert_pem)
-        conf["__ket_certificate_b64"] = cert_b64
     
     policy_provider = gbl.get("policy_provider", {})
     storage_paths_global = gbl.get("storage_paths", {}) or {}
@@ -434,6 +429,13 @@ def load_yaml_conf(path="adcs.yaml"):
             conf["cas_by_display_name"][ca["display_name"]] = ca
         if ca.get("default"):
             default_ca = ca
+
+        if ca.get('ket_cert_pem'):
+            with open(ca.get('ket_cert_pem'), "r", encoding="utf-8") as f:
+                ket_cert_pem = f.read()
+            cert_b64 = _pem_to_inner_b64(ket_cert_pem)
+            ca["__ket_certificate_b64"] = cert_b64
+    
 
     if not conf["cas_list"]:
         raise ValueError("No CA defined in 'cas'")
