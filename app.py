@@ -96,6 +96,7 @@ def cep_service():
         uuid_random=uuid_random,
         hosturl= host_url.replace('http://', 'https://') + ':' + request.headers.get('X-Forwarded-Port','443') ,
         policyid=app.confadcs['policyid'],
+        policyfriendlyname=app.confadcs['policyfriendlyname'],
         next_update_hours=app.confadcs['next_update_hours'],
         cas=app.confadcs['cas_list'],
         templates=templates_for_user,   # static extensions already materialized

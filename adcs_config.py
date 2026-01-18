@@ -356,6 +356,7 @@ def load_yaml_conf(path="adcs.yaml"):
     conf["next_update_hours_crl"] = gbl.get("next_update_hours_crl", 8)
 
     conf["policyid"] = policy_provider.get("policy_id")
+    conf["policyfriendlyname"] = policy_provider.get("policyfriendlyname","ADCSPYTHON")
     conf["next_update_hours"] = policy_provider.get("next_update_hours", 8)
 
     conf["auth_callbacks"] = []

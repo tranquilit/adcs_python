@@ -1156,6 +1156,7 @@ def build_get_policies_response(
     uuid_random: str,
     hosturl: str,
     policyid: str,
+    policyfriendlyname: str,
     next_update_hours: int,
     cas: list,
     templates: list,
@@ -1267,7 +1268,8 @@ def build_get_policies_response(
     response = ET.SubElement(gpr, ET.QName(NS_EP['ep'], 'response'))
 
     text(ET.SubElement(response, ET.QName(NS_EP['ep'], 'policyID')), policyid)
-    ET.SubElement(response, ET.QName(NS_EP['ep'], 'policyFriendlyName'))
+    pf = ET.SubElement(response, ET.QName(NS_EP['ep'], 'policyFriendlyName'))
+    text(pf, policyfriendlyname) 
     text(ET.SubElement(response, ET.QName(NS_EP['ep'], 'nextUpdateHours')), next_update_hours)
 
     pol_not_changed = ET.SubElement(response, ET.QName(NS_EP['ep'], 'policiesNotChanged'))
