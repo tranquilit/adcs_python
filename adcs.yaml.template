@@ -5,6 +5,7 @@ global:
 
   policy_provider:
     policy_id: "{1158087D-44BE-436A-897B-EA76BA39CF5F}"
+    policyfriendlyname: TestCompany Policy
     next_update_hours: 8
 
 
