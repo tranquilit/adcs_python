@@ -29,6 +29,8 @@ cas:
       csr_dir:  /var/lib/adcs/pki/csr/ica/
       private_dir: /var/lib/adcs/pki/private/ica/
 
+#    ket_cert_pem: /var/lib/adcs/pki/ket-self/ket.crt.pem
+
 #    auth_methods:
 #      - method: kerberos
 #        renewal_only: false
@@ -56,6 +58,9 @@ cas:
       cert_dir: /var/lib/adcs/pki/newcerts/root/
       csr_dir:  /var/lib/adcs/pki/csr/root/
       private_dir: /var/lib/adcs/pki/private/root/
+
+#    ket_cert_pem: /var/lib/adcs/pki/ket-self/ket.crt.pem
+
 
 ############# TPM (if not key_path_pem and key_passphrase) ###################
 #    hsm:
