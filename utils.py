@@ -362,49 +362,10 @@ def extract_ms_template_from_csr_der(csr_der: bytes):
 
 def exct_csr_from_cmc(p7_der: bytes):
     """
-    Backward-compatible: returns (csr_der, body_part_id, info_dict)
-
-    info_dict contains:
-      - template_info: dict
-      - pki_octets: bytes|None
-      - content_type: str
-      - control_sequence: list[dict]   # relaxed TaggedAttributes
-      - req_sequence_raw: list[bytes]
-      - cms_certs: list[bytes]         # DER
-      - provider_hint: str|None
+    Try, in this order, to extract a CSR and its bodyPartID from a wrapped CMC
+    (PKIData in SignedData), then fall back to simplePKIRequest or direct CSR.
+    Returns (csr_der, body_part_id, template_info_dict).
     """
-    def _safe_dump(x):
-        try:
-            return x.dump()
-        except Exception:
-            try:
-                return bytes(x)
-            except Exception:
-                return None
-
-    def _extract_provider_hint(blob: bytes) -> str | None:
-        for needle in (
-            "Microsoft Platform Crypto Provider",
-            "Microsoft Software Key Storage Provider",
-            "Microsoft Smart Card Key Storage Provider",
-        ):
-            try:
-                if needle.encode("utf-16-le") in blob:
-                    return needle
-            except Exception:
-                pass
-        return None
-
-    info = {
-        "template_info": {"name": None, "oid": None, "major": None, "minor": None},
-        "pki_octets": None,
-        "content_type": "unknown",
-        "control_sequence": [],
-        "req_sequence_raw": [],
-        "cms_certs": [],
-        "provider_hint": None,
-    }
-
     try:
         ci = a_cms.ContentInfo.load(p7_der)
         if ci["content_type"].native != "signed_data":
@@ -416,94 +377,34 @@ def exct_csr_from_cmc(p7_der: bytes):
         if eci["content"] is None:
             raise ValueError("SignedData without encapsulated content (detached)")
 
-        info["content_type"] = eci["content_type"].dotted if eci["content_type"] is not None else "unknown"
-
         pki_octets: bytes = eci["content"].native
-        info["pki_octets"] = pki_octets
-        info["provider_hint"] = _extract_provider_hint(pki_octets)
 
-        # Embedded certs (useful for chain/debug)
-        try:
-            certs = sd.get("certificates")
-            if certs is not None:
-                for c in certs:
-                    der = None
-                    try:
-                        if "certificate" in c:
-                            der = c["certificate"].dump()
-                        else:
-                            der = c.dump()
-                    except Exception:
-                        der = _safe_dump(c)
-                    if der:
-                        info["cms_certs"].append(der)
-        except Exception:
-            pass
-
-        # Parse PKIData (relaxed)
-        pkidata_relax = None
+        # 1) PKIData -> look for TaggedCertificationRequest
         try:
             pkidata_relax = _PKIDataRelax.load(pki_octets)
+            if pkidata_relax["reqSequence"] is not None:
+                for any_item in pkidata_relax["reqSequence"]:
+                    try:
+                        wrapped = _der_wrap_sequence(any_item.contents)
+                        tcr = _TCRRelax.load(wrapped)
+                        csr_obj = tcr["certificationRequest"]
+                        body_part_id = int(tcr["bodyPartID"].native)
+                        csr_bytes = csr_obj.dump()
+                        template_info = _parse_template_from_csr_bytes(csr_bytes)
+                        return csr_bytes, body_part_id, template_info
+                    except Exception:
+                        continue
         except Exception:
-            pkidata_relax = None
-
-        # controlSequence (TaggedAttributes relaxed)
-        if pkidata_relax is not None and pkidata_relax["controlSequence"] is not None:
-            for any_item in pkidata_relax["controlSequence"]:
-                entry = {"oid": None, "values_der": [], "raw_der": None}
-                try:
-                    raw = _der_wrap_sequence(any_item.contents)  # wrap ANY into SEQUENCE
-                    entry["raw_der"] = raw
-
-                    # TaggedAttribute ::= SEQUENCE { bodyPartID INTEGER, attrType OID, attrValues SET OF ANY }
-                    seq = a_core.Sequence.load(raw)
-                    entry["oid"] = seq[1].native if len(seq) > 1 else None
-
-                    if len(seq) > 2:
-                        vals = seq[2]  # SET OF ...
-                        try:
-                            for v in vals:
-                                vd = _safe_dump(v)
-                                if vd:
-                                    entry["values_der"].append(vd)
-                        except Exception:
-                            pass
-                except Exception:
-                    entry["raw_der"] = _safe_dump(any_item)
-                info["control_sequence"].append(entry)
-
-        # reqSequence raw items (debug)
-        if pkidata_relax is not None and pkidata_relax["reqSequence"] is not None:
-            for any_item in pkidata_relax["reqSequence"]:
-                try:
-                    info["req_sequence_raw"].append(_der_wrap_sequence(any_item.contents))
-                except Exception:
-                    b = _safe_dump(any_item)
-                    if b:
-                        info["req_sequence_raw"].append(b)
-
-        # 1) PKIData -> TaggedCertificationRequest (your original extraction)
-        if pkidata_relax is not None and pkidata_relax["reqSequence"] is not None:
-            for any_item in pkidata_relax["reqSequence"]:
-                try:
-                    wrapped = _der_wrap_sequence(any_item.contents)
-                    tcr = _TCRRelax.load(wrapped)
-                    csr_obj = tcr["certificationRequest"]
-                    body_part_id = int(tcr["bodyPartID"].native)
-                    csr_bytes = csr_obj.dump()
-                    template_info = _parse_template_from_csr_bytes(csr_bytes)
-                    info["template_info"] = template_info
-                    return csr_bytes, body_part_id, info
-                except Exception:
-                    continue
+            pass
 
         # 2) simplePKIRequest (SEQUENCE OF CSR)
         try:
             seq = _SeqOfCSR.load(pki_octets)
             if len(seq) >= 1:
                 csr_bytes = seq[0].dump()
-                info["template_info"] = _parse_template_from_csr_bytes(csr_bytes)
-                return csr_bytes, 0, info
+                body_part_id = 0
+                template_info = _parse_template_from_csr_bytes(csr_bytes)
+                return csr_bytes, body_part_id, template_info
         except Exception:
             pass
 
@@ -511,23 +412,22 @@ def exct_csr_from_cmc(p7_der: bytes):
         try:
             csr_obj = csr.CertificationRequest.load(pki_octets)
             csr_bytes = csr_obj.dump()
-            info["template_info"] = _parse_template_from_csr_bytes(csr_bytes)
-            return csr_bytes, 0, info
+            body_part_id = 0
+            template_info = _parse_template_from_csr_bytes(csr_bytes)
+            return csr_bytes, body_part_id, template_info
         except Exception:
             pass
 
-        ct = info["content_type"]
+        ct = eci["content_type"].dotted if eci["content_type"] is not None else "unknown"
         raise ValueError(
             "Unable to extract a CSR: no TCR, no simplePKIRequest, nor a direct CSR. "
             f"EncapContentInfo.content_type={ct}"
         )
-
     except Exception:
-        # Ultimate fallback: naked CSR
+        # Ultimate fallback: some clients send just a “naked” CSR
         direct = csr.CertificationRequest.load(p7_der)
         csr_bytes = direct.dump()
-        info["template_info"] = extract_ms_template_from_csr_der(csr_bytes)
-        return csr_bytes, 0, info
+        return csr_bytes, 0, extract_ms_template_from_csr_der(csr_bytes)
 
 
 # -----------------------------------------------------------------------------
@@ -1737,3 +1637,4 @@ def build_ket_response(uuid_request: str, uuid_random: str, ket_cert_der: str) -
 
     raw = ET.tostring(env, encoding="utf-8", xml_declaration=True)
     return _prettify(raw)
+

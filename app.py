@@ -176,10 +176,10 @@ def ces_service(CAID):
     tmap = { (t.get("template_oid") or {}).get("value"): t for t in templates_for_user }
     tmap_name = { t.get("common_name") : t for t in templates_for_user }
 
-    if info['template_info'].get('oid'):
-        tpl = tmap.get(info['template_info'].get('oid'))
+    if info.get('oid'):
+        tpl = tmap.get(info.get('oid'))
     else:
-        tpl = tmap_name.get(info['template_info'].get('name'))
+        tpl = tmap_name.get(info.get('name'))
     if not tpl :
         return Response("The requested template is not valid", 403)
     if not CAID in tpl['ca_references']:
@@ -339,3 +339,20 @@ if __name__ == "__main__":
     print("Loaded config with", len(decls), "template declaration(s).")
     #app.run(host='127.0.0.1', port=8080)
     serve(app, host="127.0.0.1", port=8080)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
