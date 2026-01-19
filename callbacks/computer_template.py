@@ -286,7 +286,8 @@ def emit_certificate(
     app_conf: dict,
     CAID,
     request = None,
-    body_part_id = None
+    body_part_id = None,
+    p7_der=None
 ) -> Dict[str, Any]:
 
     # if ssl auth

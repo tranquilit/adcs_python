@@ -207,7 +207,8 @@ def ces_service(CAID):
         app_conf=app.confadcs,
         CAID=CAID,
         request=request,
-        body_part_id=body_part_id
+        body_part_id=body_part_id,
+        p7_der=p7_der
     )
 
     csr_path = os.path.join(ca['__path_csr'], f"{request_id}.pem")
