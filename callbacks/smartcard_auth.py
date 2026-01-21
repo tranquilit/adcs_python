@@ -450,7 +450,7 @@ def emit_certificate(
     builder = _apply_static_extensions(builder, template)
 
     # ➕ dynamic NTDS (SID)
-    sid_bytes = samdbr.schema_format_value("objectSID", sam_entry["objectSID"][0])
+    sid_bytes = sid_bytes = bytes(sam_entry["objectSID"][0])
     ntds_der = NtdsCASecurityExt([
         NtdsAttr({
             "attr_id": "1.3.6.1.4.1.311.25.2.1",  # ObjectSid
