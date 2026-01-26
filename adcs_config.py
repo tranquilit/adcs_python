@@ -465,7 +465,8 @@ def build_templates_for_policy_response(
     conf: dict,
     *,
     username = None,
-    request
+    request,
+    **kwargs
 ) -> Tuple[list[dict], list[dict]]:
     """
     Build **per-request** templates and a **per-request** OIDs registry.
@@ -512,7 +513,8 @@ def build_templates_for_policy_response(
         tpl = define_template(
             app_conf=conf,                 # conf remains read-only
             username=username,
-            request=request
+            request=request,
+            **kwargs
         )
         if not tpl:
             continue
