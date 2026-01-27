@@ -17,7 +17,8 @@ Design goals
   * Fallback via PUBLIC_KEY to derive the right CKA_ID
   * Final full-scan match by ID variants
 - Token selection by pkcs11_uri only (deterministic):
-  * Match token_info.serial_number (and optionally model/manufacturer/token label if present in URI)
+  * Match token info (serial/model/manufacturer/token label) from pkcs11_uri
+  * Compatible with python-pkcs11 variants where Token info is exposed as .token_info or .info
 - Works with TPM2-PKCS#11 (tpm2-pkcs11) and most HSMs speaking PKCS#11.
 - Never exports private key material; exposes only the cryptography API.
 
@@ -37,7 +38,7 @@ Quick usage
         pkcs11_uri="pkcs11:model=PKCS%2315%20emulated;manufacturer=www.CardContact.de;serial=DENK0301429;token=SmartCard-HSM",
         user_pin="123456",
         key_id="01ab23cd",                # CKA_ID (hex string) or raw bytes
-        # slot_index=0,                   # optional vendor quirk
+        # slot_index=0,                   # optional vendor quirk (index into pkcs11.get_slots())
     )
 
     sig = key.sign(b"hello", P.PKCS1v15(), hashes.SHA256())
@@ -94,26 +95,52 @@ def _parse_pkcs11_uri(uri: str) -> Dict[str, str]:
     return out
 
 
-def _token_info_str(x) -> str:
-    return (x or "").strip()
-
-
-def _token_matches_uri(token_info, uri_kv: Dict[str, str]) -> bool:
+def _get_token_info(tok):
     """
-    Match python-pkcs11 token_info against pkcs11 uri fields when present.
-
-    We match strictly only on fields present in the URI.
-    For your case, 'serial' is the key field to disambiguate tokens.
+    Compat: python-pkcs11 Token exposes either .token_info or .info depending on build/version.
+    Returns an object with label/serial/manufacturer/model attributes (best-effort).
     """
-    label = _token_info_str(getattr(token_info, "label", None))
-    serial = _token_info_str(getattr(token_info, "serial_number", None))
-    manufacturer = _token_info_str(getattr(token_info, "manufacturer_id", None))
-    model = _token_info_str(getattr(token_info, "model", None))
+    info = getattr(tok, "token_info", None)
+    if info is not None:
+        return info
+    info = getattr(tok, "info", None)
+    if info is not None:
+        return info
+    return None
 
-    uri_serial = _token_info_str(uri_kv.get("serial"))
-    uri_token = _token_info_str(uri_kv.get("token"))
-    uri_manu = _token_info_str(uri_kv.get("manufacturer"))
-    uri_model = _token_info_str(uri_kv.get("model"))
+
+def _ti_get(info, *names, default=""):
+    """Get attribute from token-info object with multiple possible attribute spellings."""
+    for n in names:
+        v = getattr(info, n, None)
+        if v is None:
+            continue
+        if isinstance(v, str):
+            return (v or "").strip()
+        return v
+    return default
+
+
+def _token_matches_uri_from_token(tok, uri_kv: Dict[str, str]) -> bool:
+    """
+    Match Token info against the pkcs11_uri fields that are present.
+
+    We match strictly only on keys present in URI.
+    Your key disambiguator is usually `serial=...`.
+    """
+    info = _get_token_info(tok)
+    if info is None:
+        return False
+
+    label = (_ti_get(info, "label", default="") or "").strip()
+    serial = (_ti_get(info, "serial_number", "serialNumber", "serial", default="") or "").strip()
+    manufacturer = (_ti_get(info, "manufacturer_id", "manufacturerID", "manufacturer", default="") or "").strip()
+    model = (_ti_get(info, "model", default="") or "").strip()
+
+    uri_serial = (uri_kv.get("serial") or "").strip()
+    uri_token = (uri_kv.get("token") or "").strip()
+    uri_manu = (uri_kv.get("manufacturer") or "").strip()
+    uri_model = (uri_kv.get("model") or "").strip()
 
     if uri_serial and serial != uri_serial:
         return False
@@ -155,7 +182,7 @@ class HSMRSAPrivateKey(rsa.RSAPrivateKey):
             key_id: identifier (CKA_ID) of the private key:
                     - bytes (raw)
                     - or hex string "A1B2...", with or without ':' / spaces
-            slot_index: optional index to select a slot explicitly (vendor quirk).
+            slot_index: optional index to select a slot explicitly (vendor quirk; index into get_slots()).
             rw: open the session read/write (often required).
             login_on_init: perform CKU_USER login during initialization (best-effort).
 
@@ -215,24 +242,26 @@ class HSMRSAPrivateKey(rsa.RSAPrivateKey):
         if not loaded:
             raise HSMError(f"Cannot load PKCS#11 library: {lib_path} → {last_err!r}")
 
-        # 2) Locate the token by pkcs11_uri (scan slots, match token_info)
+        # 2) Locate the token by pkcs11_uri (scan slots, match token info)
         try:
             slots = list(self._pkcs11.get_slots())
 
-            # If slot_index is provided, try it first (vendor quirk / deterministic)
             self._token = None
+
+            # If slot_index is provided, try it first (vendor quirk / deterministic)
             if slot_index is not None:
                 if not (0 <= slot_index < len(slots)):
                     raise HSMError(f"slot_index out of range (got {slot_index}, have {len(slots)} slots)")
                 tok = slots[slot_index].get_token()
-                if _token_matches_uri(tok.token_info, uri_kv):
+                if _token_matches_uri_from_token(tok, uri_kv):
                     self._token = tok
 
+            # Otherwise scan all slots
             if self._token is None:
                 for s in slots:
                     try:
                         tok = s.get_token()
-                        if _token_matches_uri(tok.token_info, uri_kv):
+                        if _token_matches_uri_from_token(tok, uri_kv):
                             self._token = tok
                             break
                     except Exception:
@@ -329,6 +358,7 @@ class HSMRSAPrivateKey(rsa.RSAPrivateKey):
                     cand_ids.add(cid.upper())
                 except Exception:
                     pass
+
             for o in all_privs:
                 try:
                     oid = _attr(o, self._Attribute.ID, b"")
@@ -358,6 +388,7 @@ class HSMRSAPrivateKey(rsa.RSAPrivateKey):
                 pub = self._find_one(object_class=self._ObjectClass.PUBLIC_KEY, id=kid)
 
             if pub is None:
+                # last resort: try reading from private key object (may be disallowed)
                 n_bytes = _attr(self._priv, self._Attribute.MODULUS, None)
                 e_bytes = _attr(self._priv, self._Attribute.PUBLIC_EXPONENT, None)
                 if n_bytes and e_bytes:
@@ -585,7 +616,6 @@ class HSMRSAPrivateKey(rsa.RSAPrivateKey):
 
         raise ValueError("Unsupported decryption padding (expect PKCS1v15 or OAEP).")
 
-
     # --- Non exportable ---
     def private_numbers(self):  # type: ignore[override]
         raise TypeError("Non-exportable key (HSM).")
@@ -610,15 +640,18 @@ class HSMRSAPrivateKey(rsa.RSAPrivateKey):
     def token_info(self) -> Dict[str, Any]:
         """
         Return a few useful, non-sensitive token details (manufacturer, model, serial…).
+        Compatible with token.info/token.token_info variants.
         """
         try:
-            info = self._token.token_info
+            info = _get_token_info(self._token)
+            if info is None:
+                return {}
             return {
-                "label": (info.label or "").strip(),
-                "manufacturer_id": (info.manufacturer_id or "").strip(),
-                "model": (info.model or "").strip(),
-                "serial_number": (info.serial_number or "").strip(),
-                "flags": int(info.flags),
+                "label": _ti_get(info, "label", default=""),
+                "manufacturer_id": _ti_get(info, "manufacturer_id", "manufacturerID", default=""),
+                "model": _ti_get(info, "model", default=""),
+                "serial_number": _ti_get(info, "serial_number", "serialNumber", "serial", default=""),
+                "flags": int(getattr(info, "flags", 0) or 0),
             }
         except Exception:
             return {}
