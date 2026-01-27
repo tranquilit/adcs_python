@@ -71,20 +71,20 @@ cas:
 #      user_pin_file: "/etc/adcs/secret/hsm_pin.txt"
 
 ############# YUBIKEY ###################
-### pkcs11-tool --module /usr/lib/x86_64-linux-gnu/libykcs11.so -L|grep label
+### pkcs11-tool --module /usr/lib/x86_64-linux-gnu/libykcs11.so -L|grep uri
 ### pkcs11-tool --module /usr/lib/x86_64-linux-gnu/libykcs11.so --login --pin "123456" --list-objects --type privkey
 #     hsm:
 #       pkcs11_lib: "/usr/lib/x86_64-linux-gnu/libykcs11.so"
-#       token_label: "YubiKey PIV #99999999"
+#       pkcs11_uri: "pkcs11:model=YubiKey%20YK5;manufacturer=Yubico%20%28www.yubico.com%29;serial=34588777;token=YubiKey%20PIV%20%2334588777"
 #       key_id: "02"
 #       user_pin_file: "/etc/adcs/secret/hsm_pin.txt"
 
 ############# NITROKEY HSM ###################
-### pkcs11-tool --module --module /usr/lib/x86_64-linux-gnu/opensc-pkcs11.so -L|grep label
-### pkcs11-tool --module --module /usr/lib/x86_64-linux-gnu/opensc-pkcs11.so --login --pin "123456" --list-objects --type privkey
+### pkcs11-tool  --module /usr/lib/x86_64-linux-gnu/opensc-pkcs11.so -L|grep uri
+### pkcs11-tool  --module /usr/lib/x86_64-linux-gnu/opensc-pkcs11.so --login --pin "123456" --list-objects --type privkey
 #     hsm:
 #       pkcs11_lib: "/usr/lib/x86_64-linux-gnu/opensc-pkcs11.so"
-#       token_label: "SmartCard-HSM"
+#       pkcs11_uri: "pkcs11:model=PKCS%2315%20emulated;manufacturer=www.CardContact.de;serial=DENK0509429;token=SmartCard-HSM"
 #       key_id: "01"
 #       user_pin_file: "/etc/adcs/secret/hsm_pin.txt"
 
