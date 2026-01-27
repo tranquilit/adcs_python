@@ -262,8 +262,7 @@ def _load_ca_key(ca: dict):
 
     HSM block schema (no environment variables used):
       hsm.pkcs11_lib    : path to PKCS#11 library (.so/.dll)
-      hsm.token_label   : token label
-      hsm.key_label     : private key label (or)
+      hsm.pkcs11_uri    : token pkcs11_uri
       hsm.key_id        : CKA_ID as hex "a1b2c3..."
       hsm.user_pin      : PIN as plain text (dev)
       hsm.user_pin_file : path to a file whose first line contains the PIN (recommended)
@@ -295,17 +294,16 @@ def _load_ca_key(ca: dict):
 
     # --- HSM mode (PKCS#11)
     pkcs11_lib    = hsm.get("pkcs11_lib")
-    token_label   = hsm.get("token_label")
-    key_label     = hsm.get("key_label")
+    pkcs11_uri   = hsm.get("pkcs11_uri")
     key_id        = hsm.get("key_id")  # bytes or hex str (normalized by myhsm)
     user_pin      = hsm.get("user_pin")  # string or null
     user_pin_file = hsm.get("user_pin_file")  # path to PIN file
 
-    if not pkcs11_lib or not token_label:
-        raise ValueError(f"CA '{ca.get('id','?')}': hsm.pkcs11_lib and hsm.token_label are required.")
+    if not pkcs11_lib or not pkcs11_uri:
+        raise ValueError(f"CA '{ca.get('id','?')}': hsm.pkcs11_lib and hsm.pkcs11_uri are required.")
 
-    if not (key_id or key_label):
-        raise ValueError(f"CA '{ca.get('id','?')}': specify hsm.key_id (hex) OR hsm.key_label.")
+    if not key_id :
+        raise ValueError(f"CA '{ca.get('id','?')}': specify hsm.key_id (hex) ")
 
     # Resolve PIN: the file takes precedence if provided
     if user_pin_file:
@@ -327,9 +325,8 @@ def _load_ca_key(ca: dict):
 
     return HSMRSAPrivateKey(
         lib_path=pkcs11_lib,
-        token_label=token_label,
+        pkcs11_uri=pkcs11_uri,
         user_pin=user_pin,
-        key_label=key_label,
         key_id=key_id,
         rw=True,
         login_on_init=True,

@@ -11,11 +11,13 @@ Design goals
   * some ignore Token.open(user_pin=...) → fallback re-open
   * some lack Session.login → we avoid calling it
   * some objects don't support `.get(...)` → use subscript access `[Attribute.*]`
-- Robust key lookup:
-  * Try PRIVATE_KEY by id/label
+- Robust key lookup (CKA_ID-only):
+  * PRIVATE_KEY lookup by CKA_ID (key_id) only
   * Try multiple CKA_ID encodings (binary vs ASCII-hex, upper/lower)
   * Fallback via PUBLIC_KEY to derive the right CKA_ID
-  * Final full-scan match (IDs/labels)
+  * Final full-scan match by ID variants
+- Token selection by pkcs11_uri only (deterministic):
+  * Match token_info.serial_number (and optionally model/manufacturer/token label if present in URI)
 - Works with TPM2-PKCS#11 (tpm2-pkcs11) and most HSMs speaking PKCS#11.
 - Never exports private key material; exposes only the cryptography API.
 
@@ -31,10 +33,10 @@ Quick usage
     from cryptography.hazmat.primitives.asymmetric import padding as P
 
     key = HSMRSAPrivateKey(
-        lib_path="/usr/lib/x86_64-linux-gnu/pkcs11/libtpm2_pkcs11.so.1",
-        token_label="CA-TOKEN",
+        lib_path="/usr/lib/x86_64-linux-gnu/opensc-pkcs11.so",
+        pkcs11_uri="pkcs11:model=PKCS%2315%20emulated;manufacturer=www.CardContact.de;serial=DENK0301429;token=SmartCard-HSM",
         user_pin="123456",
-        key_label="CA-KEY",               # or key_id="34633630..." (CKA_ID hex string)
+        key_id="01ab23cd",                # CKA_ID (hex string) or raw bytes
         # slot_index=0,                   # optional vendor quirk
     )
 
@@ -46,6 +48,7 @@ from __future__ import annotations
 import binascii
 import ctypes
 from typing import Optional, Union, Dict, Any, Iterable, List
+from urllib.parse import unquote
 
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
@@ -64,6 +67,65 @@ def _attr(obj, key, default=None):
         return default
 
 
+def _parse_pkcs11_uri(uri: str) -> Dict[str, str]:
+    """
+    Minimal pkcs11 URI parser:
+      pkcs11:key1=val1;key2=val2  -> {"key1":"val1", ...} (URL-decoded)
+
+    Common keys seen in pkcs11-tool -L:
+      - serial
+      - token
+      - manufacturer
+      - model
+    """
+    if not uri:
+        raise ValueError("pkcs11_uri is required")
+    uri = uri.strip()
+    if not uri.startswith("pkcs11:"):
+        raise ValueError(f"Invalid pkcs11_uri (must start with 'pkcs11:'): {uri!r}")
+
+    out: Dict[str, str] = {}
+    body = uri[len("pkcs11:"):]
+    for part in body.split(";"):
+        if not part or "=" not in part:
+            continue
+        k, v = part.split("=", 1)
+        out[k] = unquote(v)
+    return out
+
+
+def _token_info_str(x) -> str:
+    return (x or "").strip()
+
+
+def _token_matches_uri(token_info, uri_kv: Dict[str, str]) -> bool:
+    """
+    Match python-pkcs11 token_info against pkcs11 uri fields when present.
+
+    We match strictly only on fields present in the URI.
+    For your case, 'serial' is the key field to disambiguate tokens.
+    """
+    label = _token_info_str(getattr(token_info, "label", None))
+    serial = _token_info_str(getattr(token_info, "serial_number", None))
+    manufacturer = _token_info_str(getattr(token_info, "manufacturer_id", None))
+    model = _token_info_str(getattr(token_info, "model", None))
+
+    uri_serial = _token_info_str(uri_kv.get("serial"))
+    uri_token = _token_info_str(uri_kv.get("token"))
+    uri_manu = _token_info_str(uri_kv.get("manufacturer"))
+    uri_model = _token_info_str(uri_kv.get("model"))
+
+    if uri_serial and serial != uri_serial:
+        return False
+    if uri_token and label != uri_token:
+        return False
+    if uri_manu and manufacturer != uri_manu:
+        return False
+    if uri_model and model != uri_model:
+        return False
+    return True
+
+
 class HSMRSAPrivateKey(rsa.RSAPrivateKey):
     """
     Implements the cryptography RSAPrivateKey interface delegating operations to the HSM via PKCS#11.
@@ -75,11 +137,10 @@ class HSMRSAPrivateKey(rsa.RSAPrivateKey):
     def __init__(
         self,
         lib_path: str,
-        token_label: Optional[str] = None,
+        pkcs11_uri: str,
         user_pin: Optional[str] = None,
         *,
-        key_label: Optional[str] = None,
-        key_id: Optional[Union[bytes, str]] = None,
+        key_id: Union[bytes, str],
         slot_index: Optional[int] = None,
         rw: bool = True,
         login_on_init: bool = True,
@@ -87,9 +148,10 @@ class HSMRSAPrivateKey(rsa.RSAPrivateKey):
         """
         Args:
             lib_path: path to the PKCS#11 library (.so/.dylib/.dll) for the HSM/TPM.
-            token_label: label of the token to open.
+            pkcs11_uri: pkcs11 URI used to select the token deterministically.
+                       Example from pkcs11-tool -L:
+                         pkcs11:model=...;manufacturer=...;serial=DENK...;token=SmartCard-HSM
             user_pin: user PIN (CKU_USER). If provided, a login is attempted.
-            key_label: label (CKA_LABEL) of the private key to retrieve.
             key_id: identifier (CKA_ID) of the private key:
                     - bytes (raw)
                     - or hex string "A1B2...", with or without ':' / spaces
@@ -113,22 +175,21 @@ class HSMRSAPrivateKey(rsa.RSAPrivateKey):
         self._UserType = UserType
         self._backend = default_backend()
 
-        if not token_label:
-            raise ValueError("token_label is required")
-
-        if not (key_label or key_id):
-            raise ValueError("Provide key_label or key_id (CKA_ID) to select the key")
+        uri_kv = _parse_pkcs11_uri(pkcs11_uri)
 
         # Keep original key_id string (if any) for alternative encodings
         original_key_id_str: Optional[str] = None
+        key_id_bytes: bytes
+
         if isinstance(key_id, str):
             original_key_id_str = key_id.strip()
-            # normalize: remove separators then decode hex → raw bytes
             cleaned = original_key_id_str.replace(":", "").replace(" ", "")
             try:
-                key_id = binascii.unhexlify(cleaned)
+                key_id_bytes = binascii.unhexlify(cleaned)
             except Exception as e:
                 raise ValueError(f"Invalid hex key_id: {original_key_id_str!r}") from e
+        else:
+            key_id_bytes = bytes(key_id)
 
         # 1) Load PKCS#11 library (pre-check with ctypes for helpful error messages)
         lib_candidates = [lib_path]
@@ -154,24 +215,34 @@ class HSMRSAPrivateKey(rsa.RSAPrivateKey):
         if not loaded:
             raise HSMError(f"Cannot load PKCS#11 library: {lib_path} → {last_err!r}")
 
-        # 2) Locate the token
+        # 2) Locate the token by pkcs11_uri (scan slots, match token_info)
         try:
+            slots = list(self._pkcs11.get_slots())
+
+            # If slot_index is provided, try it first (vendor quirk / deterministic)
+            self._token = None
             if slot_index is not None:
-                try:
-                    slots = list(self._pkcs11.get_slots())
-                    if not (0 <= slot_index < len(slots)):
-                        raise HSMError(f"slot_index out of range (got {slot_index}, have {len(slots)} slots)")
-                    tok = slots[slot_index].get_token()
-                    if (tok.token_info.label or "").strip() != (token_label or "").strip():
-                        self._token = self._pkcs11.get_token(token_label=token_label)
-                    else:
-                        self._token = tok
-                except Exception:
-                    self._token = self._pkcs11.get_token(token_label=token_label)
-            else:
-                self._token = self._pkcs11.get_token(token_label=token_label)
+                if not (0 <= slot_index < len(slots)):
+                    raise HSMError(f"slot_index out of range (got {slot_index}, have {len(slots)} slots)")
+                tok = slots[slot_index].get_token()
+                if _token_matches_uri(tok.token_info, uri_kv):
+                    self._token = tok
+
+            if self._token is None:
+                for s in slots:
+                    try:
+                        tok = s.get_token()
+                        if _token_matches_uri(tok.token_info, uri_kv):
+                            self._token = tok
+                            break
+                    except Exception:
+                        continue
+
+            if self._token is None:
+                raise HSMError(f"Token not found for pkcs11_uri={pkcs11_uri!r}")
+
         except Exception as e:
-            raise HSMError(f"Token not found (label={token_label!r}): {e}") from e
+            raise HSMError(f"Token not found (pkcs11_uri={pkcs11_uri!r}): {e}") from e
 
         # 3) Open a session (first try: with possible implicit login)
         self._user_pin = (user_pin or "")
@@ -194,23 +265,22 @@ class HSMRSAPrivateKey(rsa.RSAPrivateKey):
 
         # Build candidate encodings for CKA_ID, to cover vendor differences
         id_candidates: List[bytes] = []
-        if isinstance(key_id, (bytes, bytearray)):
-            raw = bytes(key_id)
-            # a) raw bytes
-            id_candidates.append(raw)
-            # b) ASCII hex of those bytes (lower + upper)
-            ascii_hex = binascii.hexlify(raw)            # b'3463...'
-            id_candidates.append(ascii_hex)
-            id_candidates.append(ascii_hex.upper())
+
+        raw = key_id_bytes
+        # a) raw bytes
+        id_candidates.append(raw)
+        # b) ASCII hex of those bytes (lower + upper)
+        ascii_hex = binascii.hexlify(raw)  # b'3463...'
+        id_candidates.append(ascii_hex)
+        id_candidates.append(ascii_hex.upper())
+
         if original_key_id_str:
-            # c) ASCII as provided (no separators) lower/upper
             cleaned = original_key_id_str.replace(":", "").replace(" ", "")
             id_candidates.append(cleaned.encode("ascii"))
             id_candidates.append(cleaned.upper().encode("ascii"))
 
-        # 5.1 First attempt: by id candidates then by label
-        self._priv = self._try_find_private_by_ids(id_candidates) or \
-                     (self._find_one(object_class=self._ObjectClass.PRIVATE_KEY, label=key_label) if key_label else None)
+        # 5.1 First attempt: by id candidates
+        self._priv = self._try_find_private_by_ids(id_candidates)
 
         # 5.2 If not found and we have a PIN, some modules ignored login on first open():
         if self._priv is None and self._user_pin:
@@ -220,35 +290,31 @@ class HSMRSAPrivateKey(rsa.RSAPrivateKey):
                 except Exception:
                     pass
                 self._session = self._token.open(rw=rw, user_pin=self._user_pin)
-                self._priv = self._try_find_private_by_ids(id_candidates) or \
-                             (self._find_one(object_class=self._ObjectClass.PRIVATE_KEY, label=key_label) if key_label else None)
+                self._priv = self._try_find_private_by_ids(id_candidates)
             except Exception:
                 pass
 
         # 5.3 Fallback: via PUBLIC_KEY → derive CKA_ID → search PRIVATE_KEY by that id
         if self._priv is None:
-            kid_from_pub = None
             pub = None
-            if key_label:
-                pub = self._find_one(object_class=self._ObjectClass.PUBLIC_KEY, label=key_label)
-            if pub is None and id_candidates:
-                for cid in id_candidates:
-                    pub = self._find_one(object_class=self._ObjectClass.PUBLIC_KEY, id=cid)
-                    if pub:
-                        break
-            if pub is not None:
-                kid_from_pub = _attr(pub, self._Attribute.ID, None)
+            for cid in id_candidates:
+                if not cid:
+                    continue
+                pub = self._find_one(object_class=self._ObjectClass.PUBLIC_KEY, id=cid)
+                if pub:
+                    break
+            kid_from_pub = _attr(pub, self._Attribute.ID, None) if pub is not None else None
             if kid_from_pub is not None:
                 self._priv = self._find_one(object_class=self._ObjectClass.PRIVATE_KEY, id=kid_from_pub)
 
-        # 5.4 FINAL TRY: full scan of PRIVATE_KEY objects, match by label or by any candidate ID
+        # 5.4 FINAL TRY: full scan of PRIVATE_KEY objects, match by any candidate ID
         if self._priv is None:
             try:
                 it = self._session.get_objects({self._Attribute.CLASS: self._ObjectClass.PRIVATE_KEY})
                 all_privs = list(it)
             except Exception:
                 all_privs = []
-            # rebuild candidate set with variants (lower/upper and hex-of-bytes)
+
             cand_ids = set()
             for cid in id_candidates:
                 if not cid:
@@ -266,12 +332,6 @@ class HSMRSAPrivateKey(rsa.RSAPrivateKey):
             for o in all_privs:
                 try:
                     oid = _attr(o, self._Attribute.ID, b"")
-                    olabel = _attr(o, self._Attribute.LABEL, "")
-                    if isinstance(olabel, bytes):
-                        olabel = olabel.decode("utf-8", "ignore")
-                    if key_label and olabel == key_label:
-                        self._priv = o
-                        break
                     oid_b = oid.encode("ascii", "ignore") if isinstance(oid, str) else bytes(oid or b"")
                     if (oid_b in cand_ids) or (binascii.hexlify(oid_b) in cand_ids) or (oid_b.upper() in cand_ids) or (oid_b.lower() in cand_ids):
                         self._priv = o
@@ -281,19 +341,13 @@ class HSMRSAPrivateKey(rsa.RSAPrivateKey):
 
         if self._priv is None:
             self.close()
-            target = None
-            if isinstance(key_id, (bytes, bytearray)):
-                target = f"id={binascii.hexlify(key_id).decode()}"
-            elif original_key_id_str:
+            target = f"id={binascii.hexlify(key_id_bytes).decode()}"
+            if original_key_id_str:
                 target = f"id={original_key_id_str}"
-            elif key_label:
-                target = f"label={key_label!r}"
-            else:
-                target = "<?>"
             raise HSMError(
                 f"Private key not found ({target}). "
-                f"Confirm with tpm2_ptool listobjects / pkcs11-tool --list-objects "
-                f"(check CKA_LABEL/CKA_ID and that the session is USER-authenticated)."
+                f"Confirm with pkcs11-tool --list-objects / pkcs11-tool -O "
+                f"(check CKA_ID and that the session is USER-authenticated)."
             )
 
         # 6) Retrieve public key: prefer separate PUBLIC_KEY object by CKA_ID; fallback to private attrs
@@ -302,11 +356,8 @@ class HSMRSAPrivateKey(rsa.RSAPrivateKey):
             pub = None
             if kid is not None:
                 pub = self._find_one(object_class=self._ObjectClass.PUBLIC_KEY, id=kid)
-            if pub is None and key_label:
-                pub = self._find_one(object_class=self._ObjectClass.PUBLIC_KEY, label=key_label)
 
             if pub is None:
-                # last resort: try reading from private key object (may be disallowed)
                 n_bytes = _attr(self._priv, self._Attribute.MODULUS, None)
                 e_bytes = _attr(self._priv, self._Attribute.PUBLIC_EXPONENT, None)
                 if n_bytes and e_bytes:
@@ -373,7 +424,6 @@ class HSMRSAPrivateKey(rsa.RSAPrivateKey):
     def _find_one(self, **attrs: Any):
         """Return the first object matching attrs, mapping to concrete PKCS#11 Attributes."""
         try:
-            # Normalize to explicit Attribute.* keys (python-pkcs11 expects this on some builds)
             q = {}
             for k, v in attrs.items():
                 if k in ("object_class", "class"):
@@ -382,16 +432,11 @@ class HSMRSAPrivateKey(rsa.RSAPrivateKey):
                     if isinstance(v, str):
                         v = v.encode("ascii", "strict")
                     q[self._Attribute.ID] = v
-                elif k == "label":
-                    if isinstance(v, bytes):
-                        v = v.decode("utf-8", "ignore")
-                    q[self._Attribute.LABEL] = v
                 else:
                     q[k] = v
 
             it = self._session.get_objects(q)
 
-            # Return first match; drain iterator to avoid buggy __del__ warnings
             for obj in it:
                 try:
                     list(it)
@@ -421,17 +466,12 @@ class HSMRSAPrivateKey(rsa.RSAPrivateKey):
         Supports:
             - PKCS#1 v1.5 (SHA1/224/256/384/512)
             - RSASSA-PSS (SHA256/384/512) if supported by the HSM / token
-
-        For tokens like YubiKey PIV with CKA_ALWAYS_AUTHENTICATE, we rely on
-        python-pkcs11's "pin=" parameter, which internally performs a
-        CONTEXT_SPECIFIC login (C_Login) after SignInit() for that operation.
         """
         from pkcs11 import Mechanism
         from pkcs11.exceptions import UserNotLoggedIn
 
         pin = self._user_pin or None  # may be None if no PIN
 
-        # --- PKCS#1 v1.5 ---
         if isinstance(padding, asym_padding.PKCS1v15):
             mech = {
                 hashes.SHA1:   Mechanism.SHA1_RSA_PKCS,
@@ -444,17 +484,12 @@ class HSMRSAPrivateKey(rsa.RSAPrivateKey):
                 raise ValueError("Hash not supported for PKCS#1 v1.5")
 
             try:
-                # Newer python-pkcs11: supports pin= for ALWAYS_AUTHENTICATE keys
                 return self._priv.sign(data, mechanism=mech, pin=pin)
             except TypeError:
-                # Older python-pkcs11 without pin= support
                 return self._priv.sign(data, mechanism=mech)
             except UserNotLoggedIn:
-                # If the token still claims "not logged in", retry once
-                # (helps when the first C_Login consumed state)
                 return self._priv.sign(data, mechanism=mech, pin=pin)
 
-        # --- RSASSA-PSS ---
         if isinstance(padding, asym_padding.PSS):
             from pkcs11.util.rsa import RsaPssParams
 
@@ -497,9 +532,6 @@ class HSMRSAPrivateKey(rsa.RSAPrivateKey):
         Supports:
             - RSAES-PKCS1 v1.5
             - RSAES-OAEP (SHA1/224/256/384/512) if supported by the HSM / token
-
-        For ALWAYS_AUTHENTICATE private keys, we pass pin= to python-pkcs11
-        so it can perform a context-specific login for each decrypt operation.
         """
         from pkcs11 import Mechanism
         from pkcs11.util.rsa import RsaOaepParams
@@ -507,7 +539,6 @@ class HSMRSAPrivateKey(rsa.RSAPrivateKey):
 
         pin = self._user_pin or None
 
-        # --- PKCS#1 v1.5 ---
         if isinstance(padding, asym_padding.PKCS1v15):
             try:
                 return self._priv.decrypt(ciphertext, mechanism=Mechanism.RSA_PKCS, pin=pin)
@@ -516,9 +547,7 @@ class HSMRSAPrivateKey(rsa.RSAPrivateKey):
             except UserNotLoggedIn:
                 return self._priv.decrypt(ciphertext, mechanism=Mechanism.RSA_PKCS, pin=pin)
 
-        # --- OAEP ---
         if isinstance(padding, asym_padding.OAEP):
-            # cryptography stores OAEP hash on padding._mgf._algorithm
             hash_algo = getattr(padding._mgf, "_algorithm", None)
             hash_map = {
                 hashes.SHA1: Mechanism.SHA_1,
@@ -531,7 +560,7 @@ class HSMRSAPrivateKey(rsa.RSAPrivateKey):
             if mech_hash is None:
                 raise ValueError("OAEP hash not supported by the HSM")
 
-            params = RsaOaepParams(mech_hash, mech_hash, None)  # label=None, MGF1(hash)
+            params = RsaOaepParams(mech_hash, mech_hash, None)
 
             try:
                 return self._priv.decrypt(
