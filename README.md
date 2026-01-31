@@ -35,7 +35,7 @@ Instead, they are defined through **Python callbacks**.
 
 Each template is represented by an external module (e.g. `callbacks/user_template.py`) exposing two required functions:
 
-- **`define_template(app_conf, kerberos_user)`**  
+- **`define_template(app_conf, username)`**  
   → Dynamically describes the template properties (OID, EKU, KeyUsage, validity period, etc.) depending on the user or context.
 
 - **`emit_certificate(...)`**  
