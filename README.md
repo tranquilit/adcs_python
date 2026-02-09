@@ -21,9 +21,7 @@ The goal is to emulate an ADCS web enrollment server that:
 🚨 Limitations/Status
 ----------------------------------------------------------
 
-- Minimal testing
 - Not audited for security
-- Only tested in isolated **lab environments**
 - No guarantees of correctness or compatibility
 - Much of the code was created using AI.
 
