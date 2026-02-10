@@ -115,16 +115,16 @@ class SMIMECapabilities(a_core.SequenceOf):
     _child_spec = SMIMECapability
 
 
-class NtdsAttr(a_core.Sequence):
+class NtdsOtherNameInner(a_core.Sequence):
     _fields = [
-        ("attr_id", a_core.ObjectIdentifier),
-        ("attr_values", a_core.SetOf, {"spec": a_core.OctetString}),
+        ("type_id", a_core.ObjectIdentifier),               
+        ("value", a_core.Explicit(0, a_core.OctetString)),   
     ]
 
-
-class NtdsCASecurityExt(a_core.SequenceOf):
-    _child_spec = NtdsAttr
-
+class NtdsCASecurityExt(a_core.Sequence):
+    _fields = [
+        ("other_name", a_core.Explicit(0, NtdsOtherNameInner))
+    ]
 
 class PKIStatusInfo(a_core.Sequence):
     _fields = [
