@@ -378,13 +378,15 @@ def emit_certificate(
         builder = builder.add_extension(cx509.SubjectAlternativeName(names), critical=False)
 
     # ➕ dynamic NTDS (SID) (1.3.6.1.4.1.311.25.2 / ...2.1)
-    sid_bytes = bytes(sam_entry["objectSID"][0])
-    ntds_der = NtdsCASecurityExt([
-        NtdsAttr({
-            "attr_id": "1.3.6.1.4.1.311.25.2.1",  # ObjectSid
-            "attr_values": [a_core.OctetString(sid_bytes)],
-        })
-    ]).dump()
+	sid_str = samdbr.schema_format_value("objectSID", sam_entry["objectSID"][0])
+	sid_bytes = sid_str.encode("ascii")
+
+	ntds_der = NtdsCASecurityExt({
+		"other_name": {
+			"type_id": "1.3.6.1.4.1.311.25.2.1",
+			"value": sid_bytes,
+		}
+	}).dump()
     builder = builder.add_extension(
         cx509.UnrecognizedExtension(CObjectIdentifier("1.3.6.1.4.1.311.25.2"), ntds_der),
         critical=False
