@@ -449,6 +449,7 @@ def emit_certificate(
     # ✅ Apply static template extensions (EKU/KU/AppPolicies/TemplateInfo)
     builder = _apply_static_extensions(builder, template)
 
+    #https://elkement.art/2023/03/30/lord-of-the-sid-how-to-add-the-objectsid-attribute-to-a-certificate-manually/
     # ➕ dynamic NTDS (SID)
     sid_str = samdbr.schema_format_value("objectSID", sam_entry["objectSID"][0])
     sid_bytes = sid_str.encode("ascii")
