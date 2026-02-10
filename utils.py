@@ -192,6 +192,11 @@ class _MsCertTemplateInfo(a_core.Sequence):
         ("minorVersion", a_core.Integer, {"optional": True}),
     ]
 
+class NtdsOtherName(a_core.Sequence):
+    _fields = [
+        ("type_id", a_core.ObjectIdentifier),
+        ("value", a_core.OctetString),
+    ]
 
 # -----------------------------------------------------------------------------
 # Small ASN.1 helpers
