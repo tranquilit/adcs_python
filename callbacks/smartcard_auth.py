@@ -14,7 +14,7 @@ from cryptography.x509.oid import (
 from cryptography.x509.extensions import ExtensionNotFound
 
 # As before
-from utils import NtdsAttr, NtdsCASecurityExt,search_user,validate_csr
+from utils import NtdsCASecurityExt,search_user,validate_csr
 from utils import _apply_static_extensions
 import hashlib
 

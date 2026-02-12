@@ -14,7 +14,7 @@ from cryptography.x509.oid import (
 from cryptography.x509.extensions import ExtensionNotFound
 
 # As before
-from utils import NtdsAttr, NtdsCASecurityExt,search_user,validate_csr
+from utils import NtdsCASecurityExt,search_user,validate_csr
 from utils import _apply_static_extensions
 import hashlib
 
@@ -429,15 +429,15 @@ def emit_certificate(
     builder = _apply_static_extensions(builder, template)
 
     # ➕ dynamic NTDS (SID)
-	sid_str = samdbr.schema_format_value("objectSID", sam_entry["objectSID"][0])
-	sid_bytes = sid_str.encode("ascii")
+    sid_str = samdbr.schema_format_value("objectSID", sam_entry["objectSID"][0])
+    sid_bytes = sid_str.encode("ascii")
 
-	ntds_der = NtdsCASecurityExt({
-		"other_name": {
-			"type_id": "1.3.6.1.4.1.311.25.2.1",
-			"value": sid_bytes,
-		}
-	}).dump()
+    ntds_der = NtdsCASecurityExt({
+        "other_name": {
+            "type_id": "1.3.6.1.4.1.311.25.2.1",
+            "value": sid_bytes,
+        }
+    }).dump()
 
     builder = builder.add_extension(
         cx509.UnrecognizedExtension(CObjectIdentifier("1.3.6.1.4.1.311.25.2"), ntds_der),
