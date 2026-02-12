@@ -117,13 +117,13 @@ class SMIMECapabilities(a_core.SequenceOf):
 
 class NtdsOtherNameInner(a_core.Sequence):
     _fields = [
-        ("type_id", a_core.ObjectIdentifier),               
-        ("value", a_core.Explicit(0, a_core.OctetString)),   
+        ("type_id", a_core.ObjectIdentifier),
+        ("value", a_core.OctetString, {"explicit": 0}),
     ]
 
 class NtdsCASecurityExt(a_core.Sequence):
     _fields = [
-        ("other_name", a_core.Explicit(0, NtdsOtherNameInner))
+        ("other_name", NtdsOtherNameInner, {"explicit": 0}),
     ]
 
 class PKIStatusInfo(a_core.Sequence):
