@@ -449,21 +449,15 @@ def emit_certificate(
     # ✅ Apply static template extensions (EKU/KU/AppPolicies/TemplateInfo)
     builder = _apply_static_extensions(builder, template)
 
-    #https://elkement.art/2023/03/30/lord-of-the-sid-how-to-add-the-objectsid-attribute-to-a-certificate-manually/
-    # ➕ dynamic NTDS (SID)
-    sid_str = samdbr.schema_format_value("objectSID", sam_entry["objectSID"][0])
+    sid_str = samdbr.schema_format_value("objectSID", sam_entry["objectSID"][0]).decode('utf-8')
     sid_bytes = sid_str.encode("ascii")
     
     ntds_der = NtdsCASecurityExt({
         "other_name": {
             "type_id": "1.3.6.1.4.1.311.25.2.1",
-            "value": sid_bytes,
+            "value": {"value": sid_bytes}, 
         }
     }).dump()
-    builder = builder.add_extension(
-        cx509.UnrecognizedExtension(CObjectIdentifier("1.3.6.1.4.1.311.25.2"), ntds_der),
-        critical=False
-    )
 
     # (2) sign according to CA key type
     priv = ca["__key_obj"]
