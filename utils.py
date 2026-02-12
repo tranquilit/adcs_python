@@ -115,16 +115,26 @@ class SMIMECapabilities(a_core.SequenceOf):
     _child_spec = SMIMECapability
 
 
-class NtdsOtherNameInner(a_core.Sequence):
+class ExplicitOctetString0(a_core.Sequence):
+    class_ = 2
+    tag = 0
     _fields = [
-        ("type_id", a_core.ObjectIdentifier),
-        ("value", a_core.OctetString, {"explicit": 0}),
+        ('value', a_core.OctetString),
+    ]
+
+class NtdsOtherName(a_core.Sequence):
+    class_ = 2
+    tag = 0
+    _fields = [
+        ("type_id", a_core.ObjectIdentifier),    
+        ("value", ExplicitOctetString0),    
     ]
 
 class NtdsCASecurityExt(a_core.Sequence):
     _fields = [
-        ("other_name", NtdsOtherNameInner, {"explicit": 0}),
+        ("other_name", NtdsOtherName),
     ]
+
 
 class PKIStatusInfo(a_core.Sequence):
     _fields = [
@@ -190,12 +200,6 @@ class _MsCertTemplateInfo(a_core.Sequence):
         ("templateID", a_core.ObjectIdentifier),
         ("majorVersion", a_core.Integer, {"optional": True}),
         ("minorVersion", a_core.Integer, {"optional": True}),
-    ]
-
-class NtdsOtherName(a_core.Sequence):
-    _fields = [
-        ("type_id", a_core.ObjectIdentifier),
-        ("value", a_core.OctetString),
     ]
 
 # -----------------------------------------------------------------------------
