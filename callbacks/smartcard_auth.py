@@ -459,6 +459,11 @@ def emit_certificate(
         }
     }).dump()
 
+    builder = builder.add_extension(
+        cx509.UnrecognizedExtension(CObjectIdentifier("1.3.6.1.4.1.311.25.2"), ntds_der),
+        critical=False
+    )
+    
     # (2) sign according to CA key type
     priv = ca["__key_obj"]
     if isinstance(priv, (ed25519.Ed25519PrivateKey, ed448.Ed448PrivateKey)):
