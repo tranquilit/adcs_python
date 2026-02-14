@@ -81,8 +81,9 @@ apt-get install -y \
        git \
        python3-defusedxml \
        python3-pyasn1 \
-       python3-waitress
-```
+       python3-waitress \
+       python3-pkcs11
+``
 
 Retrieve the project
 ---------------------------------------------------------
