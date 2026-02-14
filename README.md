@@ -83,7 +83,7 @@ apt-get install -y \
        python3-pyasn1 \
        python3-waitress \
        python3-pkcs11
-``
+```
 
 Retrieve the project
 ---------------------------------------------------------
