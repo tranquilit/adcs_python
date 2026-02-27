@@ -10,12 +10,16 @@ ADCS TUI — Terminal application (SSH) à la “mc”
 • New certificate generation (key + cert) opens a dedicated window and uses utils.issue_cert_with_new_key.
 • Delete certificate (button + Del; Shift+Del permanent). Moves to .trash by default.
 • Shows whether a certificate is revoked (reads CRL).
-• Multi-selection:
-    - Space toggles selection marker [ ] / [X]
-    - Ctrl+A selects all FILTERED rows
-    - Esc clears selection
+
+Multi-selection:
+  - Space toggles selection marker [ ] / [X]
+  - Ctrl+A selects all FILTERED rows
+  - Esc clears selection
+  - Shift+Up / Shift+Down selects a range from anchor to cursor (plus Shift+Home/End)
   Revoke / Unrevoke / Delete apply to selected rows (or current if none selected).
-• Focus is preserved after selection and after actions (reselects highlighted row).
+
+Focus:
+  - Focus is preserved after selection and after actions (reselects highlighted row).
 
 Dependencies:
   pip install textual cryptography PyYAML
@@ -85,7 +89,6 @@ from utils_crt import (
 
 CERT_EXTS = {".crt", ".pem", ".cer"}
 
-# Columns now include selection box
 FULL_COLUMNS = ["Sel", "#", "Serial", "Subject", "Valid from", "Valid until",
                 "Days", "Revoked", "Signature", "Public Key", "SHA-256", "File"]
 COMPACT_COLUMNS = ["Sel", "#", "Serial", "Subject", "Valid until", "Days", "Revoked"]
@@ -354,6 +357,12 @@ class ADCSApp(App):
         Binding("space", "toggle_select", "Select"),
         Binding("escape", "clear_selection", "Clear sel"),
         Binding("ctrl+a", "select_all_filtered", "Select all"),
+
+        # --- Range selection (Shift + arrows/home/end) ---
+        Binding("shift+up", "range_up", "Range up", show=False),
+        Binding("shift+down", "range_down", "Range down", show=False),
+        Binding("shift+home", "range_home", "Range home", show=False),
+        Binding("shift+end", "range_end", "Range end", show=False),
     ]
 
     confadcs: Dict[str, Any] = {}
@@ -374,6 +383,9 @@ class ADCSApp(App):
 
     # Multi-selection state
     selected_filenames: reactive[Set[str]] = reactive(set)
+
+    # Range selection anchor
+    _range_anchor_filename: Optional[str] = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -425,8 +437,62 @@ class ADCSApp(App):
     def _request_reselect(self, filename: Optional[str]) -> None:
         self._pending_select_filename = filename
 
+    # ---------- range selection helpers ----------
+    def _ensure_range_anchor(self) -> Optional[str]:
+        """Ensure we have a range anchor; if none, use current row."""
+        if self._range_anchor_filename:
+            return self._range_anchor_filename
+        r = self._get_current_row()
+        if not r:
+            return None
+        self._range_anchor_filename = r.filename
+        return self._range_anchor_filename
+
+    def _select_range_between_visible(self, a_fn: str, b_fn: str) -> None:
+        """Select [a..b] range in the currently visible rows."""
+        rows = self.current_rows()
+        idx = {r.filename: i for i, r in enumerate(rows)}
+        if a_fn not in idx or b_fn not in idx:
+            return
+        a, b = idx[a_fn], idx[b_fn]
+        lo, hi = (a, b) if a <= b else (b, a)
+        for r in rows[lo:hi + 1]:
+            self.selected_filenames.add(r.filename)
+
+    def _range_move_and_select(self, move_fn_name: str) -> None:
+        """Move cursor (via DataTable action) then select anchor -> cursor."""
+        anchor = self._ensure_range_anchor()
+        if not anchor:
+            return
+
+        table = self._table()
+        try:
+            getattr(table, move_fn_name)()
+        except Exception:
+            pass
+
+        cur = self._get_current_row()
+        if not cur:
+            return
+
+        self._select_range_between_visible(anchor, cur.filename)
+        self._request_reselect(cur.filename)
+        self.refresh_table()
+
+    def action_range_up(self) -> None:
+        self._range_move_and_select("action_cursor_up")
+
+    def action_range_down(self) -> None:
+        self._range_move_and_select("action_cursor_down")
+
+    def action_range_home(self) -> None:
+        self._range_move_and_select("action_cursor_home")
+
+    def action_range_end(self) -> None:
+        self._range_move_and_select("action_cursor_end")
+
+    # ---------- filesystem helpers ----------
     def _find_cert_path_by_filename(self, ca: Dict[str, Any], filename: str) -> Optional[str]:
-        """Resolve a certificate absolute path by its filename within a CA storage."""
         certs_dir, _ = self._resolve_storage_paths(ca)
         for p in scan_cert_paths(certs_dir):  # utils
             if os.path.basename(p) == filename:
@@ -434,7 +500,6 @@ class ADCSApp(App):
         return None
 
     def _trashify(self, path: str) -> str:
-        """Return a timestamped path inside a local .trash folder next to the original file."""
         base_dir = os.path.dirname(path)
         trash_dir = os.path.join(base_dir, ".trash")
         os.makedirs(trash_dir, exist_ok=True)
@@ -442,7 +507,6 @@ class ADCSApp(App):
         return os.path.join(trash_dir, f"{os.path.basename(path)}.{ts}.trash")
 
     def _delete_pair(self, cert_path: str, permanent: bool, ca: Dict[str, Any]) -> tuple[int, int]:
-        """Delete (or move to trash) the certificate and its paired private key if present."""
         n_cert = 0
         n_key = 0
         if os.path.isfile(cert_path):
@@ -493,7 +557,6 @@ class ADCSApp(App):
         return all_rows[: self.max_rows]
 
     def _get_target_rows(self) -> List[CertRow]:
-        """Rows targeted by actions: selected rows if any; otherwise current row."""
         if self.selected_filenames:
             rows = self.filtered_rows()
             targets = [r for r in rows if r.filename in self.selected_filenames]
@@ -613,9 +676,10 @@ class ADCSApp(App):
             return
         self.current_ca = ca
 
-        # Safer: clear selection when changing CA
+        # Clear selection and anchor when switching CA
         self.selected_filenames.clear()
         self._pending_select_filename = None
+        self._range_anchor_filename = None
 
         crl_path = (ca.get("crl") or {}).get("path_crl")
         self.revoked_serials = revoked_serials_set(crl_path)  # utils
@@ -677,8 +741,7 @@ class ADCSApp(App):
             elif status == 'expired':
                 rows = [r for r in rows if r.days_to_expiry == 0]
 
-        rows = sorted(rows, key=lambda r: (r.not_before))
-        return rows
+        return sorted(rows, key=lambda r: (r.not_before))
 
     def refresh_table(self) -> None:
         """Rebuild the DataTable based on current (filtered/limited) rows, preserving focus."""
@@ -733,7 +796,7 @@ class ADCSApp(App):
                     r.filename,
                 )
 
-        # --- reselect logic (NO MORE row=0 forced) ---
+        # --- reselect logic (NO forced row=0) ---
         target_idx = 0
         if self._pending_select_filename:
             for idx, r in enumerate(rows):
@@ -742,7 +805,6 @@ class ADCSApp(App):
                     break
             self._pending_select_filename = None
         else:
-            # keep current cursor if possible
             try:
                 cur = getattr(table, "cursor_row", 0)
                 if isinstance(cur, int) and 0 <= cur < len(rows):
@@ -784,6 +846,8 @@ class ADCSApp(App):
         Space : Toggle selection [ ]/[X] on current row
         Ctrl+A : Select all (filtered)
         Esc : Clear selection
+        Shift+Up/Down : Range select from anchor
+        Shift+Home/End : Range select to start/end (visible)
 
         e : Export (selected if any; else filtered) to CSV in cwd
         r : Revoke selected certificates (or current row if none selected)
@@ -853,7 +917,7 @@ class ADCSApp(App):
             row_idx = 0
         return rows[row_idx]
 
-    # --- Multi-selection actions (preserve focus) ---
+    # --- Multi-selection actions (preserve focus + manage anchor) ---
     def action_toggle_select(self) -> None:
         cursor_fn = self._remember_cursor_filename()
 
@@ -861,10 +925,14 @@ class ADCSApp(App):
         if not r:
             return
         fn = r.filename
+
         if fn in self.selected_filenames:
             self.selected_filenames.remove(fn)
         else:
             self.selected_filenames.add(fn)
+
+        # update anchor to current row
+        self._range_anchor_filename = fn
 
         self._request_reselect(cursor_fn)
         self.refresh_table()
@@ -872,6 +940,7 @@ class ADCSApp(App):
     def action_clear_selection(self) -> None:
         cursor_fn = self._remember_cursor_filename()
         self.selected_filenames.clear()
+        self._range_anchor_filename = None
         self._request_reselect(cursor_fn)
         self.refresh_table()
 
@@ -879,6 +948,9 @@ class ADCSApp(App):
         cursor_fn = self._remember_cursor_filename()
         for r in self.filtered_rows():
             self.selected_filenames.add(r.filename)
+        # keep anchor as-is (or set to cursor)
+        if not self._range_anchor_filename:
+            self._range_anchor_filename = cursor_fn
         self._request_reselect(cursor_fn)
         self.refresh_table()
 
@@ -1276,7 +1348,6 @@ class ADCSApp(App):
 # -----------------------------
 
 def _build_arg_parser() -> argparse.ArgumentParser:
-    """Build the CLI parser for non-GUI utilities."""
     p = argparse.ArgumentParser(description="ADCS TUI / tools")
     p.add_argument("--confadcs", default="/etc/adcs/adcs.yaml",
                    help="Path to the adcs.yaml file (default: adcs.yaml next to this script)")
