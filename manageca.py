@@ -10,9 +10,12 @@ ADCS TUI — Terminal application (SSH) à la “mc”
 • New certificate generation (key + cert) opens a dedicated window and uses utils.issue_cert_with_new_key.
 • Delete certificate (button + Del; Shift+Del permanent). Moves to .trash by default.
 • Shows whether a certificate is revoked (reads CRL).
-• Multi-selection: Space toggles [ ]/[X]. Ctrl+A selects all (filtered). Esc clears selection.
-• Revoke / Unrevoke / Delete apply to selected rows (or current if none selected).
-• Keyboard: see help (press '?').
+• Multi-selection:
+    - Space toggles selection marker [ ] / [X]
+    - Ctrl+A selects all FILTERED rows
+    - Esc clears selection
+  Revoke / Unrevoke / Delete apply to selected rows (or current if none selected).
+• Focus is preserved after selection and after actions (reselects highlighted row).
 
 Dependencies:
   pip install textual cryptography PyYAML
@@ -80,15 +83,13 @@ from utils_crt import (
 # Model & parsing
 # =============================
 
-# Kept if other modules reference these extensions
 CERT_EXTS = {".crt", ".pem", ".cer"}
 
-# Columns for large and small layouts (NOW includes selection box)
+# Columns now include selection box
 FULL_COLUMNS = ["Sel", "#", "Serial", "Subject", "Valid from", "Valid until",
                 "Days", "Revoked", "Signature", "Public Key", "SHA-256", "File"]
 COMPACT_COLUMNS = ["Sel", "#", "Serial", "Subject", "Valid until", "Days", "Revoked"]
 
-# Default display limit (configurable via ADCS_MAX_ROWS)
 MAX_ROWS_DEFAULT = 10000
 
 
@@ -134,6 +135,7 @@ def row_from_cert(path: str) -> CertRow:
         pubkey_bits=pk_bits,
         sha256_fingerprint=fp,
     )
+
 
 # =============================
 # New Certificate Screen
@@ -304,6 +306,7 @@ class NewCertScreen(_BaseScreen[None]):
         )
         self.app.pop_screen()
 
+
 # =============================
 # TUI
 # =============================
@@ -312,6 +315,7 @@ class Status(Static):
     """Small helper widget to display bold status text."""
     def set_text(self, msg: str) -> None:
         self.update(f"[b]{msg}[/b]")
+
 
 class ADCSApp(App):
     CSS = """
@@ -362,14 +366,13 @@ class ADCSApp(App):
     filter_q: reactive[str] = reactive("")
     filter_status: reactive[str] = reactive("")
 
-    # Display limitation
     show_all_rows: reactive[bool] = reactive(False)
     max_rows: reactive[int] = reactive(MAX_ROWS_DEFAULT)
 
-    # === keep-focus support ===
+    # Keep-focus support: filename to reselect after refresh
     _pending_select_filename: Optional[str] = None
 
-    # === Multi-selection state ===
+    # Multi-selection state
     selected_filenames: reactive[Set[str]] = reactive(set)
 
     def compose(self) -> ComposeResult:
@@ -414,6 +417,13 @@ class ADCSApp(App):
             return self.query_one("#table", DataTable)
         except Exception:
             return None
+
+    def _remember_cursor_filename(self) -> Optional[str]:
+        r = self._get_current_row()
+        return r.filename if r else None
+
+    def _request_reselect(self, filename: Optional[str]) -> None:
+        self._pending_select_filename = filename
 
     def _find_cert_path_by_filename(self, ca: Dict[str, Any], filename: str) -> Optional[str]:
         """Resolve a certificate absolute path by its filename within a CA storage."""
@@ -467,7 +477,6 @@ class ADCSApp(App):
         return n_cert, n_key
 
     def _show_detail_current_row(self) -> None:
-        """Refresh the details pane based on the current highlighted row."""
         table = self._table()
         rows = self.current_rows()
         if not rows:
@@ -478,7 +487,6 @@ class ADCSApp(App):
         self.show_detail(rows[row_idx])
 
     def current_rows(self) -> List[CertRow]:
-        """Return the currently displayed list (limited or full)."""
         all_rows = self.filtered_rows()
         if self.show_all_rows or self.max_rows <= 0:
             return all_rows
@@ -487,7 +495,6 @@ class ADCSApp(App):
     def _get_target_rows(self) -> List[CertRow]:
         """Rows targeted by actions: selected rows if any; otherwise current row."""
         if self.selected_filenames:
-            # Prefer working on filtered_rows so Ctrl+A (filtered) is consistent
             rows = self.filtered_rows()
             targets = [r for r in rows if r.filename in self.selected_filenames]
             if targets:
@@ -497,7 +504,6 @@ class ADCSApp(App):
 
     # ---------- Responsive helpers ----------
     def _apply_layout_mode(self) -> None:
-        """Apply compact vs normal layout: columns, filter visibility, widths."""
         main = self.query_one("#main")
         left = self.query_one("#left")
         filters = self.query_one("#filters")
@@ -522,7 +528,6 @@ class ADCSApp(App):
         self.query_one(Status).set_text(f"{prefix}{ca_name}")
 
     def _auto_pick_layout(self) -> None:
-        """Auto-toggle compact layout depending on current terminal size."""
         w, h = self.size.width, self.size.height
         want_compact = (w < 120) or (h < 28)
         if want_compact != self.compact_mode:
@@ -531,9 +536,7 @@ class ADCSApp(App):
 
     # ---------- Init ----------
     def on_mount(self) -> None:
-        """Initial app setup: config, CA select, table columns, layout."""
         self.query_one(Status).set_text("Loading configuration…")
-        # Read display limit from environment if present
         try:
             env_limit = int(os.getenv("ADCS_MAX_ROWS", "") or "0")
             if env_limit > 0:
@@ -564,7 +567,6 @@ class ADCSApp(App):
         self.query_one(Status).set_text("Ready. Press '?' for help.")
 
     def on_resize(self, event) -> None:
-        """Re-evaluate layout on terminal resize."""
         try:
             self._auto_pick_layout()
         except Exception:
@@ -572,7 +574,6 @@ class ADCSApp(App):
 
     # ---------- DataTable columns ----------
     def ensure_table_columns(self) -> None:
-        """Ensure DataTable has the expected columns for the current layout."""
         table = self._table()
         expected = FULL_COLUMNS if not self.compact_mode else COMPACT_COLUMNS
 
@@ -606,14 +607,13 @@ class ADCSApp(App):
 
     # ---------- CA & data ----------
     def switch_ca(self, refid: int) -> None:
-        """Switch current CA by its internal reference id and reload data."""
         ca = self.confadcs["cas_by_refid"].get(refid)
         if not ca:
             self.notify("CA not found", severity="warning")
             return
         self.current_ca = ca
 
-        # safer: clear selection when switching CA
+        # Safer: clear selection when changing CA
         self.selected_filenames.clear()
         self._pending_select_filename = None
 
@@ -622,14 +622,12 @@ class ADCSApp(App):
         self.load_certs()
 
     def _resolve_storage_paths(self, ca: Dict[str, Any]) -> tuple[str, str]:
-        """Return (certs_dir, private_dir) for the given CA."""
         sp = ca.get("storage_paths", {}) or {}
         certs_dir = sp.get("certs_dir") or ca.get("__path_cert") or "."
         private_dir = sp.get("private_dir") or certs_dir
         return str(certs_dir), str(private_dir)
 
     def load_certs(self) -> None:
-        """Scan the CA storage and rebuild in-memory rows, then refresh table."""
         ca = self.current_ca
         if not ca:
             return
@@ -648,7 +646,7 @@ class ADCSApp(App):
             except Exception as e:
                 now = datetime.now(timezone.utc)
                 self.cert_rows.append(CertRow(
-                    filename=os.path.basename(p)+" (ERROR)",
+                    filename=os.path.basename(p) + " (ERROR)",
                     serial_nox="(error)",
                     subject=f"Error: {e}",
                     not_before=now, not_after=now,
@@ -661,7 +659,6 @@ class ADCSApp(App):
 
     # ---------- Filters & view ----------
     def filtered_rows(self) -> List[CertRow]:
-        """Apply text and status filters, then sort rows."""
         q = self.filter_q.lower().strip()
         status = self.filter_status
         rows = self.cert_rows
@@ -684,7 +681,7 @@ class ADCSApp(App):
         return rows
 
     def refresh_table(self) -> None:
-        """Rebuild the DataTable based on current (filtered/limited) rows."""
+        """Rebuild the DataTable based on current (filtered/limited) rows, preserving focus."""
         table = self._table()
         self.ensure_table_columns()
         try:
@@ -736,12 +733,29 @@ class ADCSApp(App):
                     r.filename,
                 )
 
+        # --- reselect logic (NO MORE row=0 forced) ---
+        target_idx = 0
+        if self._pending_select_filename:
+            for idx, r in enumerate(rows):
+                if r.filename == self._pending_select_filename:
+                    target_idx = idx
+                    break
+            self._pending_select_filename = None
+        else:
+            # keep current cursor if possible
+            try:
+                cur = getattr(table, "cursor_row", 0)
+                if isinstance(cur, int) and 0 <= cur < len(rows):
+                    target_idx = cur
+            except Exception:
+                pass
+
         if rows:
             try:
-                table.move_cursor(row=0, column=0)
+                table.move_cursor(row=target_idx, column=0)
             except Exception:
                 try:
-                    table.cursor_coordinate = (0, 0)
+                    table.cursor_coordinate = (target_idx, 0)
                 except Exception:
                     pass
             try:
@@ -760,7 +774,6 @@ class ADCSApp(App):
 
     # ---------- Actions ----------
     def action_help(self) -> None:
-        """Show a quick keyboard help popup."""
         msg = textwrap.dedent("""
         Keyboard shortcuts
         ------------------
@@ -772,7 +785,7 @@ class ADCSApp(App):
         Ctrl+A : Select all (filtered)
         Esc : Clear selection
 
-        e : Export current (selected if any; else filtered) list to CSV in cwd
+        e : Export (selected if any; else filtered) to CSV in cwd
         r : Revoke selected certificates (or current row if none selected)
         u : Unrevoke selected certificates (or current row if none selected)
         Del : Delete selected certificates (moves Cert & Key to .trash)
@@ -785,7 +798,7 @@ class ADCSApp(App):
         Tab / Shift+Tab : Move between left/right panes
         q : Quit
         """)
-        self.notify(msg, title="Help", severity="information", timeout=10)
+        self.notify(msg, title="Help", severity="information", timeout=12)
 
     def action_focus_search(self) -> None:
         self.query_one("#inp_q", Input).focus()
@@ -799,10 +812,12 @@ class ADCSApp(App):
         self._apply_layout_mode()
 
     def action_reload(self) -> None:
+        cursor_fn = self._remember_cursor_filename()
         ca = self.current_ca
         if ca:
             crl_path = (ca.get("crl") or {}).get("path_crl")
             self.revoked_serials = revoked_serials_set(crl_path)
+        self._request_reselect(cursor_fn)
         self.load_certs()
 
     def action_open_detail(self) -> None:
@@ -817,7 +832,8 @@ class ADCSApp(App):
         fn = f"certs_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         with open(fn, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
-            w.writerow(["serial","subject","valid_from","valid_until","days","revoked","signature","pubkey","pubkey_bits","sha256","filename"])
+            w.writerow(["serial", "subject", "valid_from", "valid_until", "days", "revoked",
+                        "signature", "pubkey", "pubkey_bits", "sha256", "filename"])
             for r in rows:
                 w.writerow([
                     r.serial_nox, r.subject, r.not_before.isoformat(), r.not_after.isoformat(), r.days_to_expiry,
@@ -837,8 +853,10 @@ class ADCSApp(App):
             row_idx = 0
         return rows[row_idx]
 
-    # --- Multi-selection actions ---
+    # --- Multi-selection actions (preserve focus) ---
     def action_toggle_select(self) -> None:
+        cursor_fn = self._remember_cursor_filename()
+
         r = self._get_current_row()
         if not r:
             return
@@ -847,19 +865,27 @@ class ADCSApp(App):
             self.selected_filenames.remove(fn)
         else:
             self.selected_filenames.add(fn)
+
+        self._request_reselect(cursor_fn)
         self.refresh_table()
 
     def action_clear_selection(self) -> None:
+        cursor_fn = self._remember_cursor_filename()
         self.selected_filenames.clear()
+        self._request_reselect(cursor_fn)
         self.refresh_table()
 
     def action_select_all_filtered(self) -> None:
+        cursor_fn = self._remember_cursor_filename()
         for r in self.filtered_rows():
             self.selected_filenames.add(r.filename)
+        self._request_reselect(cursor_fn)
         self.refresh_table()
 
     # --- Revoke / Unrevoke with multi-selection ---
     def action_revoke_current(self) -> None:
+        cursor_fn = self._remember_cursor_filename()
+
         ca = self.current_ca
         if not ca:
             self.notify("No CA selected.", severity="warning")
@@ -906,6 +932,7 @@ class ADCSApp(App):
         except Exception:
             pass
 
+        self._request_reselect(cursor_fn)
         self.load_certs()
 
         if fail == 0:
@@ -919,6 +946,8 @@ class ADCSApp(App):
             )
 
     def action_unrevoke_current(self) -> None:
+        cursor_fn = self._remember_cursor_filename()
+
         ca = self.current_ca
         if not ca:
             self.notify("No CA selected.", severity="warning")
@@ -965,6 +994,7 @@ class ADCSApp(App):
         except Exception:
             pass
 
+        self._request_reselect(cursor_fn)
         self.load_certs()
 
         if fail == 0:
@@ -978,6 +1008,8 @@ class ADCSApp(App):
             )
 
     def action_resign_crl(self) -> None:
+        cursor_fn = self._remember_cursor_filename()
+
         ca = self.current_ca
         if not ca:
             self.notify("No CA selected.", severity="warning")
@@ -1001,6 +1033,7 @@ class ADCSApp(App):
                 next_update_hours=self.confadcs['next_update_hours_crl']
             )
             self.revoked_serials = revoked_serials_set(crl_path)
+            self._request_reselect(cursor_fn)
             self.load_certs()
             self.notify(f"CRL re-signed (CRLNumber {new_num}) — {crl_path}", severity="success", timeout=6)
         except Exception as e:
@@ -1014,6 +1047,8 @@ class ADCSApp(App):
         self._delete_selected(permanent=True)
 
     def _delete_selected(self, permanent: bool) -> None:
+        cursor_fn = self._remember_cursor_filename()
+
         ca = self.current_ca
         if not ca:
             self.notify("No CA selected.", severity="warning")
@@ -1049,6 +1084,7 @@ class ADCSApp(App):
             except Exception:
                 deleted_fail += 1
 
+        self._request_reselect(cursor_fn)
         try:
             self.load_certs()
         except Exception:
@@ -1082,7 +1118,9 @@ class ADCSApp(App):
         self.set_focus_previous()
 
     def action_toggle_show_all_rows(self) -> None:
+        cursor_fn = self._remember_cursor_filename()
         self.show_all_rows = not self.show_all_rows
+        self._request_reselect(cursor_fn)
         self.refresh_table()
 
     # ---------- UI Events ----------
@@ -1093,18 +1131,24 @@ class ADCSApp(App):
             except Exception:
                 pass
         elif event.select.id == "sel_status":
+            cursor_fn = self._remember_cursor_filename()
             self.filter_status = event.value or ""
+            self._request_reselect(cursor_fn)
             self.refresh_table()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "inp_q":
+            cursor_fn = self._remember_cursor_filename()
             self.filter_q = event.value or ""
+            self._request_reselect(cursor_fn)
             self.refresh_table()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn_apply":
+            cursor_fn = self._remember_cursor_filename()
             q = self.query_one("#inp_q", Input).value or ""
             self.filter_q = q
+            self._request_reselect(cursor_fn)
             self.refresh_table()
         elif event.button.id == "btn_reload":
             self.action_reload()
@@ -1225,6 +1269,7 @@ class ADCSApp(App):
                 log.write_line(msg)
             else:
                 log.update(msg)
+
 
 # -----------------------------
 # CLI entrypoint
