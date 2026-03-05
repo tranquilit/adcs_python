@@ -145,6 +145,12 @@ mv /var/lib/adcs/pki/private/ica/testadcs.mydomain.lan.key.pem /etc/nginx/key.pe
 mv /var/lib/adcs/pki/certs/ica/testadcs.mydomain.lan.fullchain.pem /etc/nginx/crt.pem
 ```
 
+Restart Nginx: 
+
+```
+systemctl restart nginx
+```
+
 Join the Active Directory domain
 ---------------------------------------------------------
 
