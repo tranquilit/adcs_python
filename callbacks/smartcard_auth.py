@@ -34,8 +34,8 @@ def _is_member_of(sam_entry: dict, groups: Iterable[str]) -> bool:
 # 1) Template definition for CEP (dynamic per user)
 # ============================================================
 
-template_oid           = "1.3.6.1.4.1.311.21.8.999.1"
-template_name          = "adcswebuser"
+template_oid           = "1.3.6.1.4.1.311.21.8.942.1"
+template_name          = "adcswebuser_smartcard"
 template_major_version = 100
 template_minor_version = 3
 auto_enroll            = True
