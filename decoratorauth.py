@@ -13,7 +13,10 @@ def kerberos_authenticate(auth_header):
     context = None
     try:
         service = "HTTP@" + request.host.split(":")[0]
-        rc, context = kerberos.authGSSServerInit(service)
+        try:
+            rc, context = kerberos.authGSSServerInit(service)
+        except kerberos.GSSError:
+            rc, context = kerberos.authGSSServerInit(service.lower())
         if rc != kerberos.AUTH_GSS_COMPLETE:
             return None, None
 
