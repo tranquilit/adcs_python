@@ -12,7 +12,7 @@ def kerberos_authenticate(auth_header):
     token = auth_header[len("Negotiate "):]
     context = None
     try:
-        service = "HTTP@" + request.host.split(":")[0]
+        service = "HTTP@" + request.host.split(":")[0].lower()
         try:
             rc, context = kerberos.authGSSServerInit(service)
         except kerberos.GSSError:
