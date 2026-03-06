@@ -200,6 +200,8 @@ servicePrincipalName: HTTP/testadcs.mydomain.lan
 msDS-SupportedEncryptionTypes: 24
 ```
 
+Note that the URL must be in **lowercase**.
+
 - Generate the keytab:
 
 ```
