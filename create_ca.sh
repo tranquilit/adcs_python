@@ -18,8 +18,8 @@ export CA_CN="Root CA $ORG"
 export COUNTRY="FR"
 
 # CRL URIs
-export CRL_URI_ROOT="http://$LEAF_FQDN/crl/root/ca.crl.pem"
-export CRL_URI_ICA="http://$LEAF_FQDN/crl/ica/intermediate.crl.pem"
+export CRL_URI_ROOT="http://$LEAF_FQDN/crl/root/ca.crl"
+export CRL_URI_ICA="http://$LEAF_FQDN/crl/ica/intermediate.crl"
 
 # CERT URIs (assure-toi que /certs/... est servi en HTTP comme /crl/…)
 export CERT_URI_ROOT="http://$LEAF_FQDN/certs/root/ca.crt.pem"
@@ -104,7 +104,7 @@ crlDistributionPoints = URI:$CRL_URI_ROOT
 EOF
 
 # CRL Root
-openssl ca -config "$CA_DIR/openssl.cnf" -gencrl -out "$CA_DIR/crl/root/ca.crl.pem"
+openssl ca -config "$CA_DIR/openssl.cnf" -gencrl -out "$CA_DIR/crl/root/ca.crl"
 
 ### ====== Intermediate CA ======
 openssl genrsa -out "$CA_DIR/private/ica/ica.key.pem" 4096
@@ -167,7 +167,7 @@ authorityInfoAccess = caIssuers;URI:$CERT_URI_ICA
 EOF
 
 # CRL ICA
-openssl ca -config "$CA_DIR/openssl-ica.cnf" -gencrl -out "$CA_DIR/crl/ica/intermediate.crl.pem"
+openssl ca -config "$CA_DIR/openssl-ica.cnf" -gencrl -out "$CA_DIR/crl/ica/intermediate.crl"
 
 ### ====== Leaf (directement sous .../ica) ======
 # clé/CSR (SAN ajouté lors de la signature via v3_server)
@@ -201,8 +201,8 @@ echo " - Leaf key            : $CA_DIR/private/ica/$LEAF_FQDN.key.pem"
 echo " - Leaf CSR            : $CA_DIR/csr/ica/$LEAF_FQDN.csr.pem"
 echo " - Leaf cert           : $CA_DIR/certs/ica/$LEAF_FQDN.crt.pem (URI: $CERT_URI_LEAF)"
 echo " - Leaf fullchain      : $CA_DIR/certs/ica/$LEAF_FQDN.fullchain.pem (URI: $CERT_URI_LEAF_FULLCHAIN)"
-echo " - CRL Root            : $CA_DIR/crl/root/ca.crl.pem          (URI: $CRL_URI_ROOT)"
-echo " - CRL Intermediate    : $CA_DIR/crl/ica/intermediate.crl.pem (URI: $CRL_URI_ICA)"
+echo " - CRL Root            : $CA_DIR/crl/root/ca.crl          (URI: $CRL_URI_ROOT)"
+echo " - CRL Intermediate    : $CA_DIR/crl/ica/intermediate.crl (URI: $CRL_URI_ICA)"
 echo " - Newcerts Root (ICA) : $CA_DIR/newcerts/root"
 echo " - Newcerts ICA (Leaf) : $CA_DIR/newcerts/ica"
 

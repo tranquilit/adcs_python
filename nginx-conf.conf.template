@@ -61,7 +61,7 @@ server {
     add_header Strict-Transport-Security "max-age=63072000" always;
 
     ssl_client_certificate "/var/lib/adcs/pki/certs/ica/ica-chain.pem";
-    ssl_crl                "/var/lib/adcs/pki/crl/ica/intermediate.crl.pem";
+    ssl_crl                "/var/lib/adcs/pki/crl/ica/intermediate.crl";
     proxy_set_header X-Ssl-Authenticated $ssl_client_verify;
     proxy_set_header X-Ssl-Client-Dn $ssl_client_s_dn;
     proxy_set_header X-Ssl-Client-Sha1 $ssl_client_fingerprint;

@@ -14,7 +14,7 @@ cas:
   - id: "ca1-inter"
     display_name: "Intermediate CA"
     urls:
-      crl_http:        "http://testadcs.mydomain.lan/crl/ica/intermediate.crl.pem"
+      crl_http:        "http://testadcs.mydomain.lan/crl/ica/intermediate.crl"
       ca_issuers_http: "http://testadcs.mydomain.lan/certs/ica/ica.crt.pem"
     pem:
       certificate_path_pem: /var/lib/adcs/pki/certs/ica/ica.crt.pem
@@ -22,7 +22,7 @@ cas:
       key_passphrase: null
 
     crl:
-      path_crl: /var/lib/adcs/pki/crl/ica/intermediate.crl.pem
+      path_crl: /var/lib/adcs/pki/crl/ica/intermediate.crl
 
     storage_paths:
       cert_dir: /var/lib/adcs/pki/newcerts/ica/
@@ -43,7 +43,7 @@ cas:
   - id: "ca1-root"
     display_name: "root CA"
     urls:
-      crl_http:        "http://testadcs.mydomain.lan/crl/root/ca.crl.pem"
+      crl_http:        "http://testadcs.mydomain.lan/crl/root/ca.crl"
       ca_issuers_http: "http://testadcs.mydomain.lan/certs/root/ca.crt.pem"
 
     pem:
@@ -52,7 +52,7 @@ cas:
       key_passphrase: null
 
     crl:
-      path_crl: /var/lib/adcs/pki/crl/root/root.crl.pem
+      path_crl: /var/lib/adcs/pki/crl/root/root.crl
 
     storage_paths:
       cert_dir: /var/lib/adcs/pki/newcerts/root/
