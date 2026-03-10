@@ -80,7 +80,8 @@ from utils_crt import (
     revoked_serials_set,
     _cmd_rotate_if_expiring,
     _cli_find_ca_by_id,
-    _cmd_resign_crl
+    _cmd_resign_crl,
+    _cmd_create_ca
 )
 
 # =============================
@@ -1353,8 +1354,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="Path to the adcs.yaml file (default: adcs.yaml next to this script)")
     p.add_argument("--resign-crl", action="store_true",
                    help="Re-sign the CRL of the specified CA and exit (no GUI).")
+    p.add_argument("--create-ca", action="store_true",
+                   help="Create a new CA certificate, private key and an empty CRL, then exit (no GUI).")
     p.add_argument("--ca-id", type=str,
-                   help="CA identifier as defined in adcs.yaml (field 'id' or 'display_name').")
+                   help="When used with --create-ca or --resign-crl: CA identifier as defined in adcs.yaml (field 'id' or 'display_name'). For --create-ca, this is the parent CA; if omitted, the new CA is self-signed.")
     p.add_argument("--no-bump-number", action="store_true",
                    help="Do not increment CRLNumber when re-signing (keep the same number).")
     p.add_argument("--next-update-hours", default=None,
@@ -1362,9 +1365,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--rotate-if-expiring", action="store_true",
                    help="If the given certificate expires in ≤ threshold-days, re-issue a new key+cert with same SAN/CN using --ca-id and overwrite --crt-path/--key-path.")
     p.add_argument("--crt-path", type=str,
-                   help="Path to the existing certificate (PEM) to check/replace.")
+                   help="Certificate path (PEM). With --create-ca, path where the new CA certificate will be written.")
     p.add_argument("--key-path", type=str,
-                   help="Path to the existing private key (PEM) to replace.")
+                   help="Private key path (PEM). With --create-ca, path where the new CA key will be written.")
+    p.add_argument("--cem-path", "--crl-path", dest="cem_path", type=str,
+                   help="CRL path (PEM). With --create-ca, path where the initial CRL will be written.")
     p.add_argument("--threshold-days", type=int, default=30,
                    help="Rotate when the certificate expires in ≤ this many days (default: 30).")
     p.add_argument("--chain", action="append",
@@ -1382,6 +1387,21 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 if __name__ == "__main__":
     parser = _build_arg_parser()
     args, unknown = parser.parse_known_args()
+
+    if args.create_ca:
+        if not args.crt_path or not args.key_path or not args.cem_path:
+            print("ERROR: --crt-path, --key-path and --cem-path are required with --create-ca", file=sys.stderr)
+            sys.exit(1)
+        confadcs = load_yaml_conf(args.confadcs) if args.ca_id else None
+        rc = _cmd_create_ca(
+            ca_id=args.ca_id,
+            crt_path=args.crt_path,
+            key_path=args.key_path,
+            crl_path=args.cem_path,
+            valid_days=args.valid_days if args.valid_days else 3650,
+            conf=confadcs,
+        )
+        sys.exit(rc)
 
     if args.rotate_if_expiring:
         if not args.ca_id:

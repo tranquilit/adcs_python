@@ -701,6 +701,194 @@ def _cli_find_ca_by_id(conf: Dict[str, Any], ca_id: str) -> Optional[Dict[str, A
             return ca
     return None
 
+
+
+def _guess_ca_common_name(crt_path: str, key_path: str, crl_path: str, parent_ca_id: Optional[str] = None) -> str:
+    """Guess a reasonable CN for a new CA from the output file paths."""
+    candidates = []
+    for path in (crt_path, key_path, crl_path):
+        if not path:
+            continue
+        name = os.path.basename(path)
+        for suffix in ('.crt.pem', '.key.pem', '.crl.pem', '.pem', '.crt', '.key', '.crl', '.cer'):
+            if name.endswith(suffix):
+                name = name[:-len(suffix)]
+                break
+        if name:
+            candidates.append(name)
+    if candidates:
+        first = candidates[0]
+        if all(c == first for c in candidates):
+            return first
+        common = os.path.commonprefix(candidates).strip('._-')
+        if common:
+            return common
+        return first
+    return parent_ca_id or 'ca'
+
+
+def create_ca(
+    crt_path: str,
+    key_path: str,
+    crl_path: str,
+    valid_days: int = 3650,
+    parent_ca: Optional[Dict[str, Any]] = None,
+    common_name: Optional[str] = None,
+):
+    """Create a new CA certificate/key and initialize an empty CRL.
+
+    If parent_ca is None, the CA is self-signed. Otherwise the new CA is issued by parent_ca.
+    Returns a small metadata dict describing what was created.
+    """
+    cn = (common_name or _guess_ca_common_name(crt_path, key_path, crl_path, parent_ca.get('id') if parent_ca else None)).strip()
+    if not cn:
+        raise ValueError('Could not determine Common Name for the new CA.')
+    if int(valid_days) <= 0:
+        raise ValueError('--valid-days must be a positive integer.')
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=4096)
+    subject = cx509.Name([
+        cx509.NameAttribute(cx509.NameOID.COMMON_NAME, cn),
+    ])
+
+    now = datetime.now(timezone.utc)
+    issuer_name = subject
+    signer_key = key
+    issuer_cert = None
+    is_self_signed = parent_ca is None
+
+    if parent_ca is not None:
+        issuer_name = cx509.load_der_x509_certificate(parent_ca['__certificate_der']).subject
+        issuer_cert = cx509.load_der_x509_certificate(parent_ca['__certificate_der'])
+        signer_key = parent_ca['__key_obj']
+
+    builder = (
+        cx509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer_name)
+        .public_key(key.public_key())
+        .serial_number(cx509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=5))
+        .not_valid_after(now + timedelta(days=int(valid_days)))
+        .add_extension(cx509.BasicConstraints(ca=True, path_length=0), critical=True)
+        .add_extension(cx509.KeyUsage(
+            digital_signature=False,
+            content_commitment=False,
+            key_encipherment=False,
+            data_encipherment=False,
+            key_agreement=False,
+            key_cert_sign=True,
+            crl_sign=True,
+            encipher_only=False,
+            decipher_only=False,
+        ), critical=True)
+        .add_extension(cx509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
+    )
+
+    if is_self_signed:
+        builder = builder.add_extension(
+            cx509.AuthorityKeyIdentifier.from_issuer_public_key(key.public_key()), critical=False
+        )
+    else:
+        try:
+            builder = builder.add_extension(
+                cx509.AuthorityKeyIdentifier.from_issuer_public_key(issuer_cert.public_key()), critical=False
+            )
+        except Exception:
+            pass
+        urls = (parent_ca.get('urls') or {}) if parent_ca else {}
+        crl_http = urls.get('crl_http')
+        ca_issuers_http = urls.get('ca_issuers_http')
+        if crl_http:
+            builder = builder.add_extension(
+                cx509.CRLDistributionPoints([
+                    cx509.DistributionPoint(
+                        full_name=[cx509.UniformResourceIdentifier(str(crl_http))],
+                        relative_name=None,
+                        reasons=None,
+                        crl_issuer=None,
+                    )
+                ]),
+                critical=False,
+            )
+        if ca_issuers_http:
+            builder = builder.add_extension(
+                cx509.AuthorityInformationAccess([
+                    cx509.AccessDescription(
+                        cx509.AuthorityInformationAccessOID.CA_ISSUERS,
+                        cx509.UniformResourceIdentifier(str(ca_issuers_http)),
+                    )
+                ]),
+                critical=False,
+            )
+
+    cert = builder.sign(private_key=signer_key, algorithm=hashes.SHA256())
+
+    key_pem = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    cert_pem = cert.public_bytes(serialization.Encoding.PEM)
+
+    for path in (crt_path, key_path, crl_path):
+        dirn = os.path.dirname(path) or '.'
+        os.makedirs(dirn, exist_ok=True)
+
+    _atomic_write(key_path, key_pem, mode=stat.S_IRUSR | stat.S_IWUSR)
+    _atomic_write(crt_path, cert_pem)
+
+    crl_builder = (
+        cx509.CertificateRevocationListBuilder()
+        .issuer_name(cert.subject)
+        .last_update(now)
+        .next_update(now + timedelta(days=7))
+        .add_extension(cx509.CRLNumber(1), critical=False)
+    )
+    try:
+        crl_builder = crl_builder.add_extension(
+            cx509.AuthorityKeyIdentifier.from_issuer_public_key(key.public_key()), critical=False
+        )
+    except Exception:
+        pass
+    crl = crl_builder.sign(private_key=key, algorithm=hashes.SHA256())
+    _write_crl_file(crl_path, crl.public_bytes(encoding=serialization.Encoding.PEM))
+    _write_sidecar_num(_crlnum_sidecar_path(crl_path), 1)
+
+    return {
+        'common_name': cn,
+        'self_signed': is_self_signed,
+        'crt_path': crt_path,
+        'key_path': key_path,
+        'crl_path': crl_path,
+        'issuer': cn if is_self_signed else str(parent_ca.get('id') or parent_ca.get('display_name')),
+    }
+
+
+def _cmd_create_ca(ca_id: Optional[str], crt_path: str, key_path: str, crl_path: str, valid_days: int = 3650, conf=None) -> int:
+    parent_ca = None
+    if ca_id:
+        if conf is None:
+            raise ValueError('Configuration is required when --ca-id is used.')
+        parent_ca = _cli_find_ca_by_id(conf, ca_id)
+        if not parent_ca:
+            print(f"ERROR: parent CA '{ca_id}' not found in adcs.yaml", file=sys.stderr)
+            return 3
+
+    result = create_ca(
+        crt_path=crt_path,
+        key_path=key_path,
+        crl_path=crl_path,
+        valid_days=valid_days,
+        parent_ca=parent_ca,
+    )
+    mode = 'self-signed' if result['self_signed'] else f"child of '{result['issuer']}'"
+    print(
+        f"CA created: CN='{result['common_name']}', mode={mode}, "
+        f"cert='{result['crt_path']}', key='{result['key_path']}', crl='{result['crl_path']}'"
+    )
+    return 0
+
 def _cmd_resign_crl(ca_id: str, next_update_hours: int = 8, bump_number: bool = True,conf=None) -> int:
 
     ca = _cli_find_ca_by_id(conf, ca_id)
