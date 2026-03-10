@@ -708,16 +708,22 @@ def _cmd_rotate_if_expiring(
     )
 
     _atomic_write(os.path.join(cert_storage_dir, f"{request_id}.pem"), cert_pem)
-    _atomic_write(crt_path, cert_pem)
 
-    if chain_paths:
-        chain_bytes = _read_all_bytes(chain_paths)
-        fullchain = cert_pem + chain_bytes
-        target_path = fullchain_path or crt_path
-        _atomic_write(target_path, fullchain)
+    fullchain = _compose_fullchain_pem(
+        cert_pem,
+        conf=conf,
+        ca=ca,
+        chain_paths=chain_paths,
+    )
+    
+    if write_fullchain_to_crt:
+        _atomic_write(crt_path, fullchain)
     else:
         _atomic_write(crt_path, cert_pem)
-
+    
+    if fullchain_path:
+        _atomic_write(fullchain_path, fullchain)
+    
     _atomic_write(os.path.join(private_storage_dir, f"{request_id}.key.pem"), key_pem, mode=stat.S_IRUSR | stat.S_IWUSR)
     _atomic_write(key_path, key_pem, mode=stat.S_IRUSR | stat.S_IWUSR)
 
@@ -807,7 +813,7 @@ def create_ca(
         .serial_number(cx509.random_serial_number())
         .not_valid_before(now - timedelta(minutes=5))
         .not_valid_after(now + timedelta(days=int(valid_days)))
-        .add_extension(cx509.BasicConstraints(ca=True, path_length=0), critical=True)
+        .add_extension(cx509.BasicConstraints(ca=True, path_length=None), critical=True)
         .add_extension(cx509.KeyUsage(
             digital_signature=False,
             content_commitment=False,
@@ -1007,3 +1013,71 @@ def _read_all_bytes(paths: list[str]) -> bytes:
             if not out.endswith(b"\n"):
                 out += b"\n"
     return out
+
+def _build_ca_chain_pem(conf: Dict[str, Any], ca: Dict[str, Any]) -> bytes:
+    """
+    Return CA certificates as PEM bytes, starting with the current CA certificate,
+    then its issuer, and so on up to the root.
+    """
+    if not conf or not ca:
+        return b""
+
+    out = b""
+    seen_ids: Set[str] = set()
+    current = ca
+
+    while current:
+        current_id = str(current.get("id"))
+        if current_id in seen_ids:
+            raise ValueError(
+                f"issuer_ca_id loop detected while resolving chain for CA '{ca.get('id')}'"
+            )
+        seen_ids.add(current_id)
+
+        current_pem = current.get("__certificate_pem")
+        if current_pem is None:
+            cert_path = ((current.get("pem") or {}).get("certificate_path_pem"))
+            if not cert_path:
+                raise ValueError(
+                    f"Missing pem.certificate_path_pem for CA '{current_id}'"
+                )
+            with open(cert_path, "r", encoding="utf-8") as f:
+                current_pem = f.read()
+
+        current_pem_bytes = (
+            current_pem.encode("utf-8") if isinstance(current_pem, str) else current_pem
+        )
+        out += current_pem_bytes
+        if not out.endswith(b"\n"):
+            out += b"\n"
+
+        issuer_ca_id = current.get("issuer_ca_id")
+        if not issuer_ca_id:
+            break
+
+        issuer_key = str(issuer_ca_id)
+        issuer_ca = _cli_find_ca_by_id(conf, issuer_key)
+        if not issuer_ca:
+            raise ValueError(f"issuer CA '{issuer_key}' not found in configuration")
+
+        current = issuer_ca
+
+    return out
+
+def _compose_fullchain_pem(
+    cert_pem: bytes,
+    conf: Optional[Dict[str, Any]] = None,
+    ca: Optional[Dict[str, Any]] = None,
+    chain_paths: Optional[list[str]] = None,
+) -> bytes:
+    fullchain = cert_pem
+    if fullchain and not fullchain.endswith(b"\n"):
+        fullchain += b"\n"
+
+    if conf and ca:
+        fullchain += _build_ca_chain_pem(conf, ca)
+
+    if chain_paths:
+        fullchain += _read_all_bytes(chain_paths)
+
+    return fullchain

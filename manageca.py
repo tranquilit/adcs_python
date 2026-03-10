@@ -83,6 +83,7 @@ from utils_crt import (
     _cli_find_ca_by_id,
     _cmd_resign_crl,
     _cmd_create_ca,
+    _compose_fullchain_pem
 )
 
 # =============================
@@ -219,8 +220,14 @@ def _cmd_issue_cert_cli(
         if key_parent:
             os.makedirs(key_parent, exist_ok=True)
 
+        fullchain_pem = _compose_fullchain_pem(
+            cert_pem,
+            conf=conf,
+            ca=ca,
+        )
+
         with open(crt_path, "wb") as f:
-            f.write(cert_pem)
+            f.write(fullchain_pem)
 
         with open(key_path, "wb") as f:
             f.write(key_pem)
