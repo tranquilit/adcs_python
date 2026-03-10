@@ -32,6 +32,7 @@ CLI (no GUI):
 """
 from __future__ import annotations
 import uuid
+import shutil
 import os
 import sys
 import csv
@@ -208,15 +209,16 @@ def _cmd_issue_cert_cli(
         )
 
         request_id = uuid.uuid4().int
-        if not crt_path:
-            crt_path = os.path.join(certs_dir, f"{request_id}.pem")
+        storage_crt_path = os.path.join(certs_dir, f"{request_id}.pem")
         if not key_path:
             key_path = os.path.join(private_dir, f"{request_id}.key.pem")
 
-        crt_parent = os.path.dirname(os.path.abspath(crt_path))
+        if crt_path:
+            crt_parent = os.path.dirname(os.path.abspath(crt_path))
+            if crt_parent:
+                os.makedirs(crt_parent, exist_ok=True)
+
         key_parent = os.path.dirname(os.path.abspath(key_path))
-        if crt_parent:
-            os.makedirs(crt_parent, exist_ok=True)
         if key_parent:
             os.makedirs(key_parent, exist_ok=True)
 
@@ -226,8 +228,11 @@ def _cmd_issue_cert_cli(
             ca=ca,
         )
 
-        with open(crt_path, "wb") as f:
+        with open(storage_crt_path, "wb") as f:
             f.write(fullchain_pem)
+
+        if crt_path:
+            shutil.copy2(storage_crt_path, crt_path)
 
         with open(key_path, "wb") as f:
             f.write(key_pem)
@@ -238,11 +243,13 @@ def _cmd_issue_cert_cli(
             pass
 
         print("Certificate issued successfully")
-        print(f"CA:   {ca.get('display_name') or ca.get('id')}")
-        print(f"CN:   {common_name.strip()}")
-        print(f"CERT: {crt_path}")
-        print(f"KEY:  {key_path}")
-        print(f"RSA:  {int(rsa_bits)} bits")
+        print(f"CA:          {ca.get('display_name') or ca.get('id')}")
+        print(f"CN:          {common_name.strip()}")
+        print(f"STORED CERT: {storage_crt_path}")
+        if crt_path:
+            print(f"COPIED CERT: {crt_path}")
+        print(f"KEY:         {key_path}")
+        print(f"RSA:         {int(rsa_bits)} bits")
         if subject_sans:
             print(f"SAN:  {', '.join(subject_sans)}")
 
