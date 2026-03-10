@@ -1460,7 +1460,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="Common Name for --issue-cert.")
     p.add_argument("--san", action="append",
                    help="SAN entry or comma-separated SAN list for --issue-cert. Repeat the option if needed.")
-    p.add_argument("--rsa-bits", type=int, default=2048,
+    p.add_argument("--rsa-bits", type=int, default=None,
                    help="RSA key size for --issue-cert and --create-ca (2048/3072/4096; default: 2048).")
     p.add_argument("--no-bump-number", action="store_true",
                    help="Do not increment CRLNumber when re-signing (keep the same number).")
@@ -1493,21 +1493,40 @@ if __name__ == "__main__":
     args, unknown = parser.parse_known_args()
 
     if args.create_ca:
-        if not args.crt_path or not args.key_path or not args.crl_path:
-            print("ERROR: --crt-path, --key-path and --crl-path are required with --create-ca", file=sys.stderr)
-            sys.exit(1)
         if not args.cn:
             print("ERROR: --cn is required", file=sys.stderr)
             sys.exit(1)
 
+        cn = args.cn
+
+        if not args.crt_path:
+            crt_path = f"/var/lib/adcs/pki/certs/{cn}/{cn}.crt.pem"
+        else:
+            crt_path = args.crt_path
+
+        if not args.key_path:
+            key_path = f"/var/lib/adcs/pki/private/{cn}/{cn}.key.pem"
+        else:
+            key_path = args.key_path
+
+        if not args.crl_path:
+            crl_path = f"/var/lib/adcs/pki/crl/{cn}/{cn}.crl"
+        else:
+            crl_path = args.crl_path
+
+        if not args.rsa_bits:
+            rsa_bits = 4096
+        else:
+            rsa_bits = int(args.rsa_bits)
+
         confadcs = load_yaml_conf(args.confadcs) if args.ca_id else None
         rc = _cmd_create_ca(
             ca_id=args.ca_id,
-            crt_path=args.crt_path,
-            key_path=args.key_path,
-            crl_path=args.crl_path,
+            crt_path=crt_path,
+            key_path=key_path,
+            crl_path=crl_path,
             valid_days=args.valid_days if args.valid_days else 3650,
-            rsa_key_size=int(args.rsa_bits),
+            rsa_key_size=rsa_bits,
             conf=confadcs,
             cn=args.cn
         )
@@ -1521,12 +1540,17 @@ if __name__ == "__main__":
             print("ERROR: --cn is required with --issue-cert", file=sys.stderr)
             sys.exit(1)
 
+        if not args.rsa_bits:
+            rsa_bits = 3072
+        else:
+            rsa_bits = int(args.rsa_bits)
+
         confadcs = load_yaml_conf(args.confadcs)
         rc = _cmd_issue_cert_cli(
             ca_id=args.ca_id,
             common_name=args.cn,
             sans=args.san,
-            rsa_bits=int(args.rsa_bits),
+            rsa_bits=rsa_bits,
             valid_days=args.valid_days if args.valid_days else 365,
             conf=confadcs,
             crt_path=args.crt_path,
