@@ -9,6 +9,7 @@ import tempfile
 import sys
 import stat
 import uuid
+import shutil
 from typing import Tuple, Iterable, List, Optional, Dict, Any, Set
 from datetime import datetime, timezone, timedelta
 
@@ -601,6 +602,48 @@ def _atomic_write(path: str, data: bytes, mode=None) -> None:
             pass
 
 
+def _copy_if_different(src: str, dst: Optional[str], mode: Optional[int] = None) -> None:
+    if not dst:
+        return
+
+    src_abs = os.path.abspath(src)
+    dst_abs = os.path.abspath(dst)
+
+    if src_abs == dst_abs:
+        return
+
+    dirn = os.path.dirname(dst_abs) or "."
+    os.makedirs(dirn, exist_ok=True)
+    shutil.copy2(src_abs, dst_abs)
+
+    if mode is not None:
+        try:
+            os.chmod(dst_abs, mode)
+        except Exception:
+            pass
+
+
+def _resolve_storage_paths_from_ca(ca: Dict[str, Any]) -> Tuple[str, str]:
+    storage = ca.get("storage_paths", {}) or {}
+
+    certs_dir = (
+        storage.get("cert_dir")
+        or storage.get("certs_dir")
+        or ca.get("__path_cert")
+    )
+    private_dir = (
+        storage.get("private_dir")
+        or os.path.dirname(ca.get("__path_key") or "")
+    )
+
+    if not certs_dir:
+        raise KeyError(f"Missing storage_paths.cert_dir/certs_dir for CA '{ca.get('id')}'")
+    if not private_dir:
+        raise KeyError(f"Missing storage_paths.private_dir for CA '{ca.get('id')}'")
+
+    return certs_dir, private_dir
+
+
 def _cmd_rotate_if_expiring(
     ca_id: str,
     crt_path: str,
@@ -869,6 +912,11 @@ def _cmd_create_ca(
     conf=None
 ) -> int:
     parent_ca = None
+    effective_crt_path = crt_path
+    effective_key_path = key_path
+    user_crt_path = crt_path
+    user_key_path = key_path
+
     if ca_id:
         if conf is None:
             raise ValueError('Configuration is required when --ca-id is used.')
@@ -877,19 +925,47 @@ def _cmd_create_ca(
             print(f"ERROR: parent CA '{ca_id}' not found in adcs.yaml", file=sys.stderr)
             return 3
 
+        certs_dir, private_dir = _resolve_storage_paths_from_ca(parent_ca)
+        os.makedirs(certs_dir, exist_ok=True)
+        os.makedirs(private_dir, exist_ok=True)
+
+        request_id = uuid.uuid4().int
+        effective_crt_path = os.path.join(certs_dir, f"{request_id}.pem")
+        effective_key_path = os.path.join(private_dir, f"{request_id}.key.pem")
+        
     result = create_ca(
-        crt_path=crt_path,
-        key_path=key_path,
+        crt_path=effective_crt_path,
+        key_path=effective_key_path,
         crl_path=crl_path,
         valid_days=valid_days,
         parent_ca=parent_ca,
         rsa_key_size=rsa_key_size,
     )
+
+    if ca_id:
+        _copy_if_different(
+            effective_crt_path,
+            user_crt_path,
+            mode=None,
+        )
+        _copy_if_different(
+            effective_key_path,
+            user_key_path,
+            mode=stat.S_IRUSR | stat.S_IWUSR,
+        )
+
     mode = 'self-signed' if result['self_signed'] else f"child of '{result['issuer']}'"
     print(
         f"CA created: CN='{result['common_name']}', mode={mode}, rsa={int(rsa_key_size)} bits, "
-        f"cert='{result['crt_path']}', key='{result['key_path']}', crl='{result['crl_path']}'"
+        f"cert='{effective_crt_path}', key='{effective_key_path}', crl='{result['crl_path']}'"
     )
+
+    if ca_id:
+        if os.path.abspath(user_crt_path) != os.path.abspath(effective_crt_path):
+            print(f"CERT COPY: {user_crt_path}")
+        if os.path.abspath(user_key_path) != os.path.abspath(effective_key_path):
+            print(f"KEY COPY:  {user_key_path}")
+
     return 0
 
 

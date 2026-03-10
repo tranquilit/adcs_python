@@ -1465,7 +1465,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="Certificate path (PEM). With --create-ca, path where the new CA certificate will be written.")
     p.add_argument("--key-path", type=str,
                    help="Private key path (PEM). With --create-ca, path where the new CA key will be written.")
-    p.add_argument("--cem-path", "--crl-path", dest="cem_path", type=str,
+    p.add_argument("--crl-path", "--crl-path", dest="crl_path", type=str,
                    help="CRL path (PEM). With --create-ca, path where the initial CRL will be written.")
     p.add_argument("--threshold-days", type=int, default=30,
                    help="Rotate when the certificate expires in ≤ this many days (default: 30).")
@@ -1486,15 +1486,15 @@ if __name__ == "__main__":
     args, unknown = parser.parse_known_args()
 
     if args.create_ca:
-        if not args.crt_path or not args.key_path or not args.cem_path:
-            print("ERROR: --crt-path, --key-path and --cem-path are required with --create-ca", file=sys.stderr)
+        if not args.crt_path or not args.key_path or not args.crl_path:
+            print("ERROR: --crt-path, --key-path and --crl-path are required with --create-ca", file=sys.stderr)
             sys.exit(1)
         confadcs = load_yaml_conf(args.confadcs) if args.ca_id else None
         rc = _cmd_create_ca(
             ca_id=args.ca_id,
             crt_path=args.crt_path,
             key_path=args.key_path,
-            crl_path=args.cem_path,
+            crl_path=args.crl_path,
             valid_days=args.valid_days if args.valid_days else 3650,
             rsa_key_size=int(args.rsa_bits),
             conf=confadcs,
