@@ -10,6 +10,7 @@ import sys
 import stat
 import uuid
 import shutil
+import socket
 from typing import Tuple, Iterable, List, Optional, Dict, Any, Set
 from datetime import datetime, timezone, timedelta
 
@@ -962,17 +963,40 @@ def _cmd_create_ca(
             mode=stat.S_IRUSR | stat.S_IWUSR,
         )
 
-    mode = 'self-signed' if result['self_signed'] else f"child of '{result['issuer']}'"
-    print(
-        f"CA created: CN='{result['common_name']}', mode={mode}, rsa={int(rsa_key_size)} bits, "
-        f"cert='{effective_crt_path}', key='{effective_key_path}', crl='{result['crl_path']}'"
-    )
+    print("")
+    print("You can now add this CA to adcs.yaml:")
+    print("")
+    
+    slug = cn.strip()
+    display_name = cn.strip()
+    fqdn = socket.getfqdn()
+
+    print("cas:")
+    print(f'  - id: "{slug}"')
+    print("")
 
     if ca_id:
-        if os.path.abspath(user_crt_path) != os.path.abspath(effective_crt_path):
-            print(f"CERT COPY: {user_crt_path}")
-        if os.path.abspath(user_key_path) != os.path.abspath(effective_key_path):
-            print(f"KEY COPY:  {user_key_path}")
+        print(f'    issuer_ca_id: "{ca_id}"')
+        print("")
+
+    print(f'    display_name: "{display_name}"')
+    print("    urls:")
+    print(f'      crl_http:        "http://{fqdn}/crl/{slug}/{os.path.basename(crl_path)}"')
+    print(f'      ca_issuers_http: "http://{fqdn}/certs/{slug}/{os.path.basename(crt_path)}"')
+    print("    pem:")
+    print(f"      certificate_path_pem: {crt_path}")
+    print(f"      key_path_pem:         {key_path}")
+    print("      key_passphrase: null")
+    print("")
+    print("    crl:")
+    print(f"      path_crl: {crl_path}")
+    print("")
+    print("    storage_paths:")
+    print(f"      cert_dir: /var/lib/adcs/pki/newcerts/{slug}/")
+    print(f"      csr_dir:  /var/lib/adcs/pki/csr/{slug}/")
+    print(f"      private_dir: /var/lib/adcs/pki/private/{slug}/")
+
+
 
     return 0
 
