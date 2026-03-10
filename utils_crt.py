@@ -909,7 +909,8 @@ def _cmd_create_ca(
     crl_path: str,
     valid_days: int = 3650,
     rsa_key_size: int = 4096,
-    conf=None
+    conf=None,
+    cn=None
 ) -> int:
     parent_ca = None
     effective_crt_path = crt_path
@@ -940,6 +941,7 @@ def _cmd_create_ca(
         valid_days=valid_days,
         parent_ca=parent_ca,
         rsa_key_size=rsa_key_size,
+        common_name=cn
     )
 
     if ca_id:

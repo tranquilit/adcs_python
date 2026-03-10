@@ -1489,6 +1489,10 @@ if __name__ == "__main__":
         if not args.crt_path or not args.key_path or not args.crl_path:
             print("ERROR: --crt-path, --key-path and --crl-path are required with --create-ca", file=sys.stderr)
             sys.exit(1)
+        if not args.cn:
+            print("ERROR: --cn is required", file=sys.stderr)
+            sys.exit(1)
+
         confadcs = load_yaml_conf(args.confadcs) if args.ca_id else None
         rc = _cmd_create_ca(
             ca_id=args.ca_id,
@@ -1498,6 +1502,7 @@ if __name__ == "__main__":
             valid_days=args.valid_days if args.valid_days else 3650,
             rsa_key_size=int(args.rsa_bits),
             conf=confadcs,
+            cn=args.cn
         )
         sys.exit(rc)
 
