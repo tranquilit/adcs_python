@@ -1476,11 +1476,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="CRL path (PEM). With --create-ca, path where the initial CRL will be written.")
     p.add_argument("--threshold-days", type=int, default=30,
                    help="Rotate when the certificate expires in ≤ this many days (default: 30).")
-    p.add_argument("--chain", action="append",
-                   help="PEM path to a chain certificate (intermediate or root). "
-                        "Repeat the option for each file, in order: leaf -> intermediate(s) -> root.")
-    p.add_argument("--fullchain-path", type=str,
-                   help="Path to write the full chain to (default: --crt-path).")
     p.add_argument("--no-write-fullchain-to-crt", action="store_true",
                    help="Do not write the full chain into --crt-path (useful if you want to keep only the leaf cert).")
     p.add_argument("--valid-days", type=int,
@@ -1566,20 +1561,12 @@ if __name__ == "__main__":
             print("ERROR: --crt-path and --key-path are required with --rotate-if-expiring", file=sys.stderr)
             sys.exit(1)
 
-        chain_paths = []
-        if args.chain:
-            for item in args.chain:
-                parts = [p.strip() for p in item.split(",") if p.strip()]
-                chain_paths.extend(parts)
-
         rc = _cmd_rotate_if_expiring(
             ca_id=args.ca_id,
             crt_path=args.crt_path,
             key_path=args.key_path,
             threshold_days=int(args.threshold_days),
             conf=load_yaml_conf(args.confadcs),
-            chain_paths=chain_paths or None,
-            fullchain_path=args.fullchain_path,
             write_fullchain_to_crt=(not args.no_write_fullchain_to_crt),
             valid_days=args.valid_days if args.valid_days else 365
         )

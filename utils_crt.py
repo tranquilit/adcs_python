@@ -651,8 +651,6 @@ def _cmd_rotate_if_expiring(
     key_path: str,
     threshold_days: int,
     conf,
-    chain_paths: Optional[list[str]] = None,
-    fullchain_path: Optional[str] = None,
     write_fullchain_to_crt: bool = True,
     valid_days=365
 ) -> int:
@@ -713,18 +711,14 @@ def _cmd_rotate_if_expiring(
     fullchain = _compose_fullchain_pem(
         cert_pem,
         conf=conf,
-        ca=ca,
-        chain_paths=chain_paths,
+        ca=ca
     )
-    
+
     if write_fullchain_to_crt:
         _atomic_write(crt_path, fullchain)
     else:
         _atomic_write(crt_path, cert_pem)
-    
-    if fullchain_path:
-        _atomic_write(fullchain_path, fullchain)
-    
+
     _atomic_write(os.path.join(private_storage_dir, f"{request_id}.key.pem"), key_pem, mode=stat.S_IRUSR | stat.S_IWUSR)
     _atomic_write(key_path, key_pem, mode=stat.S_IRUSR | stat.S_IWUSR)
 
@@ -940,7 +934,7 @@ def _cmd_create_ca(
         request_id = uuid.uuid4().int
         effective_crt_path = os.path.join(certs_dir, f"{request_id}.pem")
         effective_key_path = os.path.join(private_dir, f"{request_id}.key.pem")
-        
+
     result = create_ca(
         crt_path=effective_crt_path,
         key_path=effective_key_path,
@@ -966,7 +960,7 @@ def _cmd_create_ca(
     print("")
     print("You can now add this CA to adcs.yaml:")
     print("")
-    
+
     slug = cn.strip()
     display_name = cn.strip()
     fqdn = socket.getfqdn()
@@ -1091,8 +1085,7 @@ def _build_ca_chain_pem(conf: Dict[str, Any], ca: Dict[str, Any]) -> bytes:
 def _compose_fullchain_pem(
     cert_pem: bytes,
     conf: Optional[Dict[str, Any]] = None,
-    ca: Optional[Dict[str, Any]] = None,
-    chain_paths: Optional[list[str]] = None,
+    ca: Optional[Dict[str, Any]] = None
 ) -> bytes:
     fullchain = cert_pem
     if fullchain and not fullchain.endswith(b"\n"):
@@ -1101,7 +1094,5 @@ def _compose_fullchain_pem(
     if conf and ca:
         fullchain += _build_ca_chain_pem(conf, ca)
 
-    if chain_paths:
-        fullchain += _read_all_bytes(chain_paths)
 
     return fullchain
