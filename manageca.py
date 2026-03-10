@@ -10,6 +10,7 @@ ADCS TUI — Terminal application (SSH) à la “mc”
 • New certificate generation (key + cert) opens a dedicated window and uses utils.issue_cert_with_new_key.
 • Delete certificate (button + Del; Shift+Del permanent). Moves to .trash by default.
 • Shows whether a certificate is revoked (reads CRL).
+• Shows whether a certificate is a CA (reads BasicConstraints).
 
 Multi-selection:
   - Space toggles selection marker [ ] / [X]
@@ -94,8 +95,8 @@ from utils_crt import (
 CERT_EXTS = {".crt", ".pem", ".cer"}
 
 FULL_COLUMNS = ["Sel", "#", "Serial", "Subject", "Valid from", "Valid until",
-                "Days", "Revoked", "Signature", "Public Key", "SHA-256", "File"]
-COMPACT_COLUMNS = ["Sel", "#", "Serial", "Subject", "Valid until", "Days", "Revoked"]
+                "Days", "Revoked", "Is CA", "Signature", "Public Key", "SHA-256", "File"]
+COMPACT_COLUMNS = ["Sel", "#", "Serial", "Subject", "Valid until", "Days", "Revoked", "Is CA"]
 
 MAX_ROWS_DEFAULT = 10000
 
@@ -113,6 +114,7 @@ class CertRow:
     pubkey_bits: Optional[int]
     sha256_fingerprint: str
     revoked: bool = False  # CRL status
+    is_ca: bool = False
 
 
 def row_from_cert(path: str) -> CertRow:
@@ -130,6 +132,13 @@ def row_from_cert(path: str) -> CertRow:
         sig_algo = "unknown"
     pk_type, pk_bits = get_public_key_info(cert)  # utils
     fp = cert.fingerprint(hashes.SHA256()).hex()
+
+    try:
+        bc = cert.extensions.get_extension_for_class(x509.BasicConstraints).value
+        is_ca = bool(bc.ca)
+    except Exception:
+        is_ca = False
+
     return CertRow(
         filename=os.path.basename(path),
         serial_nox=serial_nox,
@@ -141,6 +150,7 @@ def row_from_cert(path: str) -> CertRow:
         pubkey_type=pk_type,
         pubkey_bits=pk_bits,
         sha256_fingerprint=fp,
+        is_ca=is_ca,
     )
 
 
@@ -822,6 +832,7 @@ class ADCSApp(App):
                     pubkey_type="-", pubkey_bits=None,
                     sha256_fingerprint="-",
                     revoked=False,
+                    is_ca=False,
                 ))
         self.refresh_table()
 
@@ -883,6 +894,7 @@ class ADCSApp(App):
                     r.not_after.strftime("%Y-%m-%dT%H:%M"),
                     str(r.days_to_expiry),
                     "yes" if r.revoked else "no",
+                    "yes" if r.is_ca else "no",
                 )
             else:
                 table.add_row(
@@ -894,6 +906,7 @@ class ADCSApp(App):
                     r.not_after.strftime("%Y-%m-%dT%H:%M"),
                     str(r.days_to_expiry),
                     "yes" if r.revoked else "no",
+                    "yes" if r.is_ca else "no",
                     r.sig_algo,
                     f"{r.pubkey_type}{' '+str(r.pubkey_bits)+' bits' if r.pubkey_bits else ''}",
                     r.sha256_fingerprint,
@@ -1000,12 +1013,13 @@ class ADCSApp(App):
         fn = f"certs_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         with open(fn, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
-            w.writerow(["serial", "subject", "valid_from", "valid_until", "days", "revoked",
+            w.writerow(["serial", "subject", "valid_from", "valid_until", "days", "revoked", "is_ca",
                         "signature", "pubkey", "pubkey_bits", "sha256", "filename"])
             for r in rows:
                 w.writerow([
                     r.serial_nox, r.subject, r.not_before.isoformat(), r.not_after.isoformat(), r.days_to_expiry,
                     "yes" if r.revoked else "no",
+                    "yes" if r.is_ca else "no",
                     r.sig_algo, r.pubkey_type, r.pubkey_bits or '', r.sha256_fingerprint, r.filename
                 ])
         self.notify(f"Exported: {fn} ({len(rows)} rows)", severity="success")
@@ -1391,6 +1405,14 @@ class ADCSApp(App):
                 serial_int = int(cert.serial_number)
             is_revoked = serial_int in self.revoked_serials
 
+            try:
+                bc = cert.extensions.get_extension_for_class(x509.BasicConstraints).value
+                is_ca = bool(bc.ca)
+                path_length = bc.path_length
+            except Exception:
+                is_ca = False
+                path_length = None
+
             lines: List[str] = []
             lines.append(f"File: {cert_path}")
             lines.append(f"Subject: {cert.subject.rfc4514_string()}")
@@ -1403,6 +1425,8 @@ class ADCSApp(App):
             lines.append(f"Serial (hex): {format(cert.serial_number, 'x')}")
             lines.append(f"Validity: {cert.not_valid_before} -> {cert.not_valid_after}")
             lines.append(f"Revoked: {'yes' if is_revoked else 'no'}")
+            lines.append(f"Is CA: {'yes' if is_ca else 'no'}")
+            lines.append(f"Path length: {path_length if path_length is not None else '(none)'}")
             lines.append(f"Selected: {'yes' if r.filename in self.selected_filenames else 'no'}")
             try:
                 sig_algo = cert.signature_hash_algorithm.name
