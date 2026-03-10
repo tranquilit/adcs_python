@@ -433,10 +433,8 @@ def load_yaml_conf(path="adcs.yaml"):
             cert_b64 = _pem_to_inner_b64(ket_cert_pem)
             ca["__ket_certificate_b64"] = cert_b64
     
-
-    if not conf["cas_list"]:
-        raise ValueError("No CA defined in 'cas'")
-    conf["default_ca"] = default_ca or conf["cas_list"][0]
+    if conf["cas_list"]:
+        conf["default_ca"] = default_ca or conf["cas_list"][0]
 
     # ---- Only remember template callbacks (no build here)
     conf["__template_decls__"] = []
