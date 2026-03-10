@@ -28,6 +28,7 @@ The app reuses your adcs.yaml and your folders.
 
 CLI (no GUI):
   python manageca.py --resign-crl --ca-id ca-1
+  python manageca.py --issue-cert --ca-id ca-1 --cn host.example --san host.example --rsa-bits 2048
 """
 from __future__ import annotations
 import uuid
@@ -81,7 +82,7 @@ from utils_crt import (
     _cmd_rotate_if_expiring,
     _cli_find_ca_by_id,
     _cmd_resign_crl,
-    _cmd_create_ca
+    _cmd_create_ca,
 )
 
 # =============================
@@ -141,12 +142,116 @@ def row_from_cert(path: str) -> CertRow:
     )
 
 
+def _resolve_storage_paths_from_ca(ca: Dict[str, Any]) -> tuple[str, str]:
+    sp = ca.get("storage_paths", {}) or {}
+    certs_dir = sp.get("certs_dir") or sp.get("cert_dir") or ca.get("__path_cert") or "."
+    private_dir = sp.get("private_dir") or certs_dir
+    return str(certs_dir), str(private_dir)
+
+
+def _split_sans(values: Optional[List[str]]) -> List[str]:
+    if not values:
+        return []
+    out: List[str] = []
+    for item in values:
+        if not item:
+            continue
+        parts = [p.strip() for p in item.replace(";", ",").split(",")]
+        out.extend([p for p in parts if p])
+    return out
+
+
+def _cmd_issue_cert_cli(
+    *,
+    ca_id: str,
+    common_name: str,
+    sans: Optional[List[str]],
+    rsa_bits: int,
+    valid_days: int,
+    conf: Dict[str, Any],
+    crt_path: Optional[str] = None,
+    key_path: Optional[str] = None,
+) -> int:
+    try:
+        ca = _cli_find_ca_by_id(conf, ca_id)
+        if not ca:
+            print(f"ERROR: CA not found: {ca_id}", file=sys.stderr)
+            return 1
+
+        if not common_name.strip():
+            print("ERROR: --cn is required with --issue-cert", file=sys.stderr)
+            return 1
+
+        if int(rsa_bits) not in (2048, 3072, 4096):
+            print("ERROR: --rsa-bits must be one of: 2048, 3072, 4096", file=sys.stderr)
+            return 1
+
+        if int(valid_days) <= 0:
+            print("ERROR: --valid-days must be > 0", file=sys.stderr)
+            return 1
+
+        certs_dir, private_dir = _resolve_storage_paths_from_ca(ca)
+        os.makedirs(certs_dir, exist_ok=True)
+        os.makedirs(private_dir, exist_ok=True)
+
+        subject_sans = _split_sans(sans)
+
+        cert_obj, key_obj, cert_pem, key_pem = issue_cert_with_new_key(
+            ca=ca,
+            common_name=common_name.strip(),
+            subject_sans=subject_sans,
+            key_type="rsa",
+            rsa_key_size=int(rsa_bits),
+            validity_seconds=int(valid_days) * 24 * 3600,
+            key_export_password=None,
+        )
+
+        request_id = uuid.uuid4().int
+        if not crt_path:
+            crt_path = os.path.join(certs_dir, f"{request_id}.pem")
+        if not key_path:
+            key_path = os.path.join(private_dir, f"{request_id}.key.pem")
+
+        crt_parent = os.path.dirname(os.path.abspath(crt_path))
+        key_parent = os.path.dirname(os.path.abspath(key_path))
+        if crt_parent:
+            os.makedirs(crt_parent, exist_ok=True)
+        if key_parent:
+            os.makedirs(key_parent, exist_ok=True)
+
+        with open(crt_path, "wb") as f:
+            f.write(cert_pem)
+
+        with open(key_path, "wb") as f:
+            f.write(key_pem)
+
+        try:
+            os.chmod(key_path, stat.S_IRUSR | stat.S_IWUSR)
+        except Exception:
+            pass
+
+        print("Certificate issued successfully")
+        print(f"CA:   {ca.get('display_name') or ca.get('id')}")
+        print(f"CN:   {common_name.strip()}")
+        print(f"CERT: {crt_path}")
+        print(f"KEY:  {key_path}")
+        print(f"RSA:  {int(rsa_bits)} bits")
+        if subject_sans:
+            print(f"SAN:  {', '.join(subject_sans)}")
+
+        return 0
+
+    except Exception as e:
+        print(f"ERROR: issue certificate failed: {e}", file=sys.stderr)
+        return 1
+
+
 # =============================
 # New Certificate Screen
 # =============================
 
 class NewCertScreen(_BaseScreen[None]):
-    """Modal dialog for issuing a new certificate (key + cert)."""
+    """Modal dialog for issuing a new RSA certificate (key + cert)."""
 
     def __init__(self, parent_app: "ADCSApp", ca: Dict[str, Any]) -> None:
         super().__init__()
@@ -159,17 +264,8 @@ class NewCertScreen(_BaseScreen[None]):
             Vertical(
                 Input(placeholder="Common Name (CN)", id="nc_cn"),
                 Input(placeholder="SANs (comma-separated: dns, ip, ...)", id="nc_sans"),
-                Horizontal(
-                    Select(options=[("RSA", "rsa"), ("EC", "ec"), ("Ed25519", "ed25519"), ("Ed448", "ed448")],
-                           value="rsa", id="nc_keytype"),
-                    Input(placeholder="RSA bits (2048/3072/4096)", id="nc_rsa_bits"),
-                ),
-                Horizontal(
-                    Select(options=[("secp256r1", "secp256r1"), ("secp384r1", "secp384r1"),
-                                    ("secp521r1", "secp521r1"), ("secp256k1", "secp256k1")],
-                           value="secp256r1", id="nc_ec_curve"),
-                    Input(placeholder="Validity days (default 365)", id="nc_valid_days"),
-                ),
+                Input(placeholder="RSA bits (2048/3072/4096)", id="nc_rsa_bits"),
+                Input(placeholder="Validity days (default 365)", id="nc_valid_days"),
                 id="dlg_form",
             ),
             Horizontal(
@@ -221,13 +317,11 @@ class NewCertScreen(_BaseScreen[None]):
         self.app.pop_screen()
 
     def action_do_ok_impl(self) -> None:
-        """Validate inputs and issue a new leaf certificate + key."""
+        """Validate inputs and issue a new leaf RSA certificate + key."""
         try:
             cn = (self.query_one("#nc_cn", Input).value or "").strip()
             sans_raw = (self.query_one("#nc_sans", Input).value or "").strip()
-            keytype = (self.query_one("#nc_keytype", Select).value or "rsa").strip().lower()
             rsa_bits_txt = (self.query_one("#nc_rsa_bits", Input).value or "").strip()
-            ec_curve = (self.query_one("#nc_ec_curve", Select).value or "secp256r1").strip()
             valid_days_txt = (self.query_one("#nc_valid_days", Input).value or "").strip()
         except Exception as e:
             self.parent_app.notify(f"UI error: {e}", severity="error")
@@ -242,13 +336,12 @@ class NewCertScreen(_BaseScreen[None]):
             parts = [p.strip() for p in sans_raw.replace(";", ",").split(",")]
             sans = [p for p in parts if p]
 
-        rsa_bits = 0
         try:
-            rsa_bits = int(rsa_bits_txt) if rsa_bits_txt else 0
+            rsa_bits = int(rsa_bits_txt) if rsa_bits_txt else 2048
         except Exception:
             rsa_bits = 0
-        if keytype == "rsa" and rsa_bits not in (0, 2048, 3072, 4096):
-            self.parent_app.notify("RSA bits must be 2048/3072/4096 (or empty).", severity="warning")
+        if rsa_bits not in (2048, 3072, 4096):
+            self.parent_app.notify("RSA bits must be 2048/3072/4096.", severity="warning")
             return
 
         try:
@@ -272,9 +365,8 @@ class NewCertScreen(_BaseScreen[None]):
                 ca=self.ca,
                 common_name=cn,
                 subject_sans=sans,
-                key_type=keytype,
-                rsa_key_size=(rsa_bits or 2048),
-                ec_curve=ec_curve,
+                key_type="rsa",
+                rsa_key_size=rsa_bits,
                 validity_seconds=valid_days * 24 * 3600,
                 key_export_password=None,
             )
@@ -304,7 +396,7 @@ class NewCertScreen(_BaseScreen[None]):
             pass
 
         self.parent_app.notify(
-            f"New certificate issued:\nCert: {crt_path}\nKey:  {key_path}",
+            f"New RSA certificate issued ({rsa_bits} bits):\nCert: {crt_path}\nKey:  {key_path}",
             severity="success",
             timeout=8,
         )
@@ -687,10 +779,7 @@ class ADCSApp(App):
         self.load_certs()
 
     def _resolve_storage_paths(self, ca: Dict[str, Any]) -> tuple[str, str]:
-        sp = ca.get("storage_paths", {}) or {}
-        certs_dir = sp.get("certs_dir") or ca.get("__path_cert") or "."
-        private_dir = sp.get("private_dir") or certs_dir
-        return str(certs_dir), str(private_dir)
+        return _resolve_storage_paths_from_ca(ca)
 
     def load_certs(self) -> None:
         ca = self.current_ca
@@ -1356,8 +1445,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="Re-sign the CRL of the specified CA and exit (no GUI).")
     p.add_argument("--create-ca", action="store_true",
                    help="Create a new CA certificate, private key and an empty CRL, then exit (no GUI).")
+    p.add_argument("--issue-cert", action="store_true",
+                   help="Issue a new RSA leaf certificate + private key and exit (no GUI).")
     p.add_argument("--ca-id", type=str,
-                   help="When used with --create-ca or --resign-crl: CA identifier as defined in adcs.yaml (field 'id' or 'display_name'). For --create-ca, this is the parent CA; if omitted, the new CA is self-signed.")
+                   help="When used with --create-ca, --issue-cert or --resign-crl: CA identifier as defined in adcs.yaml (field 'id' or 'display_name'). For --create-ca, this is the parent CA; if omitted, the new CA is self-signed.")
+    p.add_argument("--cn", type=str,
+                   help="Common Name for --issue-cert.")
+    p.add_argument("--san", action="append",
+                   help="SAN entry or comma-separated SAN list for --issue-cert. Repeat the option if needed.")
+    p.add_argument("--rsa-bits", type=int, default=2048,
+                   help="RSA key size for --issue-cert and --create-ca (2048/3072/4096; default: 2048).")
     p.add_argument("--no-bump-number", action="store_true",
                    help="Do not increment CRLNumber when re-signing (keep the same number).")
     p.add_argument("--next-update-hours", default=None,
@@ -1399,7 +1496,29 @@ if __name__ == "__main__":
             key_path=args.key_path,
             crl_path=args.cem_path,
             valid_days=args.valid_days if args.valid_days else 3650,
+            rsa_key_size=int(args.rsa_bits),
             conf=confadcs,
+        )
+        sys.exit(rc)
+
+    if args.issue_cert:
+        if not args.ca_id:
+            print("ERROR: --ca-id is required with --issue-cert", file=sys.stderr)
+            sys.exit(1)
+        if not args.cn:
+            print("ERROR: --cn is required with --issue-cert", file=sys.stderr)
+            sys.exit(1)
+
+        confadcs = load_yaml_conf(args.confadcs)
+        rc = _cmd_issue_cert_cli(
+            ca_id=args.ca_id,
+            common_name=args.cn,
+            sans=args.san,
+            rsa_bits=int(args.rsa_bits),
+            valid_days=args.valid_days if args.valid_days else 365,
+            conf=confadcs,
+            crt_path=args.crt_path,
+            key_path=args.key_path,
         )
         sys.exit(rc)
 

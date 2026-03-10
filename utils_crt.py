@@ -14,13 +14,13 @@ from datetime import datetime, timezone, timedelta
 
 from cryptography import x509 as cx509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ( 
+from cryptography.hazmat.primitives.asymmetric import (
     rsa,
     ec,
     ed25519,
     ed448,
-    dsa, 
-)   
+    dsa,
+)
 
 
 # -----------------------------------------------------------------------------
@@ -363,21 +363,22 @@ def _dedup_sans(strings: Iterable[str]) -> List[cx509.GeneralName]:
 
 def issue_cert_with_new_key(
     *,
-    ca: Dict[str, Any],                     # "__certificate_der": bytes, "__key_obj": private key
+    ca: Dict[str, Any],
     common_name: str,
     subject_sans: Iterable[str] = (),
     validity_seconds: int = 365 * 24 * 3600,
     backdate_seconds: int = 300,
-    key_type: str = "rsa",                  # "rsa" | "ec" | "ed25519" | "ed448"
+    key_type: str = "rsa",
     rsa_key_size: int = 2048,
-    ec_curve: str = "secp256r1",            # "secp384r1", "secp521r1", "secp256k1"
+    ec_curve: str = "secp256r1",
     key_export_password: Optional[bytes] = None,
 ) -> Tuple[cx509.Certificate, Any, bytes, bytes]:
     """Generate a new keypair, issue an end-entity certificate, and return (cert_obj, privkey_obj, cert_pem, key_pem)."""
 
-    # Generate subject key
     key_type_l = (key_type or "rsa").lower()
     if key_type_l == "rsa":
+        if int(rsa_key_size) not in (2048, 3072, 4096):
+            raise ValueError("--rsa-bits must be one of: 2048, 3072, 4096.")
         priv = rsa.generate_private_key(public_exponent=65537, key_size=int(rsa_key_size))
     elif key_type_l == "ec":
         curve_map = {
@@ -397,7 +398,6 @@ def issue_cert_with_new_key(
 
     pub = priv.public_key()
 
-    # CA material
     ca_cert = cx509.load_der_x509_certificate(ca["__certificate_der"])
     ca_key = ca["__key_obj"]
 
@@ -405,7 +405,6 @@ def issue_cert_with_new_key(
     not_before = now - timedelta(seconds=int(backdate_seconds))
     not_after = not_before + timedelta(seconds=int(validity_seconds))
 
-    # Build certificate
     builder = (
         cx509.CertificateBuilder()
         .subject_name(cx509.Name([cx509.NameAttribute(cx509.oid.NameOID.COMMON_NAME, common_name)]))
@@ -417,7 +416,6 @@ def issue_cert_with_new_key(
         .add_extension(cx509.SubjectKeyIdentifier.from_public_key(pub), critical=False)
     )
 
-    # AKI
     try:
         builder = builder.add_extension(
             cx509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()),
@@ -426,7 +424,6 @@ def issue_cert_with_new_key(
     except Exception:
         pass
 
-    # AIA / CDP from config
     urls = ca.get("urls", {}) or {}
     if urls.get("ca_issuers_http"):
         builder = builder.add_extension(
@@ -449,19 +446,16 @@ def issue_cert_with_new_key(
             critical=False,
         )
 
-    # SAN
     if subject_sans:
         sans = _dedup_sans(subject_sans)
         if sans:
             builder = builder.add_extension(cx509.SubjectAlternativeName(sans), critical=False)
 
-    # Sign
     if isinstance(ca_key, (ed25519.Ed25519PrivateKey, ed448.Ed448PrivateKey)):
         cert = builder.sign(private_key=ca_key, algorithm=None)
     else:
         cert = builder.sign(private_key=ca_key, algorithm=hashes.SHA256())
 
-    # Export PEM
     cert_pem = cert.public_bytes(encoding=serialization.Encoding.PEM)
 
     if key_export_password:
@@ -494,11 +488,9 @@ def load_certificate_file(path: str) -> cx509.Certificate:
     with open(path, "rb") as f:
         data = f.read()
     if not is_pem_blob(data):
-        # Try direct DER
         try:
             return cx509.load_der_x509_certificate(data)
         except Exception:
-            # Often DER is base64 without headers
             try:
                 der = base64.b64decode(data)
                 return cx509.load_der_x509_certificate(der)
@@ -538,22 +530,18 @@ def revoked_serials_set(crl_path: Optional[str]) -> Set[int]:
     return {rc.serial_number for rc in _iter_revoked(crl)}
 
 def _extract_cn_and_sans(cert: cx509.Certificate) -> tuple[str, list[str]]:
-    # CN
     try:
         cn_attr = cert.subject.get_attributes_for_oid(cx509.NameOID.COMMON_NAME)
         cn = cn_attr[0].value if cn_attr else ""
     except Exception:
         cn = ""
 
-    # SAN
     sans_list: list[str] = []
     try:
         san_ext = cert.extensions.get_extension_for_class(cx509.SubjectAlternativeName).value
-        # Conserver la valeur brute (dns, ip, email, uri…)
         for n in san_ext:
             v = getattr(n, "value", None)
             if v is None:
-                # IPAddress peut ne pas avoir .value ; cast en str
                 v = str(n)
             sans_list.append(str(v))
     except Exception:
@@ -568,37 +556,31 @@ def _pick_key_params_from_existing(cert: cx509.Certificate) -> dict[str, Any]:
 
     try:
         from cryptography.hazmat.primitives.asymmetric import rsa, ec, ed25519, ed448
-        # RSA
         if hasattr(pk, "key_size") and pk.__class__.__name__.lower().startswith("rs"):
             params["key_type"] = "rsa"
             params["rsa_key_size"] = getattr(pk, "key_size", 2048) or 2048
             return params
-        # EC
         if hasattr(pk, "curve") and isinstance(getattr(pk, "curve", None), ec.EllipticCurve):
             params["key_type"] = "ec"
             curve = pk.curve
-            # Utiliser le nom exact si dispo (ex: secp256r1, secp384r1…)
             curve_name = getattr(curve, "name", None)
             params["ec_curve"] = str(curve_name or "secp256r1")
             return params
-        # Ed25519
         if isinstance(pk, ed25519.Ed25519PublicKey):
             params["key_type"] = "ed25519"
             return params
-        # Ed448
         if isinstance(pk, ed448.Ed448PublicKey):
             params["key_type"] = "ed448"
             return params
     except Exception:
         pass
 
-    # Fallback
     params["key_type"] = "rsa"
     params["rsa_key_size"] = 2048
     return params
 
 
-def _atomic_write(path: str, data: bytes, mode = None) -> None:
+def _atomic_write(path: str, data: bytes, mode=None) -> None:
     dirn = os.path.dirname(os.path.abspath(path)) or "."
     with tempfile.NamedTemporaryFile(dir=dirn, delete=False) as tmp:
         tmp.write(data)
@@ -655,39 +637,46 @@ def _cmd_rotate_if_expiring(
 
     cn, sans = _extract_cn_and_sans(cert)
     request_id = uuid.uuid4().int
-    total_valid_seconds = int(
-        (cert.not_valid_after_utc - cert.not_valid_before_utc).total_seconds()
-    )
-
+    total_valid_seconds = int((cert.not_valid_after_utc - cert.not_valid_before_utc).total_seconds())
     total_valid_seconds = int(valid_days * 24 * 3600)
 
     key_params = _pick_key_params_from_existing(cert)
 
-
     cert_obj, key_obj, cert_pem, key_pem = issue_cert_with_new_key(
-            ca=ca,
-            common_name=cn or "",          
-            subject_sans=sans,         
-            key_type=key_params.get("key_type", "rsa"),
-            rsa_key_size=key_params.get("rsa_key_size", 2048),
-            ec_curve=key_params.get("ec_curve", "secp256r1"),
-            validity_seconds=total_valid_seconds,
-            key_export_password=None,
-        )
+        ca=ca,
+        common_name=cn or "",
+        subject_sans=sans,
+        key_type=key_params.get("key_type", "rsa"),
+        rsa_key_size=key_params.get("rsa_key_size", 2048),
+        ec_curve=key_params.get("ec_curve", "secp256r1"),
+        validity_seconds=total_valid_seconds,
+        key_export_password=None,
+    )
 
-    _atomic_write(os.path.join(ca['storage_paths']['cert_dir'],f"{request_id}.pem"), cert_pem)
+    cert_storage_dir = (
+        ca.get('storage_paths', {}).get('cert_dir')
+        or ca.get('storage_paths', {}).get('certs_dir')
+        or ca.get('__path_cert')
+        or os.path.dirname(crt_path)
+    )
+    private_storage_dir = (
+        ca.get('storage_paths', {}).get('private_dir')
+        or os.path.dirname(key_path)
+    )
+
+    _atomic_write(os.path.join(cert_storage_dir, f"{request_id}.pem"), cert_pem)
     _atomic_write(crt_path, cert_pem)
 
     if chain_paths:
         chain_bytes = _read_all_bytes(chain_paths)
         fullchain = cert_pem + chain_bytes
-        target_path = fullchain_path or (crt_path if write_fullchain_to_crt else crt_path)
+        target_path = fullchain_path or crt_path
         _atomic_write(target_path, fullchain)
     else:
         _atomic_write(crt_path, cert_pem)
 
-    _atomic_write(os.path.join(ca['storage_paths']['private_dir'],f"{request_id}.key.pem"), key_pem, mode=stat.S_IRUSR | stat.S_IWUSR) 
-    _atomic_write(key_path, key_pem, mode=stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+    _atomic_write(os.path.join(private_storage_dir, f"{request_id}.key.pem"), key_pem, mode=stat.S_IRUSR | stat.S_IWUSR)
+    _atomic_write(key_path, key_pem, mode=stat.S_IRUSR | stat.S_IWUSR)
 
     print(
         f"ROTATED: cert replaced at '{crt_path}', key replaced at '{key_path}' "
@@ -695,12 +684,12 @@ def _cmd_rotate_if_expiring(
     )
     return 0
 
+
 def _cli_find_ca_by_id(conf: Dict[str, Any], ca_id: str) -> Optional[Dict[str, Any]]:
     for ca in (conf.get("cas_list") or []):
         if str(ca.get("id")) == ca_id or str(ca.get("display_name")) == ca_id:
             return ca
     return None
-
 
 
 def _guess_ca_common_name(crt_path: str, key_path: str, crl_path: str, parent_ca_id: Optional[str] = None) -> str:
@@ -734,19 +723,24 @@ def create_ca(
     valid_days: int = 3650,
     parent_ca: Optional[Dict[str, Any]] = None,
     common_name: Optional[str] = None,
+    rsa_key_size: int = 4096,
 ):
     """Create a new CA certificate/key and initialize an empty CRL.
 
     If parent_ca is None, the CA is self-signed. Otherwise the new CA is issued by parent_ca.
     Returns a small metadata dict describing what was created.
     """
-    cn = (common_name or _guess_ca_common_name(crt_path, key_path, crl_path, parent_ca.get('id') if parent_ca else None)).strip()
+    cn = (common_name or _guess_ca_common_name(
+        crt_path, key_path, crl_path, parent_ca.get('id') if parent_ca else None
+    )).strip()
     if not cn:
         raise ValueError('Could not determine Common Name for the new CA.')
     if int(valid_days) <= 0:
         raise ValueError('--valid-days must be a positive integer.')
+    if int(rsa_key_size) not in (2048, 3072, 4096):
+        raise ValueError('--rsa-bits must be one of: 2048, 3072, 4096.')
 
-    key = rsa.generate_private_key(public_exponent=65537, key_size=4096)
+    key = rsa.generate_private_key(public_exponent=65537, key_size=int(rsa_key_size))
     subject = cx509.Name([
         cx509.NameAttribute(cx509.NameOID.COMMON_NAME, cn),
     ])
@@ -865,7 +859,15 @@ def create_ca(
     }
 
 
-def _cmd_create_ca(ca_id: Optional[str], crt_path: str, key_path: str, crl_path: str, valid_days: int = 3650, conf=None) -> int:
+def _cmd_create_ca(
+    ca_id: Optional[str],
+    crt_path: str,
+    key_path: str,
+    crl_path: str,
+    valid_days: int = 3650,
+    rsa_key_size: int = 4096,
+    conf=None
+) -> int:
     parent_ca = None
     if ca_id:
         if conf is None:
@@ -881,16 +883,17 @@ def _cmd_create_ca(ca_id: Optional[str], crt_path: str, key_path: str, crl_path:
         crl_path=crl_path,
         valid_days=valid_days,
         parent_ca=parent_ca,
+        rsa_key_size=rsa_key_size,
     )
     mode = 'self-signed' if result['self_signed'] else f"child of '{result['issuer']}'"
     print(
-        f"CA created: CN='{result['common_name']}', mode={mode}, "
+        f"CA created: CN='{result['common_name']}', mode={mode}, rsa={int(rsa_key_size)} bits, "
         f"cert='{result['crt_path']}', key='{result['key_path']}', crl='{result['crl_path']}'"
     )
     return 0
 
-def _cmd_resign_crl(ca_id: str, next_update_hours: int = 8, bump_number: bool = True,conf=None) -> int:
 
+def _cmd_resign_crl(ca_id: str, next_update_hours: int = 8, bump_number: bool = True, conf=None) -> int:
     ca = _cli_find_ca_by_id(conf, ca_id)
     if not ca:
         print(f"ERROR: CA '{ca_id}' not found in adcs.yaml", file=sys.stderr)
@@ -912,6 +915,7 @@ def _cmd_resign_crl(ca_id: str, next_update_hours: int = 8, bump_number: bool = 
     )
     print(f"CRL re-signed for '{ca_id}' -> CRLNumber {new_num} (path: {crl_path})")
     return 0
+
 
 def _read_all_bytes(paths: list[str]) -> bytes:
     out = b""
