@@ -12,6 +12,7 @@ global:
 cas:
 
   - id: "ca1-inter"
+    issuer_ca_id: "ca1-root"
     display_name: "Intermediate CA"
     urls:
       crl_http:        "http://testadcs.mydomain.lan/crl/ica/intermediate.crl"
