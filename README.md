@@ -255,7 +255,7 @@ cd /opt/adcs_python
 ./manageca.py --rotate-if-expiring --ca-id "CA Inter Test" --crt-path /etc/nginx/crt.pem  --key-path /etc/nginx/key.pem --threshold-days 30 --valid-days 365
 ```
 
-- `--ca-id` is the CA identifier (e.g., `ca-1`).
+- `--ca-id` is the CA identifier (e.g., `"CA Inter Test"`).
 
 Re-sign / Re-issue a Certificate (GUI)
 -----------------------------------------------------------------
