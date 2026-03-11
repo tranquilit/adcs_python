@@ -9,6 +9,18 @@ global:
     next_update_hours: 8
 
 
+templates:
+  - callback:
+      path: "/etc/adcs/callbacks/user_template.py"    
+  - callback:
+      path: "/etc/adcs/callbacks/computer_template.py"    
+
+auth:
+  - kerberos: true
+  - callback:
+      path: "/etc/adcs/callbacks/auth_basic_template.py"
+
+
 cas:
 
   - id: "ca1-inter"
@@ -88,15 +100,3 @@ cas:
 #       pkcs11_uri: "pkcs11:model=PKCS%2315%20emulated;manufacturer=www.CardContact.de;serial=DENK0509429;token=SmartCard-HSM"
 #       key_id: "01"
 #       user_pin_file: "/etc/adcs/secret/hsm_pin.txt"
-
-
-templates:
-  - callback:
-      path: "/etc/adcs/callbacks/user_template.py"    
-  - callback:
-      path: "/etc/adcs/callbacks/computer_template.py"    
-
-auth:
-  - kerberos: true
-  - callback:
-      path: "/etc/adcs/callbacks/auth_basic_template.py"
