@@ -94,14 +94,6 @@ git clone https://github.com/tranquilit/adcs_python.git
 cd adcs_python
 ```   
 
-Create a local CA (for testing)
----------------------------------------------------------
- 
-```
-./manageca.py --create-ca --cn "CA Root Test" >> /etc/adcs/adcs.yaml
-./manageca.py --create-ca --ca-id "CA Root Test" --cn "CA Inter Test" >> /etc/adcs/adcs.yaml
-./manageca.py --issue-cert --ca-id "CA Inter Test" --cn testadcs.mydomain.lan --san testadcs.mydomain.lan --crt-path /etc/nginx/crt.pem --key-path /etc/nginx/key.pem
-```
 
 Initial configuration
 ---------------------------------------------------------
@@ -121,6 +113,14 @@ Copy template exemple, and edit if needed:
 cp -r /opt/adcs_python/callbacks /etc/adcs/callbacks
 ```
 
+Create a local CA (for testing)
+---------------------------------------------------------
+ 
+```
+./manageca.py --create-ca --cn "CA Root Test" >> /etc/adcs/adcs.yaml
+./manageca.py --create-ca --ca-id "CA Root Test" --cn "CA Inter Test" >> /etc/adcs/adcs.yaml
+./manageca.py --issue-cert --ca-id "CA Inter Test" --cn testadcs.mydomain.lan --san testadcs.mydomain.lan --crt-path /etc/nginx/crt.pem --key-path /etc/nginx/key.pem
+```
 
 Configure Nginx
 ---------------------------------------------------------
