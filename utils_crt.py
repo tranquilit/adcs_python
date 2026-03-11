@@ -957,15 +957,13 @@ def _cmd_create_ca(
             mode=stat.S_IRUSR | stat.S_IWUSR,
         )
 
-    print("")
-    print("You can now add this CA to adcs.yaml:")
+
     print("")
 
     slug = cn.strip()
     display_name = cn.strip()
     fqdn = socket.getfqdn()
 
-    print("cas:")
     print(f'  - id: "{slug}"')
     print("")
 
