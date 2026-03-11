@@ -240,10 +240,11 @@ Regenerate and re-sign the CRL for the specified CA:
 
 ```bash
 cd /opt/adcs_python
-./manageca.py --resign-crl --ca-id ca-1
+./manageca.py --resign-crl --ca-id "CA Root Test"
+./manageca.py --resign-crl --ca-id "CA Inter Test"
 ```
 
-- `--ca-id` is the CA identifier (e.g., `ca-1`).
+- `--ca-id` is the CA identifier (e.g., `"CA Root Test"`).
 - This updates the CRL (version number, `thisUpdate/nextUpdate`, signature).
 
 Rotate adcs Certificate When Expiring Soon 
@@ -251,7 +252,7 @@ Rotate adcs Certificate When Expiring Soon
 
 ```bash
 cd /opt/adcs_python
-./manageca.py --rotate-if-expiring --ca-id ca1-inter --crt-path /etc/nginx/crt.pem  --key-path /etc/nginx/key.pem --threshold-days 30 --valid-days 365
+./manageca.py --rotate-if-expiring --ca-id "CA Inter Test" --crt-path /etc/nginx/crt.pem  --key-path /etc/nginx/key.pem --threshold-days 30 --valid-days 365
 ```
 
 - `--ca-id` is the CA identifier (e.g., `ca-1`).
