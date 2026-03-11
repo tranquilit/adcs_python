@@ -118,8 +118,8 @@ Create a local CA (for testing)
  
 ```
 ./manageca.py --create-ca --cn "CA Root Test" >> /etc/adcs/adcs.yaml
-./manageca.py --create-ca --ca-id "CA Root Test" --cn "CA Inter Test" >> /etc/adcs/adcs.yaml
-./manageca.py --issue-cert --ca-id "CA Inter Test" --cn testadcs.mydomain.lan --san testadcs.mydomain.lan --crt-path /etc/nginx/crt.pem --key-path /etc/nginx/key.pem
+./manageca.py --create-ca --signer-ca-id "CA Root Test" --cn "CA Inter Test" >> /etc/adcs/adcs.yaml
+./manageca.py --issue-cert --signer-ca-id "CA Inter Test" --cn testadcs.mydomain.lan --san testadcs.mydomain.lan --crt-path /etc/nginx/crt.pem --key-path /etc/nginx/key.pem
 ```
 
 Configure Nginx
@@ -240,11 +240,11 @@ Regenerate and re-sign the CRL for the specified CA:
 
 ```bash
 cd /opt/adcs_python
-./manageca.py --resign-crl --ca-id "CA Root Test"
-./manageca.py --resign-crl --ca-id "CA Inter Test"
+./manageca.py --resign-crl --signer-ca-id "CA Root Test"
+./manageca.py --resign-crl --signer-ca-id "CA Inter Test"
 ```
 
-- `--ca-id` is the CA identifier (e.g., `"CA Root Test"`).
+- `--signer-ca-id` is the CA identifier (e.g., `"CA Root Test"`).
 - This updates the CRL (version number, `thisUpdate/nextUpdate`, signature).
 
 Rotate adcs Certificate When Expiring Soon 
@@ -252,10 +252,10 @@ Rotate adcs Certificate When Expiring Soon
 
 ```bash
 cd /opt/adcs_python
-./manageca.py --rotate-if-expiring --ca-id "CA Inter Test" --crt-path /etc/nginx/crt.pem  --key-path /etc/nginx/key.pem --threshold-days 30 --valid-days 365
+./manageca.py --rotate-if-expiring --signer-ca-id "CA Inter Test" --crt-path /etc/nginx/crt.pem  --key-path /etc/nginx/key.pem --threshold-days 30 --valid-days 365
 ```
 
-- `--ca-id` is the CA identifier (e.g., `"CA Inter Test"`).
+- `--signer-ca-id` is the CA identifier (e.g., `"CA Inter Test"`).
 
 Re-sign / Re-issue a Certificate (GUI)
 -----------------------------------------------------------------
