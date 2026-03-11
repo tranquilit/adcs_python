@@ -98,10 +98,9 @@ Create a local CA (for testing)
 ---------------------------------------------------------
  
 ```
-mkdir /var/lib/adcs/
-cd /opt/adcs_python
-bash create_ca.sh
-mv /opt/adcs_python/pki /var/lib/adcs/pki
+./manageca.py --create-ca --cn "CA Root Test" >> /etc/adcs/adcs.yaml
+./manageca.py --create-ca --ca-id "CA Root Test" --cn "CA Inter Test" >> /etc/adcs/adcs.yaml
+./manageca.py --issue-cert --ca-id "CA Inter Test" --cn testadcs.mydomain.lan --san testadcs.mydomain.lan --crt-path /etc/nginx/crt.pem --key-path /etc/nginx/key.pem
 ```
 
 Initial configuration
@@ -136,13 +135,6 @@ cp -f /opt/adcs_python/nginx-conf.conf.template /etc/nginx/sites-enabled/default
 
 ```
 openssl dhparam -out /etc/ssl/certs/dhparam.pem 4096
-```
-
-Move key : 
-
-```
-mv /var/lib/adcs/pki/private/ica/testadcs.mydomain.lan.key.pem /etc/nginx/key.pem
-mv /var/lib/adcs/pki/certs/ica/testadcs.mydomain.lan.fullchain.pem /etc/nginx/crt.pem
 ```
 
 Restart Nginx: 
