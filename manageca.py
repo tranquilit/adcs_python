@@ -29,6 +29,7 @@ The app reuses your adcs.yaml and your folders.
 
 CLI (no GUI):
   python manageca.py --resign-crl --ca-id ca-1
+  python manageca.py --resign-all-crl
   python manageca.py --issue-cert --ca-id ca-1 --cn host.example --san host.example --rsa-bits 2048
 """
 from __future__ import annotations
@@ -268,6 +269,42 @@ def _cmd_issue_cert_cli(
     except Exception as e:
         print(f"ERROR: issue certificate failed: {e}", file=sys.stderr)
         return 1
+
+
+def _cmd_resign_all_crls(
+    *,
+    conf: Dict[str, Any],
+    next_update_hours: int,
+    bump_number: bool = True,
+) -> tuple[int, int, List[str]]:
+    """Re-sign all CRLs defined in conf. Returns (ok, fail, messages)."""
+    ok = 0
+    fail = 0
+    messages: List[str] = []
+
+    for ca in (conf.get("cas_list") or []):
+        ca_name = ca.get("display_name") or ca.get("id") or "<unknown>"
+        try:
+            ca_id = ca.get("id")
+            if not ca_id:
+                raise KeyError("Missing CA id")
+            rc = _cmd_resign_crl(
+                ca_id=ca_id,
+                next_update_hours=next_update_hours,
+                bump_number=bump_number,
+                conf=conf,
+            )
+            if rc == 0:
+                ok += 1
+                messages.append(f"OK   {ca_name}")
+            else:
+                fail += 1
+                messages.append(f"FAIL {ca_name}: rc={rc}")
+        except Exception as e:
+            fail += 1
+            messages.append(f"FAIL {ca_name}: {e}")
+
+    return ok, fail, messages
 
 
 # =============================
@@ -1481,6 +1518,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="Path to the adcs.yaml file (default: adcs.yaml next to this script)")
     p.add_argument("--resign-crl", action="store_true",
                    help="Re-sign the CRL of the specified CA and exit (no GUI).")
+    p.add_argument("--resign-all-crl", action="store_true",
+                   help="Re-sign all CRLs from adcs.yaml and exit (no GUI).")
     p.add_argument("--create-ca", action="store_true",
                    help="Create a new CA certificate, private key and an empty CRL, then exit (no GUI).")
     p.add_argument("--issue-cert", action="store_true",
@@ -1602,6 +1641,32 @@ if __name__ == "__main__":
             valid_days=args.valid_days if args.valid_days else 365
         )
         sys.exit(rc)
+
+    if args.resign_all_crl:
+        confadcs = load_yaml_conf(args.confadcs)
+        if not args.next_update_hours:
+            next_update_hours = int(confadcs['next_update_hours_crl'])
+        else:
+            next_update_hours = int(args.next_update_hours)
+
+        ok, fail, messages = _cmd_resign_all_crls(
+            conf=confadcs,
+            next_update_hours=int(next_update_hours),
+            bump_number=(not args.no_bump_number),
+        )
+
+        for line in messages:
+            print(line)
+
+        if fail == 0:
+            print(f"All CRLs re-signed successfully ({ok}/{ok + fail}).")
+            sys.exit(0)
+        elif ok > 0:
+            print(f"Partial success: ok={ok}, failed={fail}", file=sys.stderr)
+            sys.exit(2)
+        else:
+            print(f"ERROR: all CRL re-sign operations failed ({fail}).", file=sys.stderr)
+            sys.exit(1)
 
     if args.resign_crl:
         if not args.ca_id:
