@@ -1523,20 +1523,20 @@ if __name__ == "__main__":
             print("ERROR: --cn is required", file=sys.stderr)
             sys.exit(1)
 
-        cn = args.cn
+        cnstrip = args.cn.lower().replace(' ','_')
 
         if not args.crt_path:
-            crt_path = f"/var/lib/adcs/pki/certs/{cn}/{cn}.crt.pem"
+            crt_path = f"/var/lib/adcs/pki/certs/{cnstrip}/{cnstrip}.crt.pem"
         else:
             crt_path = args.crt_path
 
         if not args.key_path:
-            key_path = f"/var/lib/adcs/pki/private/{cn}/{cn}.key.pem"
+            key_path = f"/var/lib/adcs/pki/private/{cnstrip}/{cnstrip}.key.pem"
         else:
             key_path = args.key_path
 
         if not args.crl_path:
-            crl_path = f"/var/lib/adcs/pki/crl/{cn}/{cn}.crl"
+            crl_path = f"/var/lib/adcs/pki/crl/{cnstrip}/{cnstrip}.crl"
         else:
             crl_path = args.crl_path
 
