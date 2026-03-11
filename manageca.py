@@ -283,6 +283,8 @@ def _cmd_resign_all_crls(
     messages: List[str] = []
 
     for ca in (conf.get("cas_list") or []):
+        if not ca["__key_obj"] :
+            continue
         ca_name = ca.get("display_name") or ca.get("id") or "<unknown>"
         try:
             ca_id = ca.get("id")
