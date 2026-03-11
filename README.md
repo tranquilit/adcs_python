@@ -235,17 +235,13 @@ https://testadcs.mydomain.lan/ADPolicyProvider_CEP_Kerberos/service.svc/CEP
 🔁 CRL Re-signing & Certificate Re-issuance
 ==========================================
 
-Regenerate and re-sign the CRL for the specified CA:
+Regenerate and re-sign the CRL 
 -----------------------------------------------------------------
 
 ```bash
 cd /opt/adcs_python
-./manageca.py --resign-crl --signer-ca-id "CA Root Test"
-./manageca.py --resign-crl --signer-ca-id "CA Inter Test"
+./manageca.py --resign-all-crl
 ```
-
-- `--signer-ca-id` is the CA identifier (e.g., `"CA Root Test"`).
-- This updates the CRL (version number, `thisUpdate/nextUpdate`, signature).
 
 Rotate adcs Certificate When Expiring Soon 
 -----------------------------------------------------------------
