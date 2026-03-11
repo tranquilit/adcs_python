@@ -1485,7 +1485,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="Create a new CA certificate, private key and an empty CRL, then exit (no GUI).")
     p.add_argument("--issue-cert", action="store_true",
                    help="Issue a new RSA leaf certificate + private key and exit (no GUI).")
-    p.add_argument("--ca-id", type=str,
+    p.add_argument("--signer-ca-id", "--ca-id", dest="ca_id", type=str,
                    help="When used with --create-ca, --issue-cert or --resign-crl: CA identifier as defined in adcs.yaml (field 'id' or 'display_name'). For --create-ca, this is the parent CA; if omitted, the new CA is self-signed.")
     p.add_argument("--cn", type=str,
                    help="Common Name for --issue-cert.")
