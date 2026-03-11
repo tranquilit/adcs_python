@@ -960,7 +960,7 @@ def _cmd_create_ca(
 
     print("")
 
-    slug = cn.strip()
+    slug = cn.lower().replace(' ','_')
     display_name = cn.strip()
     fqdn = socket.getfqdn()
 
