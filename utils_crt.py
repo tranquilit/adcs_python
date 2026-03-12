@@ -874,7 +874,7 @@ def create_ca(
         os.makedirs(dirn, exist_ok=True)
 
     _atomic_write(key_path, key_pem, mode=stat.S_IRUSR | stat.S_IWUSR)
-    _atomic_write(crt_path, cert_pem)
+    _atomic_write(crt_path, cert_pem, mode=0o644)
 
     crl_builder = (
         cx509.CertificateRevocationListBuilder()
