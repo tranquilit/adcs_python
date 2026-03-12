@@ -1,0 +1,1 @@
+0 * * * * root /usr/bin/python3 /opt/adcs_python/manageca.py  --resign-all-crl
