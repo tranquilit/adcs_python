@@ -243,6 +243,10 @@ cd /opt/adcs_python
 ./manageca.py --resign-all-crl
 ```
 
+Add cron 
+
+```cp -f /opt/adcs_python/adcs_cron /etc/cron.d/adcs_cron```
+
 Rotate adcs Certificate When Expiring Soon 
 -----------------------------------------------------------------
 
