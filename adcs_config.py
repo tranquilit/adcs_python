@@ -279,7 +279,6 @@ def _load_ca_key(ca: dict):
         raise ValueError(f"CA '{ca.get('id','?')}': specify either 'pem.key_path_pem' or 'hsm', not both.")
 
     if not has_pem_key and not has_hsm:
-        print('keyless mode')
         return
 
     # --- PEM mode (as before)
