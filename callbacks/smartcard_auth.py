@@ -86,7 +86,7 @@ def define_template(*, app_conf, username=None , request=None):
 
     # MS-XCEP CAReferenceCollection: references to issuing CAs returned by the policy response
     # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/95baab3d-2f0b-42ad-897a-26565c5f723f
-    "ca_references": ["ca1-inter"],
+    "ca_references": ["CA Inter Test"],
 
     # MS-XCEP Attributes/policySchema: schema version for the policy object
     # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cd22d3a0-f469-4a44-95ed-d10ce4dc2063

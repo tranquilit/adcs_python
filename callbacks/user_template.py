@@ -92,7 +92,7 @@ def define_template(*, app_conf, username=None , request=None):
     # MS-XCEP CAReferenceCollection: references to issuing CAs exposed by the policy
     # CAReferenceCollection: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/95baab3d-2f0b-42ad-897a-26565c5f723f
     # CA (cAReferenceID):    https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/158e7965-8a82-4729-8271-00aa59e140fe
-    "ca_references": ["ca1-inter"],
+    "ca_references": ["CA Inter Test"],
 
     # MS-XCEP Attributes/policySchema: policy schema version used by the CEP/XCEP response
     # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cd22d3a0-f469-4a44-95ed-d10ce4dc2063
