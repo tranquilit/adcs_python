@@ -4,6 +4,7 @@
 import base64
 import hashlib
 from datetime import datetime, timezone
+from typing import Optional
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 
@@ -369,11 +370,249 @@ def extract_ms_template_from_csr_der(csr_der: bytes):
     return {"name": tpl_name, "oid": tpl_oid}
 
 
+def _hash_for_name(name: str):
+    algos = {
+        "sha1": hashes.SHA1(),
+        "sha224": hashes.SHA224(),
+        "sha256": hashes.SHA256(),
+        "sha384": hashes.SHA384(),
+        "sha512": hashes.SHA512(),
+    }
+    algo = algos.get(name)
+    if algo is None:
+        raise ValueError(f"Unsupported digest algorithm: {name}")
+    return algo
+
+
+def _get_sd_certificates(sd) -> list:
+    certs = []
+    if sd["certificates"] is None:
+        return certs
+
+    for c in sd["certificates"]:
+        if c.name == "certificate":
+            certs.append(c.chosen)
+    return certs
+
+
+def _get_cert_ski(cert):
+    """
+    Return Subject Key Identifier raw bytes from an asn1crypto certificate,
+    or None if missing.
+    """
+    try:
+        exts = cert["tbs_certificate"]["extensions"]
+    except Exception:
+        return None
+
+    for ext in exts:
+        try:
+            if ext["extn_id"].dotted == "2.5.29.14":
+                parsed = ext["extn_value"].parsed
+                return parsed.native
+        except Exception:
+            continue
+    return None
+
+
+def _find_signer_cert(sd, signer_info):
+    certs = _get_sd_certificates(sd)
+    sid = signer_info["sid"]
+
+    if sid.name == "issuer_and_serial_number":
+        iasn = sid.chosen
+        issuer = iasn["issuer"]
+        serial = iasn["serial_number"].native
+
+        for cert in certs:
+            try:
+                if cert.issuer == issuer and cert.serial_number == serial:
+                    return cert
+            except Exception:
+                continue
+
+    elif sid.name == "subject_key_identifier":
+        wanted_ski = sid.native
+        for cert in certs:
+            cert_ski = _get_cert_ski(cert)
+            if cert_ski == wanted_ski:
+                return cert
+
+    return None
+
+
+def _extract_message_digest_from_signed_attrs(signed_attrs):
+    if signed_attrs is None:
+        return None
+
+    for attr in signed_attrs:
+        try:
+            if attr["type"].native == "message_digest":
+                vals = attr["values"]
+                if len(vals) > 0:
+                    return vals[0].native
+        except Exception:
+            continue
+    return None
+
+
+def _verify_cms_signature_with_cert(cert, signer_info, signed_bytes: bytes):
+    cert_crypto = cx509.load_der_x509_certificate(cert.dump())
+    pub = cert_crypto.public_key()
+
+    signature = signer_info["signature"].native
+    sig_algo = signer_info["signature_algorithm"]["algorithm"].native
+
+    if isinstance(pub, rsa.RSAPublicKey):
+        hash_name = signer_info["digest_algorithm"]["algorithm"].native
+        hash_algo = _hash_for_name(hash_name)
+
+        if sig_algo in ("rsassa_pkcs1v15", "sha1_rsa", "sha224_rsa", "sha256_rsa", "sha384_rsa", "sha512_rsa"):
+            pub.verify(signature, signed_bytes, padding.PKCS1v15(), hash_algo)
+            return
+
+        if sig_algo == "rsassa_pss":
+            # Parametres PSS eventuellement presents
+            params = signer_info["signature_algorithm"]["parameters"]
+            if params is not None and params.native:
+                pss = params.native
+
+                mgf = pss.get("mask_gen_algorithm", {})
+                mgf_params = mgf.get("parameters", {})
+                mgf_hash_name = mgf_params.get("algorithm", hash_name)
+                mgf_hash_algo = _hash_for_name(mgf_hash_name)
+
+                salt_len = pss.get("salt_length", hash_algo.digest_size)
+
+                pub.verify(
+                    signature,
+                    signed_bytes,
+                    padding.PSS(
+                        mgf=padding.MGF1(mgf_hash_algo),
+                        salt_length=salt_len,
+                    ),
+                    hash_algo,
+                )
+                return
+
+            pub.verify(
+                signature,
+                signed_bytes,
+                padding.PSS(
+                    mgf=padding.MGF1(hash_algo),
+                    salt_length=hash_algo.digest_size,
+                ),
+                hash_algo,
+            )
+            return
+
+        raise ValueError(f"Unsupported RSA signature algorithm: {sig_algo}")
+
+    if isinstance(pub, ec.EllipticCurvePublicKey):
+        hash_name = signer_info["digest_algorithm"]["algorithm"].native
+        hash_algo = _hash_for_name(hash_name)
+        pub.verify(signature, signed_bytes, ec.ECDSA(hash_algo))
+        return
+
+    if isinstance(pub, ed25519.Ed25519PublicKey):
+        pub.verify(signature, signed_bytes)
+        return
+
+    if isinstance(pub, ed448.Ed448PublicKey):
+        pub.verify(signature, signed_bytes)
+        return
+
+    raise ValueError(f"Unsupported public key type: {type(pub).__name__}")
+
+
+def _verify_signer_info(sd, signer_info):
+    result = {
+        "sid_type": signer_info["sid"].name,
+        "subject": None,
+        "issuer": None,
+        "serial_number": None,
+        "cert_der_b64": None,
+        "signature_valid": False,
+        "message_digest_valid": None,
+        "errors": [],
+    }
+
+    cert = _find_signer_cert(sd, signer_info)
+    if cert is None:
+        result["errors"].append("Unable to match signerInfo.sid to a certificate")
+        return result
+
+    try:
+        result["subject"] = cert.subject.human_friendly
+    except Exception:
+        pass
+    try:
+        result["issuer"] = cert.issuer.human_friendly
+    except Exception:
+        pass
+    try:
+        result["serial_number"] = cert.serial_number
+    except Exception:
+        pass
+    try:
+        result["cert_der_b64"] = base64.b64encode(cert.dump()).decode()
+    except Exception:
+        pass
+
+    eci = sd["encap_content_info"]
+    content = eci["content"].native if eci["content"] is not None else b""
+    signed_attrs = signer_info["signed_attrs"]
+
+    try:
+        if signed_attrs is not None:
+            md_attr = _extract_message_digest_from_signed_attrs(signed_attrs)
+            if md_attr is None:
+                result["errors"].append("signed_attrs present but no messageDigest attribute")
+                return result
+
+            digest_name = signer_info["digest_algorithm"]["algorithm"].native
+            h = hashlib.new(digest_name)
+            h.update(content)
+            computed_md = h.digest()
+
+            result["message_digest_valid"] = (computed_md == md_attr)
+            if not result["message_digest_valid"]:
+                result["errors"].append("messageDigest attribute does not match encapsulated content")
+                return result
+
+            # En CMS, la signature porte sur le SET OF des signedAttrs
+            signed_bytes = _tbs_signed_attrs(signed_attrs)
+        else:
+            signed_bytes = content
+
+        _verify_cms_signature_with_cert(cert, signer_info, signed_bytes)
+        result["signature_valid"] = True
+        return result
+
+    except Exception as e:
+        result["errors"].append(f"CMS signature verification failed: {e}")
+        return result
+
+
+def extract_and_verify_cmc_signers(sd):
+    signers = []
+    for signer_info in sd["signer_infos"]:
+        signers.append(_verify_signer_info(sd, signer_info))
+    return signers
+
+
 def exct_csr_from_cmc(p7_der: bytes):
     """
     Try, in this order, to extract a CSR and its bodyPartID from a wrapped CMC
     (PKIData in SignedData), then fall back to simplePKIRequest or direct CSR.
-    Returns (csr_der, body_part_id, template_info_dict).
+
+    Returns:
+        (csr_der, body_part_id, template_info_dict)
+
+    template_info_dict is enriched with:
+        - cmc_signatures
+        - cmc_signature_valid
+        - cmc_signature_errors
     """
     try:
         ci = a_cms.ContentInfo.load(p7_der)
@@ -386,7 +625,22 @@ def exct_csr_from_cmc(p7_der: bytes):
         if eci["content"] is None:
             raise ValueError("SignedData without encapsulated content (detached)")
 
+        signers = extract_and_verify_cmc_signers(sd)
         pki_octets: bytes = eci["content"].native
+
+        def _enrich_template_info(template_info: dict) -> dict:
+            template_info = dict(template_info or {})
+            template_info["cmc_signatures"] = signers
+            template_info["cmc_signature_valid"] = any(
+                s.get("signature_valid", False) for s in signers
+            ) if signers else False
+            if template_info["cmc_signature_valid"]:
+                template_info["cmc_signature_errors"] = []
+            else:
+                template_info["cmc_signature_errors"] = [
+                    err for s in signers for err in s.get("errors", [])
+                ]
+            return template_info
 
         # 1) PKIData -> look for TaggedCertificationRequest
         try:
@@ -399,7 +653,9 @@ def exct_csr_from_cmc(p7_der: bytes):
                         csr_obj = tcr["certificationRequest"]
                         body_part_id = int(tcr["bodyPartID"].native)
                         csr_bytes = csr_obj.dump()
-                        template_info = _parse_template_from_csr_bytes(csr_bytes)
+                        template_info = _enrich_template_info(
+                            _parse_template_from_csr_bytes(csr_bytes)
+                        )
                         return csr_bytes, body_part_id, template_info
                     except Exception:
                         continue
@@ -412,7 +668,9 @@ def exct_csr_from_cmc(p7_der: bytes):
             if len(seq) >= 1:
                 csr_bytes = seq[0].dump()
                 body_part_id = 0
-                template_info = _parse_template_from_csr_bytes(csr_bytes)
+                template_info = _enrich_template_info(
+                    _parse_template_from_csr_bytes(csr_bytes)
+                )
                 return csr_bytes, body_part_id, template_info
         except Exception:
             pass
@@ -422,7 +680,9 @@ def exct_csr_from_cmc(p7_der: bytes):
             csr_obj = csr.CertificationRequest.load(pki_octets)
             csr_bytes = csr_obj.dump()
             body_part_id = 0
-            template_info = _parse_template_from_csr_bytes(csr_bytes)
+            template_info = _enrich_template_info(
+                _parse_template_from_csr_bytes(csr_bytes)
+            )
             return csr_bytes, body_part_id, template_info
         except Exception:
             pass
@@ -432,11 +692,19 @@ def exct_csr_from_cmc(p7_der: bytes):
             "Unable to extract a CSR: no TCR, no simplePKIRequest, nor a direct CSR. "
             f"EncapContentInfo.content_type={ct}"
         )
+
     except Exception:
-        # Ultimate fallback: some clients send just a “naked” CSR
+        # Ultimate fallback: some clients send just a "naked" CSR
         direct = csr.CertificationRequest.load(p7_der)
         csr_bytes = direct.dump()
-        return csr_bytes, 0, extract_ms_template_from_csr_der(csr_bytes)
+
+        info = extract_ms_template_from_csr_der(csr_bytes)
+        info["cmc_signatures"] = []
+        info["cmc_signature_valid"] = False
+        info["cmc_signature_errors"] = [
+            "Request is a bare PKCS#10, not a CMS/CMC SignedData"
+        ]
+        return csr_bytes, 0, info
 
 
 # -----------------------------------------------------------------------------
@@ -1646,4 +1914,3 @@ def build_ket_response(uuid_request: str, uuid_random: str, ket_cert_der: str) -
 
     raw = ET.tostring(env, encoding="utf-8", xml_declaration=True)
     return _prettify(raw)
-
