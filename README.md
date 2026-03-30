@@ -275,7 +275,7 @@ cd /opt/adcs_python
 You can submit a CSR directly from the command line without using the API interface:
 
 ```bash
-    /opt/adcs_python/manageca.py --submit-csr --signer-ca-id 'ca_inter_test --username 'srvads$@MYDOMAIN.LAN' --template-name 'dc' --csr-path srvads.csr
+    /opt/adcs_python/manageca.py --submit-csr --signer-ca-id 'ca_inter_test' --username 'srvads$@MYDOMAIN.LAN' --template-name 'dc' --csr-path srvads.csr
 ```
 
 Desired enhancements for the project.
