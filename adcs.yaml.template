@@ -14,6 +14,12 @@ templates:
       path: "/etc/adcs/callbacks/user_template.py"
   - callback:
       path: "/etc/adcs/callbacks/computer_template.py"
+  - callback:
+      path: "/etc/adcs/callbacks/dc_template.py"
+  - callback:
+      path: "/etc/adcs/callbacks/smartcard_auth.py"
+
+
 
 auth:
   - kerberos: true
