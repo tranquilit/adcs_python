@@ -44,6 +44,11 @@ import stat
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Any, Set
+import base64
+
+from callback_loader import load_func
+from adcs_config import build_templates_for_policy_response
+from utils import exct_csr_from_cmc
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -69,7 +74,7 @@ except Exception:
     from textual.screen import Screen as _BaseScreen  # type: ignore
 
 from cryptography import x509
-from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import hashes, serialization
 
 # Your utilities
 from adcs_config import load_yaml_conf
@@ -172,6 +177,208 @@ def _split_sans(values: Optional[List[str]]) -> List[str]:
         parts = [p.strip() for p in item.replace(";", ",").split(",")]
         out.extend([p for p in parts if p])
     return out
+
+
+def _decode_pem_or_der_request(raw: bytes) -> bytes:
+    data = (raw or b"").strip()
+    if not data:
+        raise ValueError("empty CSR input")
+
+    if data.startswith(b"-----BEGIN"):
+        lines = []
+        in_block = False
+        for line in data.splitlines():
+            stripped = line.strip()
+            if stripped.startswith(b"-----BEGIN "):
+                if b"CERTIFICATE REQUEST" in stripped or b"NEW CERTIFICATE REQUEST" in stripped:
+                    in_block = True
+                continue
+            if stripped.startswith(b"-----END "):
+                if in_block:
+                    break
+                continue
+            if in_block and stripped:
+                lines.append(stripped)
+        if not lines:
+            raise ValueError("PEM CSR block not found")
+        return base64.b64decode(b"".join(lines))
+
+    return data
+
+
+class _CliRequest:
+    def __init__(self, headers: Optional[Dict[str, str]] = None):
+        self.headers = headers or {}
+        self.host_url = "https://localhost/"
+
+
+def _cmd_submit_csr_cli(
+    *,
+    ca_id: str,
+    username: str,
+    conf: Dict[str, Any],
+    csr_path: Optional[str] = None,
+    template_oid: Optional[str] = None,
+    template_name: Optional[str] = None,
+) -> int:
+    try:
+        ca = _cli_find_ca_by_id(conf, ca_id)
+        if not ca:
+            print(f"ERROR: CA not found: {ca_id}", file=sys.stderr)
+            return 1
+
+        if not username or not username.strip():
+            print("ERROR: --username is required with --submit-csr", file=sys.stderr)
+            return 1
+
+        if csr_path:
+            with open(csr_path, 'rb') as f:
+                request_blob = f.read()
+        else:
+            if sys.stdin.isatty():
+                print("ERROR: provide --csr-path or pipe the CSR on stdin", file=sys.stderr)
+                return 1
+            request_blob = sys.stdin.buffer.read()
+
+        request_blob = _decode_pem_or_der_request(request_blob)
+        csr_der, body_part_id, info = exct_csr_from_cmc(request_blob)
+
+        fake_request = _CliRequest(headers={})
+        templates_for_user, _ = build_templates_for_policy_response(
+            conf,
+            username=username.strip(),
+            request=fake_request
+        )
+
+        tmap = {(t.get("template_oid") or {}).get("value"): t for t in templates_for_user}
+        tmap_name = {t.get("common_name"): t for t in templates_for_user}
+
+        selected_template_oid = (template_oid or "").strip()
+        selected_template_name = (template_name or "").strip()
+        if selected_template_oid and selected_template_name:
+            print("ERROR: use either --template-oid or --template-name, not both", file=sys.stderr)
+            return 1
+
+        if selected_template_oid:
+            tpl = tmap.get(selected_template_oid)
+            if tpl:
+                info['oid'] = selected_template_oid
+                info['name'] = tpl.get('common_name')
+        elif selected_template_name:
+            tpl = tmap_name.get(selected_template_name)
+            if tpl:
+                info['name'] = selected_template_name
+                info['oid'] = (tpl.get('template_oid') or {}).get('value')
+        elif info.get('oid'):
+            tpl = tmap.get(info.get('oid'))
+        else:
+            tpl = tmap_name.get(info.get('name'))
+
+        if not tpl:
+            print("ERROR: The requested template is not valid", file=sys.stderr)
+            return 1
+
+        if ca['id'] not in (tpl.get('ca_references') or []):
+            print(
+                f"ERROR: {ca['id']} not in ca_references for template "
+                f"{(tpl.get('template_oid') or {}).get('value')}",
+                file=sys.stderr
+            )
+            return 1
+
+        if not ((tpl.get('permissions') or {}).get('enroll')):
+            print("ERROR: You do not have permission to enroll on this template", file=sys.stderr)
+            return 1
+
+        cb = (tpl.get("__callback") if tpl else (conf.get("__default_callback"))) or {}
+        cb_path = cb.get("path")
+        cb_issue = cb.get("issue")
+        if not cb_path or not cb_issue:
+            print("ERROR: no issue callback configured for this template", file=sys.stderr)
+            return 1
+
+        emit_certificate = load_func(cb_path, cb_issue)
+
+        request_id = uuid.uuid4().int
+        result = emit_certificate(
+            csr_der=csr_der,
+            request_id=request_id,
+            username=username.strip(),
+            ca=ca,
+            template=tpl,
+            info=info,
+            app_conf=conf,
+            CAID=ca['id'],
+            request=fake_request,
+            body_part_id=body_part_id,
+            p7_der=request_blob,
+        )
+
+        os.makedirs(ca['__path_csr'], exist_ok=True)
+        csr_path_out = os.path.join(ca['__path_csr'], f"{request_id}.pem")
+        if not os.path.isfile(csr_path_out):
+            b64_csr = base64.b64encode(csr_der).decode('ascii')
+            pem_csr = (
+                "-----BEGIN CERTIFICATE REQUEST-----\n" +
+                "\n".join(textwrap.wrap(b64_csr, 64)) +
+                "\n-----END CERTIFICATE REQUEST-----\n"
+            )
+            with open(csr_path_out, 'w') as f:
+                f.write(pem_csr)
+
+        status = str(result.get("status", "")).lower()
+
+        if status == "pending":
+            os.makedirs(conf['path_list_request_id'], exist_ok=True)
+            with open(os.path.join(conf['path_list_request_id'], str(request_id)), 'wb') as f:
+                f.write(request_blob)
+            print("Certificate request is pending")
+            print(f"REQUEST ID:  {request_id}")
+            print(f"CA:          {ca.get('display_name') or ca.get('id')}")
+            print(f"USERNAME:    {username.strip()}")
+            print(f"TEMPLATE:    {tpl.get('common_name')}")
+            print(f"CSR PATH:    {csr_path_out}")
+            return 0
+
+        if status == "denied":
+            print("Certificate request denied", file=sys.stderr)
+            print(f"REQUEST ID:  {request_id}", file=sys.stderr)
+            print(f"REASON:      {result.get('status_text') or 'Denied'}", file=sys.stderr)
+            return 1
+
+        if status != "issued":
+            print(f"ERROR: unknown callback status '{status}'", file=sys.stderr)
+            return 1
+
+        cert_val = result.get("cert")
+        if isinstance(cert_val, x509.Certificate):
+            cert_obj = cert_val
+        elif isinstance(cert_val, (bytes, bytearray, memoryview)):
+            cert_obj = x509.load_der_x509_certificate(bytes(cert_val))
+        else:
+            print("ERROR: Callback(issued) must return 'cert' (x509 or DER bytes)", file=sys.stderr)
+            return 1
+
+        cert_pem = cert_obj.public_bytes(encoding=serialization.Encoding.PEM)
+        fullchain_pem = _compose_fullchain_pem(cert_pem, conf=conf, ca=ca)
+
+        os.makedirs(ca['__path_cert'], exist_ok=True)
+        cert_path_out = os.path.join(ca['__path_cert'], f"{request_id}.pem")
+        with open(cert_path_out, 'wb') as f:
+            f.write(fullchain_pem)
+
+        print("Certificate issued successfully")
+        print(f"REQUEST ID:  {request_id}")
+        print(f"CA:          {ca.get('display_name') or ca.get('id')}")
+        print(f"USERNAME:    {username.strip()}")
+        print(f"TEMPLATE:    {tpl.get('common_name')}")
+        print(f"CERT PATH:   {cert_path_out}")
+        print(f"CSR PATH:    {csr_path_out}")
+        return 0
+
+    except Exception as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
 
 
 def _cmd_issue_cert_cli(
@@ -1552,6 +1759,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="Do not write the full chain into --crt-path (useful if you want to keep only the leaf cert).")
     p.add_argument("--valid-days", type=int,
                    help="Validity period of the new certificate in days (takes precedence over the original duration).")
+    p.add_argument("--submit-csr", action="store_true",
+                   help="Submit a CSR locally through the same issuance path as /CES/<CAID> and exit (no GUI).")
+    p.add_argument("--username", type=str,
+                   help="Username to use with --submit-csr (equivalent to g.username in app.py).")
+    p.add_argument("--csr-path", type=str,
+                   help="CSR/CMC request file (PEM or DER). If omitted with --submit-csr, data is read from stdin.")
+    p.add_argument("--template-oid", type=str,
+                   help="Certificate template OID to use with --submit-csr. Bypasses template extraction from the CSR when provided.")
+    p.add_argument("--template-name", type=str,
+                   help="Certificate template common name to use with --submit-csr. Bypasses template extraction from the CSR when provided.")
     return p
 
 
@@ -1622,6 +1839,25 @@ if __name__ == "__main__":
             conf=confadcs,
             crt_path=args.crt_path,
             key_path=args.key_path,
+        )
+        sys.exit(rc)
+
+    if args.submit_csr:
+        if not args.ca_id:
+            print("ERROR: --ca-id is required with --submit-csr", file=sys.stderr)
+            sys.exit(1)
+        if not args.username:
+            print("ERROR: --username is required with --submit-csr", file=sys.stderr)
+            sys.exit(1)
+
+        confadcs = load_yaml_conf(args.confadcs)
+        rc = _cmd_submit_csr_cli(
+            ca_id=args.ca_id,
+            username=args.username,
+            conf=confadcs,
+            csr_path=args.csr_path,
+            template_oid=args.template_oid,
+            template_name=args.template_name,
         )
         sys.exit(rc)
 
