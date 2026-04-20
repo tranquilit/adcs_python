@@ -362,7 +362,7 @@ def emit_certificate(
 
     dns_host = _b(sam_entry or {}, "dNSHostName", "")
     raw_sam = _b(sam_entry or {}, "sAMAccountName", "")
-    hostname = raw_sam[:-1] if raw_sam.endswith("$") else raw_sam
+    hostname = raw_sam
 
 
     cn = dns_host or hostname or "computer"
