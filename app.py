@@ -242,29 +242,24 @@ def ces_service(CAID):
     emit_certificate = load_func(cb_path, cb_issue)
 
     ces_uri = f"{_https_base_url()}/CES/{CAID}"
-
-    try:
-        if challenge['is_challenge_response']:
-            result = verify_tpm_for_template(
-                csr_der=csr_der,
-                p7_der=base64.b64decode(challenge['challenge_response']),
-                template=tpl,
-                request_id=request_id,
-                ca=ca,
-            )
-            print(result)
-            tpm_result={"status":"ok"}
-        else:
-            tpm_result = verify_tpm_for_template(
+    result_tpm = {}
+    if challenge['is_challenge_response']:
+        tpm_result = verify_tpm_for_template(
             csr_der=csr_der,
-            p7_der=p7_der,
+            p7_der=base64.b64decode(challenge['challenge_response']),
             template=tpl,
             request_id=request_id,
             ca=ca,
-            extra_request_data=None,
         )
-    except ValueError as exc:
-        return Response(f"TPM attestation rejected: {exc}", 403)
+    else:
+        tpm_result = verify_tpm_for_template(
+        csr_der=csr_der,
+        p7_der=p7_der,
+        template=tpl,
+        request_id=request_id,
+        ca=ca,
+        extra_request_data=None,
+    )
 
     if tpm_result.get("status") == "pending":
         status_text = "En attente de traitement"
@@ -288,11 +283,7 @@ def ces_service(CAID):
         with open (os.path.join(app.confadcs['path_list_request_id'],str(request_id)) ,'wb') as f:
             f.write(p7_der)
 
-        print('pending')
         return response
-
-    if tpm_result.get("status") != "ok":
-        return Response("TPM attestation failed", 403)
 
     result = emit_certificate(
         csr_der=csr_der,
@@ -305,7 +296,8 @@ def ces_service(CAID):
         CAID=CAID,
         request=request,
         body_part_id=body_part_id,
-        p7_der=p7_der
+        p7_der=p7_der,
+        tpm_result=tpm_result
     )
 
     csr_path = os.path.join(ca['__path_csr'], f"{request_id}.pem")
@@ -437,15 +429,6 @@ if __name__ == "__main__":
     print("Loaded config with", len(decls), "template declaration(s).")
     #app.run(host='127.0.0.1', port=8080)
     serve(app, host="127.0.0.1", port=8080)
-
-
-
-
-
-
-
-
-
 
 
 
