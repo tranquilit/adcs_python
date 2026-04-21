@@ -1203,22 +1203,27 @@ def _kdfe(hash_alg: int, z: bytes, label: str, party_u_info: bytes, party_v_info
 
 
 def infer_ek_name_alg_from_public_key(ek_pub) -> int:
-    try:
-        if isinstance(ek_pub, rsa.RSAPublicKey):
-            if ek_pub.key_size <= 2048:
-                return TPM2_ALG_SHA256
-            if ek_pub.key_size <= 4096:
-                return TPM2_ALG_SHA384
-        elif isinstance(ek_pub, ec.EllipticCurvePublicKey):
-            if isinstance(ek_pub.curve, ec.SECP256R1):
-                return TPM2_ALG_SHA256
-            if isinstance(ek_pub.curve, ec.SECP384R1):
-                return TPM2_ALG_SHA384
-            if isinstance(ek_pub.curve, ec.SECP521R1):
-                return TPM2_ALG_SHA512
-    except Exception:
-        pass
-    return TPM2_ALG_SHA256
+    if isinstance(ek_pub, rsa.RSAPublicKey):
+        if ek_pub.key_size <= 2048:
+            return TPM2_ALG_SHA256
+        if ek_pub.key_size <= 4096:
+            return TPM2_ALG_SHA384
+        raise TPMAttestationError(
+            f"RSA EK key size {ek_pub.key_size} bits is not supported for name algorithm inference"
+        )
+    if isinstance(ek_pub, ec.EllipticCurvePublicKey):
+        if isinstance(ek_pub.curve, ec.SECP256R1):
+            return TPM2_ALG_SHA256
+        if isinstance(ek_pub.curve, ec.SECP384R1):
+            return TPM2_ALG_SHA384
+        if isinstance(ek_pub.curve, ec.SECP521R1):
+            return TPM2_ALG_SHA512
+        raise TPMAttestationError(
+            f"ECC EK curve {type(ek_pub.curve).__name__} is not supported for name algorithm inference"
+        )
+    raise TPMAttestationError(
+        f"Unsupported EK public key type: {type(ek_pub).__name__}"
+    )
 
 
 def tpm2_make_credential(
@@ -1440,11 +1445,15 @@ def _sign_cmc_pki_response_python(
             a_cms.CMSAttribute({"type": "1.2.840.113549.1.9.4", "values": [hashlib.sha256(pki_response_der).digest()]}),
         ]
     )
-    signature = serialization.load_pem_private_key(_normalize_pem_bytes(signer_key_pem), password=None).sign(
-        signed_attrs.dump(force=True),
-        padding.PKCS1v15(),
-        hashes.SHA256(),
-    )
+    signer_key = serialization.load_pem_private_key(_normalize_pem_bytes(signer_key_pem), password=None)
+    if isinstance(signer_key, rsa.RSAPrivateKey):
+        signature = signer_key.sign(signed_attrs.dump(force=True), padding.PKCS1v15(), hashes.SHA256())
+        sig_alg_asn1 = a_cms.SignedDigestAlgorithm({"algorithm": "rsassa_pkcs1v15", "parameters": a_core.Null()})
+    elif isinstance(signer_key, ec.EllipticCurvePrivateKey):
+        signature = signer_key.sign(signed_attrs.dump(force=True), ec.ECDSA(hashes.SHA256()))
+        sig_alg_asn1 = a_cms.SignedDigestAlgorithm({"algorithm": "sha256_ecdsa"})
+    else:
+        raise TPMAttestationError(f"Unsupported signer key type: {type(signer_key).__name__}")
     signer_info = a_cms.SignerInfo(
         {
             "version": "v1",
@@ -1457,9 +1466,7 @@ def _sign_cmc_pki_response_python(
             ),
             "digest_algorithm": a_cms.DigestAlgorithm({"algorithm": "sha256", "parameters": a_core.Null()}),
             "signed_attrs": signed_attrs,
-            "signature_algorithm": a_cms.SignedDigestAlgorithm(
-                {"algorithm": "rsassa_pkcs1v15", "parameters": a_core.Null()}
-            ),
+            "signature_algorithm": sig_alg_asn1,
             "signature": signature,
         }
     )

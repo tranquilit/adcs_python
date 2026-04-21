@@ -289,6 +289,8 @@ def _verify_pending_challenge_response(
         raise ValueError("pending_challenge does not contain created_at; cannot verify expiry")
     age = int(time.time()) - int(created_at)
     if age < 0 or age > max_age_seconds:
+        if request_id is not None:
+            _delete_pending_challenge(request_id)
         raise ValueError(
             f"TPM challenge has expired (age={age}s, max={max_age_seconds}s)"
         )
@@ -315,9 +317,8 @@ def _verify_pending_challenge_response(
     if ek_pub:
         der = ek_pub.public_bytes(
             encoding=serialization.Encoding.DER,
-            format=serialization.PublicFormat.PKCS1,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
         )
-
         ek_public_key_pkcs1_sha256 = hashlib.sha256(der).hexdigest()
     else:
         ek_public_key_pkcs1_sha256 = ''
