@@ -301,6 +301,17 @@ def _verify_pending_challenge_response(
 
     ek_cert, ek_pub = _restore_ek_materials(pending_challenge)
 
+    if ek_pub:
+        der = ek_pub.public_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PublicFormat.PKCS1,
+        )
+
+        ek_public_key_pkcs1_sha256 = hashlib.sha256(der).hexdigest()
+    else:
+        ek_public_key_pkcs1_sha256 = ''
+
+    
     return {
         "status": "ok",
         "used": True,
@@ -312,6 +323,7 @@ def _verify_pending_challenge_response(
         "request_id": int(request_id) if request_id is not None else None,
         "ek_cert": ek_cert,
         "ek_pub": ek_pub,
+        "ek_public_key_pkcs1_sha256": ek_public_key_pkcs1_sha256
     }
 
 
