@@ -483,13 +483,22 @@ def verify_tpm_for_template(
             serialization.Encoding.DER,
             serialization.PublicFormat.SubjectPublicKeyInfo,
         )
-        if result.certified_key_obj is not None:
-            attested_pub = result.certified_key_obj.to_cryptography_public_key().public_bytes(
-                serialization.Encoding.DER,
-                serialization.PublicFormat.SubjectPublicKeyInfo,
-            )
-            if csr_pub != attested_pub:
-                raise ValueError("CSR public key does not match TPM certified key")
+
+
+        if result.certified_key_obj is None:
+            raise ValueError("TPM attestation did not include a certified key bound to the CSR")
+        
+        csr_pub = csr.public_key().public_bytes(
+            serialization.Encoding.DER,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        attested_pub = result.certified_key_obj.to_cryptography_public_key().public_bytes(
+            serialization.Encoding.DER,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        if csr_pub != attested_pub:
+            raise ValueError("CSR public key does not match TPM certified key")
+        
 
         return {
             "status": "ok",
