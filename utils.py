@@ -43,6 +43,8 @@ OID_MS_CERT_TEMPLATE_INFO = "1.3.6.1.4.1.311.21.7"
 # For PKIResponse (PKIResponse + CMCStatusInfo)
 OID_ID_CCT_PKI_RESPONSE = "1.3.6.1.5.5.7.12.3"  # eContentType for PKIResponse
 OID_ID_CMC_STATUS_INFO = "1.3.6.1.5.5.7.7.1"     # id-cmc-statusInfo
+OID_MS_CMC_ADD_ATTRIBUTES = "1.3.6.1.4.1.311.10.10.1"
+OID_MS_ISSUED_CERT_HASH = "1.3.6.1.4.1.311.21.17"
 
 
 # -----------------------------------------------------------------------------
@@ -781,103 +783,6 @@ def _tbs_signed_attrs(attrs: a_cms.CMSAttributes) -> bytes:
     return (b"\x31" + der[1:]) if der and der[0] == 0xA0 else der
 
 
-def build_adcs_bst_certrep(child_der: bytes, ca_der: bytes, ca_key, cert_req_id: int) -> bytes:
-    """
-    Build a CMS SignedData response containing a CertRepMessage,
-    signed by the CA (behavior similar to ADCS).
-    """
-    leaf_cert = a_x509.Certificate.load(child_der)
-    ca_cert = a_x509.Certificate.load(ca_der)
-
-    status = PKIStatusInfo({"status": 0})
-    ckp = CertifiedKeyPair({"cert_or_enc_cert": ("certificate", leaf_cert)})
-    cert_resp = CertResponse({"cert_req_id": cert_req_id, "status": status, "certified_key_pair": ckp})
-    certrep = CertRepMessage({"response": [cert_resp]})
-    certrep_der = certrep.dump()
-
-    encap_content_info = a_cms.EncapsulatedContentInfo(
-        {
-            "content_type": a_cms.ContentType("1.3.6.1.5.5.7.12.2"),
-            "content": a_cms.ParsableOctetString(certrep_der),
-        }
-    )
-
-    certificates = [ca_cert, leaf_cert]
-
-
-    digest_algorithms = []
-    signer_infos = []
-
-    if ca_key is not None:
-        signed_attrs = a_cms.CMSAttributes(
-            [
-                a_cms.CMSAttribute(
-                    {
-                        "type": "1.2.840.113549.1.9.3",
-                        "values": [a_cms.ContentType("1.3.6.1.5.5.7.12.2")],
-                    }
-                ),
-                a_cms.CMSAttribute(
-                    {
-                        "type": "1.2.840.113549.1.9.4",
-                        "values": [hashlib.sha256(certrep_der).digest()],
-                    }
-                ),
-            ]
-        )
-
-        to_be_signed = _tbs_signed_attrs(signed_attrs)
-
-        digest_alg = a_cms.DigestAlgorithm({"algorithm": "sha256"})
-        signature = ca_key.sign(
-            to_be_signed,
-            padding.PKCS1v15(),
-            hashes.SHA256(),
-        )
-
-        signer_info = a_cms.SignerInfo(
-            {
-                "version": "v1",
-                "sid": a_cms.SignerIdentifier(
-                    {
-                        "issuer_and_serial_number": a_cms.IssuerAndSerialNumber(
-                            {
-                                "issuer": ca_cert.issuer,
-                                "serial_number": ca_cert.serial_number,
-                            }
-                        )
-                    }
-                ),
-                "digest_algorithm": a_cms.DigestAlgorithm({"algorithm": "sha256"}),
-                "signed_attrs": signed_attrs,
-                "signature_algorithm": a_cms.SignedDigestAlgorithm(
-                    {"algorithm": "sha256_rsa"}
-                ),
-                "signature": signature,
-            }
-        )
-
-        digest_algorithms = [digest_alg]
-        signer_infos = [signer_info]
-
-    signed_data = a_cms.SignedData(
-        {
-            "version": 3,
-            "digest_algorithms": digest_algorithms,
-            "encap_content_info": encap_content_info,
-            "certificates": certificates,
-            "signer_infos": signer_infos,
-        }
-    )
-
-    content_info = a_cms.ContentInfo(
-        {
-            "content_type": "signed_data",
-            "content": signed_data,
-        }
-    )
-    return content_info.dump()
-
 
 # -----------------------------------------------------------------------------
 # PKIResponse (pending/denied) builders and CMS wrapper
@@ -932,6 +837,37 @@ class AttributeValue(univ.Any):
 
 class AttributeValues(univ.SetOf):
     componentType = AttributeValue()
+
+
+class CMCAttributeValue(univ.Any):
+    pass
+
+
+class CMCAttributeValues(univ.SetOf):
+    componentType = CMCAttributeValue()
+
+
+class CMCAttribute(univ.Sequence):
+    componentType = namedtype.NamedTypes(
+        namedtype.NamedType('type', univ.ObjectIdentifier()),
+        namedtype.NamedType('values', CMCAttributeValues()),
+    )
+
+
+class CMCAttributes(univ.SetOf):
+    componentType = CMCAttribute()
+
+
+class BodyPartIDSequence(univ.SequenceOf):
+    componentType = BodyPartID()
+
+
+class CMCAddAttributes(univ.Sequence):
+    componentType = namedtype.NamedTypes(
+        namedtype.NamedType('pkiDataReference', BodyPartID()),
+        namedtype.NamedType('certReferences', BodyPartIDSequence()),
+        namedtype.NamedType('attributes', CMCAttributes()),
+    )
 
 
 class TaggedAttribute(univ.Sequence):
@@ -1042,6 +978,138 @@ def _build_pkiresponse_denied_der(
     resp.setComponentByName('otherMsgSequence', OtherMsgSeq())
 
     return der_encode(resp)
+
+
+def _build_pkiresponse_issued_der(
+    cert_der: bytes,
+    *,
+    status_text: str = "Issued",
+    cert_req_id: int = 1,
+) -> bytes:
+    """
+    Build a PKIResponse(success) matching ADCS CMC full PKI response format.
+
+    Per MS-WCCE 3.2.1.4.2.1.4.8.2, the PKIResponse controlSequence MUST contain:
+      - bodyPartID=1, id-cmc-statusInfo, CMCStatusInfo(success)
+      - bodyPartID=2, szOID_CMC_ADD_ATTRIBUTES with szOID_ISSUED_CERT_HASH = SHA1(issued cert)
+    cmsSequence and otherMsgSequence are unused.
+    """
+    csi = CMCStatusInfo()
+    csi.setComponentByName('cMCStatus', 0)  # success
+
+    bl = BodyPartList()
+    bl.append(BodyPartID(cert_req_id))
+    csi.setComponentByName('bodyList', bl)
+
+    if status_text:
+        csi.setComponentByName('statusString', char.UTF8String(status_text))
+
+    ta_status = TaggedAttribute()
+    ta_status.setComponentByName('bodyPartID', BodyPartID(1))
+    ta_status.setComponentByName('attrType', univ.ObjectIdentifier(OID_ID_CMC_STATUS_INFO))
+    ta_status_values = AttributeValues()
+    ta_status_values.append(AttributeValue(der_encode(csi)))
+    ta_status.setComponentByName('attrValues', ta_status_values)
+
+    cert_hash = hashlib.sha1(cert_der).digest()
+    issued_hash_attr = CMCAttribute()
+    issued_hash_attr.setComponentByName('type', univ.ObjectIdentifier(OID_MS_ISSUED_CERT_HASH))
+    issued_hash_values = CMCAttributeValues()
+    issued_hash_values.append(CMCAttributeValue(der_encode(univ.OctetString(cert_hash))))
+    issued_hash_attr.setComponentByName('values', issued_hash_values)
+
+    attrs = CMCAttributes()
+    attrs.append(issued_hash_attr)
+
+    cert_refs = BodyPartIDSequence()
+    cert_refs.append(BodyPartID(cert_req_id))
+
+    cmc_add = CMCAddAttributes()
+    cmc_add.setComponentByName('pkiDataReference', BodyPartID(0))
+    cmc_add.setComponentByName('certReferences', cert_refs)
+    cmc_add.setComponentByName('attributes', attrs)
+
+    ta_attrs = TaggedAttribute()
+    ta_attrs.setComponentByName('bodyPartID', BodyPartID(2))
+    ta_attrs.setComponentByName('attrType', univ.ObjectIdentifier(OID_MS_CMC_ADD_ATTRIBUTES))
+    ta_attrs_values = AttributeValues()
+    ta_attrs_values.append(AttributeValue(der_encode(cmc_add)))
+    ta_attrs.setComponentByName('attrValues', ta_attrs_values)
+
+    controls = TaggedAttributeSeq()
+    controls.append(ta_status)
+    controls.append(ta_attrs)
+
+    resp = PKIResponse()
+    resp.setComponentByName('controlSequence', controls)
+    resp.setComponentByName('cmsSequence', TaggedContentInfoSeq())
+    resp.setComponentByName('otherMsgSequence', OtherMsgSeq())
+    return der_encode(resp)
+
+
+def build_adcs_bst_pkiresponse_issued(
+    child_der: bytes,
+    ca_der: bytes,
+    ca_key,
+    cert_req_id: int = 1,
+    *,
+    status_text: str = "Issued",
+) -> bytes:
+    """Build the final CMC full PKI response used by ADCS for an issued cert."""
+    leaf_cert = a_x509.Certificate.load(child_der)
+    signer_cert = a_x509.Certificate.load(ca_der)
+
+    pkiresp_der = _build_pkiresponse_issued_der(
+        cert_der=child_der,
+        status_text=status_text,
+        cert_req_id=cert_req_id,
+    )
+
+    encap_content_info = a_cms.EncapsulatedContentInfo(
+        {
+            "content_type": a_cms.ContentType(OID_ID_CCT_PKI_RESPONSE),
+            "content": a_cms.ParsableOctetString(pkiresp_der),
+        }
+    )
+
+    signed_attrs = a_cms.CMSAttributes(
+        [
+            a_cms.CMSAttribute({"type": "1.2.840.113549.1.9.3", "values": [a_cms.ContentType(OID_ID_CCT_PKI_RESPONSE)]}),
+            a_cms.CMSAttribute({"type": "1.2.840.113549.1.9.4", "values": [hashlib.sha256(pkiresp_der).digest()]}),
+        ]
+    )
+    to_be_signed = _tbs_signed_attrs(signed_attrs)
+    if ca_key :
+        signer_info = [a_cms.SignerInfo(
+            {
+                "version": "v1",
+                "sid": a_cms.SignerIdentifier(
+                    {
+                        "issuer_and_serial_number": a_cms.IssuerAndSerialNumber(
+                            {"issuer": signer_cert.issuer, "serial_number": signer_cert.serial_number}
+                        )
+                    }
+                ),
+                "digest_algorithm": a_cms.DigestAlgorithm({"algorithm": "sha256"}),
+                "signed_attrs": signed_attrs,
+                "signature_algorithm": a_cms.SignedDigestAlgorithm({"algorithm": "sha256_rsa"}),
+                "signature": ca_key.sign(to_be_signed, padding.PKCS1v15(), hashes.SHA256()) if ca_key else b"",
+            }
+        )]
+    else:
+        signer_info = []
+    
+    sd = a_cms.SignedData(
+        {
+            "version": 3,
+            "digest_algorithms": [a_cms.DigestAlgorithm({"algorithm": "sha256"})],
+            "encap_content_info": encap_content_info,
+            "certificates": [leaf_cert, signer_cert],
+            "signer_infos": signer_info,
+        }
+    )
+    ci = a_cms.ContentInfo({"content_type": "signed_data", "content": sd})
+    return ci.dump()
 
 
 def build_adcs_bst_pkiresponse(

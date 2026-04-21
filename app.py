@@ -16,10 +16,10 @@ from cryptography.hazmat.primitives import serialization
 from decoratorauth import auth_required
 
 from utils import (
-    build_adcs_bst_certrep,
     format_b64_for_soap,
     exct_csr_from_cmc,
     build_adcs_bst_pkiresponse,
+    build_adcs_bst_pkiresponse_issued,
     build_ws_trust_response,
     build_get_policies_response,
     build_ces_response,
@@ -106,6 +106,36 @@ def cep_service():
     )
     return Response(response_xml, content_type='application/soap+xml')
 
+CHALLENGE_RESPONSE = "http://schemas.microsoft.com/windows/pki/2009/01/enrollment#CHALLENGERESPONSE"
+
+
+def extract_challenge_response_and_request_id(xml_data: str):
+    ns = {
+        "s": "http://www.w3.org/2003/05/soap-envelope",
+        "wst": "http://docs.oasis-open.org/ws-sx/ws-trust/200512",
+        "wsse": "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd",
+        "auth": "http://schemas.xmlsoap.org/ws/2006/12/authorization",
+    }
+
+    root = ET.fromstring(xml_data)
+
+    challenge_response = None
+    token = root.find(".//wsse:BinarySecurityToken", ns)
+    if token is not None and token.get("ValueType") == CHALLENGE_RESPONSE:
+        challenge_response = "".join((token.text or "").split())
+
+    request_id = root.findtext(
+        './/auth:ContextItem[@Name="RequestID"]/auth:Value',
+        namespaces=ns
+    )
+
+    return {
+        "is_challenge_response": challenge_response is not None,
+        "challenge_response": challenge_response,
+        "request_id": request_id,
+    }
+
+
 
 @app.route('/CES/<CAID>', methods=['POST'])
 @auth_required
@@ -145,9 +175,23 @@ def ces_service(CAID):
     
         return Response(response_xml, content_type='application/soap+xml')
  
+
+    challenge = extract_challenge_response_and_request_id(rst_xml)
+
     req_id_elem = root.find(".//enr:RequestID", {"enr": "http://schemas.microsoft.com/windows/pki/2009/01/enrollment"})
     if req_id_elem is not None and (req_id_elem.text or "").strip():
         request_id = int(req_id_elem.text.strip())
+        if not os.path.isfile(os.path.join(app.confadcs['path_list_request_id'],str(request_id))):
+            app.logger.error("File not found: %s", os.path.join(app.confadcs['path_list_request_id'],str(request_id)))
+            return Response(
+                'File %s not foud in path_list_request_id' % str(request_id),
+                content_type="application/soap+xml; charset=utf-8",
+                status=500
+            )
+        with open (os.path.join(app.confadcs['path_list_request_id'],str(request_id)) ,'rb') as f:
+            p7_der = f.read()
+    elif challenge['is_challenge_response'] :
+        request_id = challenge['request_id']
         if not os.path.isfile(os.path.join(app.confadcs['path_list_request_id'],str(request_id))):
             app.logger.error("File not found: %s", os.path.join(app.confadcs['path_list_request_id'],str(request_id)))
             return Response(
@@ -200,7 +244,10 @@ def ces_service(CAID):
     ces_uri = f"{_https_base_url()}/CES/{CAID}"
 
     try:
-        tpm_result = verify_tpm_for_template(
+        if challenge['is_challenge_response']:
+            tpm_result={"status":"ok"}
+        else:
+            tpm_result = verify_tpm_for_template(
             csr_der=csr_der,
             p7_der=p7_der,
             template=tpl,
@@ -222,14 +269,18 @@ def ces_service(CAID):
             disposition_message=status_text,
             lang="fr-FR",
         )
-
         response = Response(
             xml_body.decode("utf-8"),
             content_type="application/soap+xml; charset=utf-8",
             status=http_code
         )
         response.headers["X-TPM-Request-Id"] = tpm_result["request_id"]
-        response.headers["X-TPM-Status"] = "challenge_pending"
+        response.headers["X-TPM-Status"] = "pending"
+
+        with open (os.path.join(app.confadcs['path_list_request_id'],str(request_id)) ,'wb') as f:
+            f.write(p7_der)
+
+        print('pending')
         return response
 
     if tpm_result.get("status") != "ok":
@@ -326,7 +377,7 @@ def ces_service(CAID):
         ##https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wcce/2524682a-9587-4ac1-8adf-7e8094baa321
         if not pkcs7_der:
 
-            pkcs7_der = build_adcs_bst_certrep(
+            pkcs7_der = build_adcs_bst_pkiresponse_issued(
                 cert_der,
                 ca["__certificate_der"],
                 ca["__key_obj"],
