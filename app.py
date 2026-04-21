@@ -119,7 +119,7 @@ def extract_challenge_response_and_request_id(xml_data: str):
 
     root = ET.fromstring(xml_data)
 
-    challenge_response = None
+    challenge_response = ""
     token = root.find(".//wsse:BinarySecurityToken", ns)
     if token is not None and token.get("ValueType") == CHALLENGE_RESPONSE:
         challenge_response = "".join((token.text or "").split())
@@ -130,8 +130,8 @@ def extract_challenge_response_and_request_id(xml_data: str):
     )
 
     return {
-        "is_challenge_response": challenge_response is not None,
-        "challenge_response": challenge_response,
+        "is_challenge_response": challenge_response != "",
+        "challenge_response": challenge_response.replace('&#xD;','').replace('\n',''),
         "request_id": request_id,
     }
 
@@ -245,6 +245,14 @@ def ces_service(CAID):
 
     try:
         if challenge['is_challenge_response']:
+            result = verify_tpm_for_template(
+                csr_der=csr_der,
+                p7_der=base64.b64decode(challenge['challenge_response']),
+                template=tpl,
+                request_id=request_id,
+                ca=ca,
+            )
+            print(result)
             tpm_result={"status":"ok"}
         else:
             tpm_result = verify_tpm_for_template(

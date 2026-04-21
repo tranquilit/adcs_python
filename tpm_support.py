@@ -21,6 +21,21 @@ def _save_pending_challenge(request_id: str, payload: dict) -> None:
     (pending_dir / f"{request_id}.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _load_pending_challenge(request_id: str | int) -> Optional[dict]:
+    path = Path(_PENDING_DIR) / f"{request_id}.json"
+    if not path.is_file():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _delete_pending_challenge(request_id: str | int) -> None:
+    path = Path(_PENDING_DIR) / f"{request_id}.json"
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def _template_tpm_policy(template: dict) -> Optional[dict]:
     flags = (template.get("flags") or {}).get("private_key_flags")
     if flags is None:
@@ -180,6 +195,76 @@ def _spki_sha256(csr: x509.CertificateSigningRequest) -> str:
     return hashlib.sha256(spki).hexdigest()
 
 
+def _coerce_bytes(value) -> Optional[bytes]:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, str):
+        return base64.b64decode(value)
+    raise TypeError(f"Unsupported binary value type: {type(value).__name__}")
+
+
+def _extract_challenge_response_der(*, p7_der: Optional[bytes], extra_request_data: Optional[dict]) -> Optional[bytes]:
+    if extra_request_data:
+        for key in (
+            "challenge_response_der",
+            "challenge_response",
+            "challenge_response_b64",
+            "challenge_blob",
+            "challenge_blob_b64",
+            "pending_response",
+            "pending_response_b64",
+        ):
+            if key in extra_request_data and extra_request_data.get(key) is not None:
+                return _coerce_bytes(extra_request_data.get(key))
+    return p7_der
+
+
+def _verify_pending_challenge_response(
+    *,
+    csr: x509.CertificateSigningRequest,
+    template: dict,
+    ca: Optional[dict],
+    pending_challenge: dict,
+    challenge_response_der: bytes,
+    request_id: Optional[int] = None,
+) -> dict:
+    expected_secret_b64 = pending_challenge.get("secret_b64")
+    if not expected_secret_b64:
+        raise ValueError("pending_challenge does not contain secret_b64")
+
+    expected_spki_sha256 = pending_challenge.get("spki_sha256")
+    current_spki_sha256 = _spki_sha256(csr)
+    if expected_spki_sha256 and current_spki_sha256 != expected_spki_sha256:
+        raise ValueError("CSR public key does not match the pending challenge context")
+
+    materials = _resolve_ca_materials_for_tpm(template, ca)
+    ket_priv = tpm_mod._load_private_key_from_pem(materials["ket_key_pem"])
+    ket_cert_der = tpm_mod.pem_cert_to_der(materials["ket_cert_pem"])
+
+    clear = tpm_mod._decrypt_cms_enveloped_data(challenge_response_der, ket_cert_der, ket_priv)
+    expected_secret = base64.b64decode(expected_secret_b64)
+    if clear != expected_secret:
+        raise ValueError("TPM challenge response does not match the pending secret")
+
+    if request_id is not None:
+        _delete_pending_challenge(request_id)
+
+    return {
+        "status": "ok",
+        "used": True,
+        "mode": pending_challenge.get("mode", "CERTIFY"),
+        "attestation_without_policy": pending_challenge.get("attestation_without_policy", False),
+        "attestation_valid": True,
+        "challenge_verified": True,
+        "microsoft_native_attestation": True,
+        "request_id": int(request_id) if request_id is not None else None,
+    }
+
+
 def create_microsoft_certify_challenge_response(*, csr, bundle, template: dict, request_id: int, ca: dict) -> dict:
     materials = _resolve_ca_materials_for_tpm(template, ca)
     ket_priv = tpm_mod._load_private_key_from_pem(materials["ket_key_pem"])
@@ -215,18 +300,17 @@ def create_microsoft_certify_challenge_response(*, csr, bundle, template: dict, 
         signer_chain_pems=materials["ca_sign_chain_pems"],
     )
 
-    _save_pending_challenge(
-        str(request_id),
-        {
-            "mode": "CERTIFY",
-            "template_name": template.get("common_name"),
-            "spki_sha256": _spki_sha256(csr),
-            "secret_b64": base64.b64encode(challenge["secret"]).decode("ascii"),
-            "created_at": int(time.time()),
-            "encryption_algorithm_oid": encryption_algorithm_oid,
-            "ek_cert_present": bool(bundle.ek_cert_der),
-        },
-    )
+    pending_payload = {
+        "mode": "CERTIFY",
+        "template_name": template.get("common_name"),
+        "spki_sha256": _spki_sha256(csr),
+        "secret_b64": base64.b64encode(challenge["secret"]).decode("ascii"),
+        "created_at": int(time.time()),
+        "encryption_algorithm_oid": encryption_algorithm_oid,
+        "ek_cert_present": bool(bundle.ek_cert_der),
+        "attestation_without_policy": (_template_tpm_policy(template) or {}).get("attestation_without_policy", False),
+    }
+    _save_pending_challenge(str(request_id), pending_payload)
 
     return {
         "status": "pending",
@@ -238,6 +322,7 @@ def create_microsoft_certify_challenge_response(*, csr, bundle, template: dict, 
         "microsoft_native_attestation": True,
         "ek_info_decrypted": True,
         "fully_decoded": False,
+        "pending_challenge": pending_payload,
     }
 
 
@@ -249,12 +334,36 @@ def verify_tpm_for_template(
     request_id: Optional[int] = None,
     ca: Optional[dict] = None,
     extra_request_data: Optional[dict] = None,
+    pending_challenge: Optional[dict] = None,
 ) -> dict:
     policy = _template_tpm_policy(template)
     if not policy:
         return {"status": "ok", "used": False, "attestation_valid": False}
 
     csr = x509.load_der_x509_csr(csr_der)
+
+    if pending_challenge is None and request_id is not None:
+        pending_challenge = _load_pending_challenge(request_id)
+
+    challenge_response_der = _extract_challenge_response_der(
+        p7_der=p7_der,
+        extra_request_data=extra_request_data,
+    )
+    if pending_challenge and challenge_response_der:
+        try:
+            bundle_probe = tpm_mod.extract_tpm_bundle_from_cmc(challenge_response_der)
+        except Exception:
+            bundle_probe = None
+        if bundle_probe is None:
+            return _verify_pending_challenge_response(
+                csr=csr,
+                template=template,
+                ca=ca,
+                pending_challenge=pending_challenge,
+                challenge_response_der=challenge_response_der,
+                request_id=request_id,
+            )
+
     bundle = None
     if p7_der:
         try:
@@ -268,6 +377,15 @@ def verify_tpm_for_template(
         bundle = _build_bundle_from_json(extra_request_data)
 
     if bundle is None:
+        if pending_challenge and challenge_response_der:
+            return _verify_pending_challenge_response(
+                csr=csr,
+                template=template,
+                ca=ca,
+                pending_challenge=pending_challenge,
+                challenge_response_der=challenge_response_der,
+                request_id=request_id,
+            )
         if policy["required"]:
             raise ValueError(
                 "TPM attestation required by template but no Microsoft key-attestation attributes were found in the PKCS#10 request"
@@ -326,6 +444,16 @@ def verify_tpm_for_template(
             "attestation_without_policy": policy["attestation_without_policy"],
             "attestation_valid": True,
         }
+
+    if pending_challenge and challenge_response_der:
+        return _verify_pending_challenge_response(
+            csr=csr,
+            template=template,
+            ca=ca,
+            pending_challenge=pending_challenge,
+            challenge_response_der=challenge_response_der,
+            request_id=request_id,
+        )
 
     if policy["required"]:
         raise ValueError("TPM attestation required but request did not contain usable AIK_INFO/EK_INFO")
