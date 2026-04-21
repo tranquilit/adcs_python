@@ -28,7 +28,7 @@ from utils import (
 
 from adcs_config import load_yaml_conf, build_templates_for_policy_response
 from callback_loader import load_func
-from tpm_support import register_tpm_routes, verify_tpm_for_template
+from tpm_support import verify_tpm_for_template
 
 
 # ------------- SOAP parsing security -------------
