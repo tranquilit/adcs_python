@@ -49,6 +49,7 @@ auth:
 ##      private_dir: /var/lib/adcs/pki/private/ica/
 ##
 ##    ket_cert_pem: /var/lib/adcs/pki/ket-self/ket.crt.pem
+##    ket_key_pem:  /var/lib/adcs/pki/ket-self/ket.key.pem
 ##
 ##    auth_methods:
 ##      - method: kerberos
@@ -79,6 +80,7 @@ auth:
 ##      private_dir: /var/lib/adcs/pki/private/root/
 ##
 ##    ket_cert_pem: /var/lib/adcs/pki/ket-self/ket.crt.pem
+##    ket_key_pem:  /var/lib/adcs/pki/ket-self/ket.key.pem
 ##
 ##
 ############### TPM (if not key_path_pem and key_passphrase) ###################

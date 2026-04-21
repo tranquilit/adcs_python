@@ -28,6 +28,7 @@ from utils import (
 
 from adcs_config import load_yaml_conf, build_templates_for_policy_response
 from callback_loader import load_func
+from tpm_support import register_tpm_routes, verify_tpm_for_template
 
 
 # ------------- SOAP parsing security -------------
@@ -196,6 +197,44 @@ def ces_service(CAID):
 
     emit_certificate = load_func(cb_path, cb_issue)
 
+    ces_uri = f"{_https_base_url()}/CES/{CAID}"
+
+    try:
+        tpm_result = verify_tpm_for_template(
+            csr_der=csr_der,
+            p7_der=p7_der,
+            template=tpl,
+            request_id=request_id,
+            ca=ca,
+            extra_request_data=None,
+        )
+    except ValueError as exc:
+        return Response(f"TPM attestation rejected: {exc}", 403)
+
+    if tpm_result.get("status") == "pending":
+        app.logger.error('TPM DEBUG app challenge_pending request_id=%r tpm_request_id=%r pkcs7_len=%d', request_id, tpm_result.get('request_id'), len(tpm_result['challenge_pkcs7_der']))
+        status_text = "En attente de traitement"
+        xml_body, http_code = build_ws_trust_response(
+            pkcs7_der=tpm_result["challenge_pkcs7_der"],
+            relates_to=f"urn:uuid:{uuid_request}",
+            request_id=int(tpm_result.get("request_id", request_id)),
+            ces_uri=ces_uri,
+            status="pending",
+            disposition_message=status_text,
+            lang="fr-FR",
+        )
+
+        response = Response(
+            xml_body.decode("utf-8"),
+            content_type="application/soap+xml; charset=utf-8",
+            status=http_code
+        )
+        response.headers["X-TPM-Request-Id"] = tpm_result["request_id"]
+        response.headers["X-TPM-Status"] = "challenge_pending"
+        return response
+
+    if tpm_result.get("status") != "ok":
+        return Response("TPM attestation failed", 403)
 
     result = emit_certificate(
         csr_der=csr_der,

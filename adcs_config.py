@@ -427,10 +427,22 @@ def load_yaml_conf(path="adcs.yaml"):
             default_ca = ca
 
         if ca.get('ket_cert_pem'):
-            with open(ca.get('ket_cert_pem'), "r", encoding="utf-8") as f:
+            ket_cert_path = ca.get('ket_cert_pem')
+            if not os.path.isfile(ket_cert_path):
+                raise ValueError(f"KET certificate file not found: {ket_cert_path}")
+            with open(ket_cert_path, "r", encoding="utf-8") as f:
                 ket_cert_pem = f.read()
             cert_b64 = _pem_to_inner_b64(ket_cert_pem)
+            ca["__ket_certificate_pem"] = ket_cert_pem
             ca["__ket_certificate_b64"] = cert_b64
+
+        if ca.get('ket_key_pem'):
+            ket_key_path = ca.get('ket_key_pem')
+            if not os.path.isfile(ket_key_path):
+                raise ValueError(f"KET private key file not found: {ket_key_path}")
+            with open(ket_key_path, "r", encoding="utf-8") as f:
+                ket_key_pem = f.read()
+            ca["__ket_key_pem"] = ket_key_pem
     
     if conf["cas_list"]:
         conf["default_ca"] = default_ca or conf["cas_list"][0]
