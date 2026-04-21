@@ -124,6 +124,9 @@ Create a local CA (for testing)
 ./manageca.py --issue-cert --signer-ca-id "CA Inter Test" --cn testadcs.mydomain.lan --san testadcs.mydomain.lan --crt-path /etc/nginx/crt.pem --key-path /etc/nginx/key.pem
 ```
 
+> A **KET certificate** (**Key Exchange Token**) is a special certificate used to protect the **exchange of encrypted enrollment data** between the client and the server in Microsoft ADCS workflows, for example for **TPM attestation**.
+
+
 Configure Nginx
 ---------------------------------------------------------
 
