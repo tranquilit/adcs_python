@@ -212,7 +212,6 @@ def ces_service(CAID):
         return Response(f"TPM attestation rejected: {exc}", 403)
 
     if tpm_result.get("status") == "pending":
-        app.logger.error('TPM DEBUG app challenge_pending request_id=%r tpm_request_id=%r pkcs7_len=%d', request_id, tpm_result.get('request_id'), len(tpm_result['challenge_pkcs7_der']))
         status_text = "En attente de traitement"
         xml_body, http_code = build_ws_trust_response(
             pkcs7_der=tpm_result["challenge_pkcs7_der"],

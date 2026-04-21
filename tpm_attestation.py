@@ -156,7 +156,6 @@ def _check_ek_oid(cert: x509.Certificate):
 
 def _verify_ek_cert(ek_cert: x509.Certificate, trusted_roots: list):
     if not trusted_roots:
-        logger.warning('No trusted TPM EK roots configured — skipping chain validation. This is INSECURE and should only be used in test environments.')
         return
     issuer = ek_cert.issuer
     verified = False
@@ -472,7 +471,6 @@ def extract_microsoft_key_attestation_attributes_from_csr_der(csr_der: bytes) ->
                 attr_oids.append(_attr['type'].dotted)
             except Exception:
                 attr_oids.append('<unknown>')
-        logger.warning('TPM CSR PKCS10 attributes count=%d oids=%r', len(attr_oids), attr_oids)
     except Exception as exc:
         logger.warning('TPM CSR PKCS10 attributes enumeration failed: %r', exc)
     interesting = {oid_ek_info, oid_aik_info, oid_ksp_name, oid_attestation_statement, oid_attestation_blob}
@@ -485,7 +483,6 @@ def extract_microsoft_key_attestation_attributes_from_csr_der(csr_der: bytes) ->
             continue
         value_obj = _extract_first_attribute_value(attr['values'])
         if value_obj is None:
-            logger.warning('TPM CSR attr oid=%s has no first value', oid)
             continue
         try:
             value_type = type(value_obj).__name__
@@ -510,7 +507,6 @@ def extract_microsoft_key_attestation_attributes_from_csr_der(csr_der: bytes) ->
         raw = _raw_bytes(value_obj)
         raw_len = len(raw) if raw is not None else None
         raw_hex = raw.hex() if raw is not None else None
-        logger.warning('TPM CSR attr oid=%s type=%s value_dump_len=%r value_dump_hex=%s value_native=%s raw_len=%r raw_hex=%s', oid, value_type, value_dump_len, value_dump_hex, value_native_repr, raw_len, raw_hex)
         if raw is None:
             continue
         if oid == oid_ek_info:
@@ -542,7 +538,6 @@ def extract_microsoft_key_attestation_attributes_from_csr_der(csr_der: bytes) ->
 def load_trusted_ek_roots_from_dir(path: str) -> list:
     certs = []
     if not os.path.isdir(path):
-        logger.warning('trusted_ek_roots_dir=%s does not exist — no EK roots loaded', path)
         return certs
     for fname in os.listdir(path):
         fpath = os.path.join(path, fname)
@@ -838,7 +833,6 @@ def _extract_aik_name_from_microsoft_attestation_blob(attestation_blob_raw: byte
         parsed = _parse_microsoft_key_attestation_statement(attestation_blob_raw)
         if parsed.get('platform') == 2 and parsed.get('id_binding'):
             aik_name = _extract_aik_name_from_id_binding(parsed['id_binding'])
-            logger.warning('TPM AIK parse: recovered AIK name from KAST idBinding platform=%d version=%d offset=%d name=%s', parsed.get('platform'), parsed.get('version'), parsed.get('offset'), aik_name.hex())
             return aik_name
     except Exception as exc:
         logger.debug('TPM AIK structured KAST parse failed, falling back to heuristic scan: %s', exc)
@@ -892,13 +886,11 @@ def _extract_aik_name_from_microsoft_attestation_blob(attestation_blob_raw: byte
     candidates.sort(key=lambda item: (-item[0], item[1]))
     best_score, best_pos, best_pub = candidates[0]
     aik_name = best_pub.compute_name()
-    logger.warning('TPM AIK parse: pos=%d consumed=%d score=%d alg=%#06x nameAlg=%#06x attr=%#010x keyBits=%s name=%s', best_pos, len(best_pub._raw_bytes or b''), best_score, best_pub.alg_type, best_pub.name_alg, best_pub.object_attr, getattr(best_pub, 'rsa_key_bits', '?'), best_pub.compute_name().hex())
     return aik_name
 
 def _make_tach_blob(*, secret: bytes, ek_pub, aik_name: bytes, attestation_blob_raw: bytes | None=None, ek_name_alg: int=TPM2_ALG_SHA256, sym_bits: int=128) -> bytes:
     credential_blob, encrypted_secret = tpm2_make_credential(ek_pub=ek_pub, object_name=aik_name, credential_value=secret, ek_name_alg=ek_name_alg, sym_bits=sym_bits)
     makecred_raw = _tpm2b(credential_blob) + _tpm2b(encrypted_secret)
-    logger.warning('TPM TACH makecred credential_blob_len=%d encrypted_secret_len=%d prefix=%s', len(credential_blob), len(encrypted_secret), makecred_raw[:16].hex())
     pcpm_tail = b''
     if attestation_blob_raw:
         try:
@@ -907,25 +899,19 @@ def _make_tach_blob(*, secret: bytes, ek_pub, aik_name: bytes, attestation_blob_
             parsed_kast = None
         if parsed_kast and parsed_kast.get('platform') == 2 and parsed_kast.get('aik_opaque'):
             pcpm_tail = parsed_kast['aik_opaque']
-            logger.warning('TPM TACH using KAST aikOpaque offset=%d len=%d', parsed_kast.get('offset', -1) + parsed_kast.get('header_size', 0) + len(parsed_kast.get('id_binding', b'')) + len(parsed_kast.get('key_attestation', b'')), len(pcpm_tail))
         else:
             last_pcp = attestation_blob_raw.rfind(b'PCPM')
             if last_pcp >= 0:
                 pcpm_tail = attestation_blob_raw[last_pcp:]
-                logger.warning('TPM TACH using PCPM tail from attestation blob offset=%d len=%d', last_pcp, len(pcpm_tail))
-            else:
-                logger.warning('TPM TACH attestation blob had no PCPM marker; building header-only TACH')
         if pcpm_tail.startswith(b'PCPM') and len(pcpm_tail) >= 56:
             try:
                 hdr_len = struct.unpack('<I', pcpm_tail[4:8])[0]
                 prop1_len = struct.unpack('<I', pcpm_tail[16:20])[0] if len(pcpm_tail) >= 20 else -1
                 prop2_len = struct.unpack('<I', pcpm_tail[20:24])[0] if len(pcpm_tail) >= 24 else -1
-                logger.warning('TPM PCPM diag preserved total_len=%d hdr_len=0x%x prop1_len=0x%x prop2_len=0x%x prefix=%s', len(pcpm_tail), hdr_len, prop1_len, prop2_len, pcpm_tail[:80].hex())
             except Exception as exc:
                 logger.warning('TPM PCPM diag failed: %r', exc)
     tach_header = b'TACH' + struct.pack('<I', 1) + struct.pack('<I', 2 if pcpm_tail else 1) + struct.pack('<I', 24) + struct.pack('<I', len(makecred_raw)) + struct.pack('<I', len(pcpm_tail))
     tach = tach_header + makecred_raw + pcpm_tail
-    logger.warning('TPM TACH built version=1 sections=%d raw_len=%d tail_len=%d total_len=%d prefix=%s', 2 if pcpm_tail else 1, len(makecred_raw), len(pcpm_tail), len(tach), tach[:32].hex())
     return tach
 
 def _load_cert(der_or_pem: bytes) -> x509.Certificate:
@@ -1172,7 +1158,6 @@ def build_cmc_pending_status_info(*, request_id: int, status_string: str='En att
     pendToken = request_id.to_bytes(length, byteorder='big', signed=False)
     value = CMCStatusInfo({'cMCStatus': 3, 'bodyList': [body_part_id], 'statusString': status_string, 'otherInfo': {'pendToken': pendToken, 'pendTime': pend_time}})
     pend_der = value.dump()
-    logger.warning('TPM CMC pendInfo bodyPartID=%d request_id=%r len=%d sha256=%s hex=%s', body_part_id, request_id, len(pend_der), hashlib.sha256(pend_der).hexdigest(), pend_der.hex())
     return pend_der
 
 def _log_cmc_control(ctrl, label: str):
@@ -1194,7 +1179,7 @@ def _log_cmc_control(ctrl, label: str):
             body_part_id = int(ctrl['bodyPartID'].native)
         except Exception:
             body_part_id = None
-    logger.warning('TPM CMC control label=%s bodyPartID=%r oid=%r len=%d sha256=%s hex=%s', label, body_part_id, oid, len(der), hashlib.sha256(der).hexdigest(), der.hex())
+
 
 def _log_cmc_response_summary(control_sequence, cms_sequence, response_body_der: bytes):
     import hashlib
@@ -1215,8 +1200,6 @@ def _log_cmc_response_summary(control_sequence, cms_sequence, response_body_der:
                 control_body_parts.append(int(ctrl['bodyPartID'].native))
             except Exception:
                 control_body_parts.append(None)
-    logger.warning('TPM CMC summary controls=%d control_oids=%r control_body_parts=%r cms_items=%d response_body_len=%d response_body_sha256=%s', len(control_sequence), control_oids, control_body_parts, len(cms_sequence), len(response_body_der), hashlib.sha256(response_body_der).hexdigest())
-    logger.warning('TPM CMC response_body len=%d sha256=%s hex_prefix=%s hex_suffix=%s', len(response_body_der), hashlib.sha256(response_body_der).hexdigest(), response_body_der[:128].hex(), response_body_der[-128:].hex())
 
 def extract_encryption_algorithm_for_challenge_response(ms_ek_info_raw: bytes) -> str:
     return extract_content_encryption_algorithm_oid_from_ek_info(ms_ek_info_raw)
@@ -1265,13 +1248,7 @@ def build_ms_challenge_wrapper_value(*, encryption_algorithm_oid: str, aik_info_
     aik_info_der = a_core.OctetString(aik_info_hash).dump() if aik_info_hash is not None else None
     ksp_name_der = a_core.BMPString(ksp_name).dump()
     tach_blob_der = a_core.OctetString(tach_blob).dump()
-    logger.warning('TPM WRAP encAlg oid=%s der_len=%d der_hex=%s', encryption_algorithm_oid, len(enc_alg_der), enc_alg_der.hex())
-    if aik_info_hash is not None:
-        logger.warning('TPM WRAP caXchgCertHash hash_len=%d sha1=%s der_len=%d der_hex=%s', len(aik_info_hash), aik_info_hash.hex(), len(aik_info_der), aik_info_der.hex())
-    else:
-        logger.warning('TPM WRAP caXchgCertHash omitted')
-    logger.warning('TPM WRAP ksp_name=%r utf16be_hex=%s der_len=%d der_hex=%s', ksp_name, ksp_name.encode('utf-16-be').hex(), len(ksp_name_der), ksp_name_der.hex())
-    logger.warning('TPM WRAP tach_blob raw_len=%d sha256=%s der_len=%d der_prefix=%s der_suffix=%s', len(tach_blob), hashlib.sha256(tach_blob).hexdigest(), len(tach_blob_der), tach_blob_der[:64].hex(), tach_blob_der[-64:].hex())
+
     attr_enc = MsWrappedAttr({'oid': a_core.ObjectIdentifier(OID_ENROLL_ENCRYPTION_ALGORITHM), 'values': [_as_any_from_der(enc_alg_der)]})
     attr_aik = None
     if aik_info_der is not None:
@@ -1282,23 +1259,14 @@ def build_ms_challenge_wrapper_value(*, encryption_algorithm_oid: str, aik_info_
     attr_aik_der = attr_aik.dump() if attr_aik is not None else None
     attr_ksp_der = attr_ksp.dump()
     attr_tach_der = attr_tach.dump()
-    logger.warning('TPM WRAP attr_enc len=%d hex=%s', len(attr_enc_der), attr_enc_der.hex())
-    if attr_aik_der is not None:
-        logger.warning('TPM WRAP attr_aik len=%d hex=%s', len(attr_aik_der), attr_aik_der.hex())
-    else:
-        logger.warning('TPM WRAP attr_aik omitted')
-    logger.warning('TPM WRAP attr_ksp len=%d hex=%s', len(attr_ksp_der), attr_ksp_der.hex())
-    logger.warning('TPM WRAP attr_tach len=%d hex_prefix=%s hex_suffix=%s', len(attr_tach_der), attr_tach_der[:96].hex(), attr_tach_der[-96:].hex())
     attrs_items = [attr_enc]
     if attr_aik is not None:
         attrs_items.append(attr_aik)
     attrs_items.extend([attr_ksp, attr_tach])
     attrs = MsWrappedAttrs(attrs_items)
     attrs_der = attrs.dump()
-    logger.warning('TPM WRAP attrs_set len=%d sha256=%s hex_prefix=%s hex_suffix=%s', len(attrs_der), hashlib.sha256(attrs_der).hexdigest(), attrs_der[:128].hex(), attrs_der[-128:].hex())
     wrapper = MsChallengeWrapper({'version': 0, 'header': {'bodyPartID': inner_body_part_id}, 'attrs': attrs})
     wrapper_der = wrapper.dump()
-    logger.warning('TPM WRAP wrapper inner_body_part_id=%d len=%d sha256=%s hex_prefix=%s hex_suffix=%s', inner_body_part_id, len(wrapper_der), hashlib.sha256(wrapper_der).hexdigest(), wrapper_der[:128].hex(), wrapper_der[-128:].hex())
     return wrapper_der
 
 def build_adcs_like_control_sequence(*, request_id: int, encryption_algorithm_oid: str, aik_info_hash: bytes | None, tach_blob: bytes, ksp_name: str='Microsoft Platform Crypto Provider', pend_time=None) -> TaggedAttributes:
@@ -1337,7 +1305,6 @@ def _normalize_pem_bytes(value) -> bytes:
     raise TypeError(f'Unsupported PEM type: {type(value).__name__}')
 
 def _sign_cmc_pki_response_python(*, pki_response_der: bytes, signer_cert_pem, signer_key_pem, extra_chain_pems=None, extra_certs_der=None) -> bytes:
-    logger.error('TPM DEBUG _sign_cmc_pki_response_python pki_response_len=%d', len(pki_response_der))
     signer_cert_pem_b = _normalize_pem_bytes(signer_cert_pem)
     signer_key_pem_b = _normalize_pem_bytes(signer_key_pem)
     signer_cert = x509.load_pem_x509_certificate(signer_cert_pem_b)
@@ -1365,7 +1332,7 @@ def _sign_cmc_pki_response_python(*, pki_response_der: bytes, signer_cert_pem, s
             _add_cert_der(cert_der)
         except Exception:
             continue
-    logger.error('TPM DEBUG CMS certs count=%d subjects=%s', len(cert_choices), _debug_cert_subjects([c.chosen.dump() for c in cert_choices]))
+
     signed_attrs = a_cms.CMSAttributes([a_cms.CMSAttribute({'type': '1.2.840.113549.1.9.3', 'values': [a_cms.ContentType(OID_ID_CCT_PKI_RESPONSE)]}), a_cms.CMSAttribute({'type': '1.2.840.113549.1.9.4', 'values': [hashlib.sha256(pki_response_der).digest()]})])
     to_be_signed = signed_attrs.dump(force=True)
     private_key = serialization.load_pem_private_key(signer_key_pem_b, password=None)
@@ -1379,13 +1346,6 @@ def _sign_cmc_pki_response_python(*, pki_response_der: bytes, signer_cert_pem, s
     return out
 
 def build_and_sign_microsoft_attestation_challenge(*, request_id: int, ek_pub, ca_exchange_chain_der, encryption_algorithm_oid: str, aik_info_hash: bytes | None, signer_cert_pem, signer_key_pem, signer_chain_pems=None, secret: bytes | None=None, openssl_bin: str='openssl', aik_pub_raw: bytes | None=None, attestation_blob_raw: bytes | None=None) -> dict:
-    forced_request_id = os.getenv('TPM_FORCE_REQUEST_ID', '').strip()
-    if forced_request_id:
-        try:
-            request_id = int(forced_request_id, 0)
-            logger.debug('TPM override request_id from TPM_FORCE_REQUEST_ID=%r -> %d', forced_request_id, request_id)
-        except Exception as exc:
-            logger.error('TPM invalid TPM_FORCE_REQUEST_ID=%r err=%s', forced_request_id, exc)
     request_id = int(request_id)
     ek_name_alg = infer_ek_name_alg_from_public_key(ek_pub)
     logger.debug('TPM build_and_sign_microsoft_attestation_challenge request_id=%d encryption_algorithm_oid=%s aik_hash=%s ek_name_alg=%#06x', request_id, encryption_algorithm_oid, aik_info_hash.hex() if aik_info_hash is not None else 'OMITTED', ek_name_alg)
@@ -1399,7 +1359,6 @@ def build_and_sign_microsoft_attestation_challenge(*, request_id: int, ek_pub, c
             aik_name_alg = getattr(aik_pub, 'name_alg', TPM2_ALG_SHA256)
             logger.debug('TPM AIK name computed from aik_pub_raw: %s (name_alg=%#06x)', aik_name.hex(), aik_name_alg)
         except Exception as exc:
-            logger.warning('TPM failed to compute AIK name from aik_pub_raw: %s', exc)
             aik_name = None
     else:
         aik_name = None
@@ -1411,7 +1370,6 @@ def build_and_sign_microsoft_attestation_challenge(*, request_id: int, ek_pub, c
                 aik_name_alg = struct.unpack('>H', recovered[:2])[0]
             logger.debug('TPM AIK name recovered from attestation_blob_raw: %s (name_alg=%#06x)', aik_name.hex(), aik_name_alg)
         except Exception as exc:
-            logger.warning('TPM failed to recover AIK name from attestation_blob_raw: %s', exc)
             aik_name = None
     if aik_name is None:
         raise ValueError('Could not recover the AIK TPM name from the Microsoft attestation statement/blob; refusing to emit an invalid TPM2_MakeCredential challenge that Windows will reject during integrity verification.')
