@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import hmac
 import json
 import logging
 import time
@@ -277,10 +278,20 @@ def _verify_pending_challenge_response(
     pending_challenge: dict,
     challenge_response_der: bytes,
     request_id: Optional[int] = None,
+    max_age_seconds: int = 3600,
 ) -> dict:
     expected_secret_b64 = pending_challenge.get("secret_b64")
     if not expected_secret_b64:
         raise ValueError("pending_challenge does not contain secret_b64")
+
+    created_at = pending_challenge.get("created_at")
+    if created_at is None:
+        raise ValueError("pending_challenge does not contain created_at; cannot verify expiry")
+    age = int(time.time()) - int(created_at)
+    if age < 0 or age > max_age_seconds:
+        raise ValueError(
+            f"TPM challenge has expired (age={age}s, max={max_age_seconds}s)"
+        )
 
     expected_spki_sha256 = pending_challenge.get("spki_sha256")
     current_spki_sha256 = _spki_sha256(csr)
@@ -293,7 +304,7 @@ def _verify_pending_challenge_response(
 
     clear = tpm_mod._decrypt_cms_enveloped_data(challenge_response_der, ket_cert_der, ket_priv)
     expected_secret = base64.b64decode(expected_secret_b64)
-    if clear != expected_secret:
+    if not hmac.compare_digest(clear, expected_secret):
         raise ValueError("TPM challenge response does not match the pending secret")
 
     if request_id is not None:
@@ -481,21 +492,20 @@ def verify_tpm_for_template(
         getattr(bundle, name, None) is not None
         for name in ("aik_pub_raw", "attest_raw", "attest_sig_raw", "certified_key_raw", "nonce")
     ):
+        expected_nonce = getattr(bundle, "nonce", None)
+        if expected_nonce is None:
+            raise ValueError(
+                "TPM bundle does not carry a nonce; refusing to verify without replay protection"
+            )
         result = tpm_mod.verify_tpm_attestation(
             bundle=bundle,
-            expected_nonce=None,
+            expected_nonce=expected_nonce,
             require_fixed_tpm=True,
             require_fixed_parent=True,
             require_restricted=True,
         )
         if not result.success:
             raise ValueError(result.message)
-
-        csr_pub = csr.public_key().public_bytes(
-            serialization.Encoding.DER,
-            serialization.PublicFormat.SubjectPublicKeyInfo,
-        )
-
 
         if result.certified_key_obj is None:
             raise ValueError("TPM attestation did not include a certified key bound to the CSR")

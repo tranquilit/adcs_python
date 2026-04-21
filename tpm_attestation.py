@@ -131,21 +131,27 @@ def _tpm2b(data: bytes) -> bytes:
 
 
 def _tpm_alg_to_hash(alg: int) -> str:
-    return {
+    mapping = {
         TPM2_ALG_SHA1: "sha1",
         TPM2_ALG_SHA256: "sha256",
         TPM2_ALG_SHA384: "sha384",
         TPM2_ALG_SHA512: "sha512",
-    }.get(alg, "sha256")
+    }
+    if alg not in mapping:
+        raise TPMAttestationError(f"Unsupported TPM hash algorithm: {alg:#06x}")
+    return mapping[alg]
 
 
 def _tpm_alg_to_hash_obj(alg: int):
-    return {
+    mapping = {
         TPM2_ALG_SHA1: hashes.SHA1(),
         TPM2_ALG_SHA256: hashes.SHA256(),
         TPM2_ALG_SHA384: hashes.SHA384(),
         TPM2_ALG_SHA512: hashes.SHA512(),
-    }.get(alg, hashes.SHA256())
+    }
+    if alg not in mapping:
+        raise TPMAttestationError(f"Unsupported TPM hash algorithm: {alg:#06x}")
+    return mapping[alg]
 
 
 @dataclass
