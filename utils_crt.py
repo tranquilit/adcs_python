@@ -15,6 +15,7 @@ from typing import Tuple, Iterable, List, Optional, Dict, Any, Set
 from datetime import datetime, timezone, timedelta
 
 from cryptography import x509 as cx509
+from cryptography.x509.oid import NameOID, ObjectIdentifier
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import (
     rsa,
@@ -1016,6 +1017,205 @@ def _cmd_resign_crl(ca_id: str, next_update_hours: int = 8, bump_number: bool = 
     print(f"CRL re-signed for '{ca_id}' -> CRLNumber {new_num} (path: {crl_path})")
     return 0
 
+
+
+
+def _der_len(n: int) -> bytes:
+    if n < 0x80:
+        return bytes([n])
+    s = n.to_bytes((n.bit_length() + 7) // 8, "big")
+    return bytes([0x80 | len(s)]) + s
+
+
+def _der_tlv(tag: int, content: bytes) -> bytes:
+    return bytes([tag]) + _der_len(len(content)) + content
+
+
+def _der_sequence(*items: bytes) -> bytes:
+    return _der_tlv(0x30, b"".join(items))
+
+
+def _der_utf8_string(value: str) -> bytes:
+    return _der_tlv(0x0C, value.encode("utf-8"))
+
+
+def _der_oid(oid: str) -> bytes:
+    parts = [int(x) for x in oid.split(".")]
+    if len(parts) < 2:
+        raise ValueError(f"Invalid OID: {oid}")
+
+    first = 40 * parts[0] + parts[1]
+    encoded = [first]
+
+    for part in parts[2:]:
+        if part == 0:
+            encoded.append(0)
+            continue
+        tmp = []
+        while part:
+            tmp.append(part & 0x7F)
+            part >>= 7
+        for i in range(len(tmp) - 1, -1, -1):
+            b = tmp[i]
+            if i != 0:
+                b |= 0x80
+            encoded.append(b)
+
+    return _der_tlv(0x06, bytes(encoded))
+
+
+def _build_ket_application_policies_ext() -> cx509.UnrecognizedExtension:
+    """Build Microsoft Application Policies extension containing CAExchange OID."""
+    oid = ObjectIdentifier("1.3.6.1.4.1.311.21.10")
+    value = _der_sequence(
+        _der_sequence(
+            _der_oid("1.3.6.1.4.1.311.21.5")
+        )
+    )
+    return cx509.UnrecognizedExtension(oid, value)
+
+
+def _build_ket_template_name_ext(template_name: str = "CAExchange") -> cx509.UnrecognizedExtension:
+    """Build Microsoft Certificate Template Name extension."""
+    oid = ObjectIdentifier("1.3.6.1.4.1.311.20.2")
+    value = _der_sequence(_der_utf8_string(template_name))
+    return cx509.UnrecognizedExtension(oid, value)
+
+
+def create_ket_cert(
+    *,
+    ca: Dict[str, Any],
+    common_name: str,
+    valid_days: int = 7,
+    rsa_key_size: int = 2048,
+    subject_dc: Optional[List[str]] = None,
+) -> Tuple[cx509.Certificate, Any, bytes, bytes]:
+    """Generate a Microsoft KET/CAExchange-style certificate signed by the given CA."""
+    if not common_name or not common_name.strip():
+        raise ValueError("common_name is required")
+    if int(valid_days) <= 0:
+        raise ValueError("--valid-days must be a positive integer.")
+    if int(rsa_key_size) not in (2048, 3072, 4096):
+        raise ValueError("--rsa-bits must be one of: 2048, 3072, 4096.")
+
+    priv = rsa.generate_private_key(public_exponent=65537, key_size=int(rsa_key_size))
+    pub = priv.public_key()
+
+    ca_cert = cx509.load_der_x509_certificate(ca["__certificate_der"])
+    ca_key = ca["__key_obj"]
+
+    name_attrs = [cx509.NameAttribute(NameOID.COMMON_NAME, common_name.strip())]
+
+    now = datetime.now(timezone.utc)
+    not_before = now - timedelta(minutes=5)
+    not_after = now + timedelta(days=int(valid_days))
+
+    builder = (
+        cx509.CertificateBuilder()
+        .subject_name(cx509.Name(name_attrs))
+        .issuer_name(ca_cert.subject)
+        .public_key(pub)
+        .serial_number(cx509.random_serial_number())
+        .not_valid_before(not_before)
+        .not_valid_after(not_after)
+        .add_extension(cx509.BasicConstraints(ca=False, path_length=None), critical=False)
+        .add_extension(
+            cx509.KeyUsage(
+                digital_signature=False,
+                content_commitment=False,
+                key_encipherment=True,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=False,
+                crl_sign=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(
+            cx509.ExtendedKeyUsage([ObjectIdentifier("1.3.6.1.4.1.311.21.5")]),
+            critical=False,
+        )
+        .add_extension(cx509.SubjectKeyIdentifier.from_public_key(pub), critical=False)
+        .add_extension(
+            cx509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()),
+            critical=False,
+        )
+        .add_extension(_build_ket_template_name_ext("CAExchange"), critical=False)
+        .add_extension(_build_ket_application_policies_ext(), critical=False)
+    )
+
+    cert = builder.sign(private_key=ca_key, algorithm=hashes.SHA256())
+
+    cert_pem = cert.public_bytes(encoding=serialization.Encoding.PEM)
+    key_pem = priv.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    return cert, priv, cert_pem, key_pem
+
+
+def _cmd_create_ket_cert(
+    *,
+    ca_id: str,
+    common_name: str,
+    conf: Dict[str, Any],
+    crt_path: Optional[str] = None,
+    key_path: Optional[str] = None,
+    rsa_bits: int = 2048,
+    valid_days: int = 7,
+    subject_dc: Optional[List[str]] = None,
+) -> int:
+    try:
+        ca = _cli_find_ca_by_id(conf, ca_id)
+        if not ca:
+            print(f"ERROR: CA not found: {ca_id}", file=sys.stderr)
+            return 1
+
+        if not common_name.strip():
+            print("ERROR: --cn is required with --create-ket-cert", file=sys.stderr)
+            return 1
+        if int(rsa_bits) not in (2048, 3072, 4096):
+            print("ERROR: --rsa-bits must be one of: 2048, 3072, 4096", file=sys.stderr)
+            return 1
+        if int(valid_days) <= 0:
+            print("ERROR: --valid-days must be > 0", file=sys.stderr)
+            return 1
+
+        certs_dir, private_dir = _resolve_storage_paths_from_ca(ca)
+        os.makedirs(certs_dir, exist_ok=True)
+        os.makedirs(private_dir, exist_ok=True)
+
+        _cert_obj, _key_obj, cert_pem, key_pem = create_ket_cert(
+            ca=ca,
+            common_name=common_name.strip(),
+            valid_days=int(valid_days),
+            rsa_key_size=int(rsa_bits),
+            subject_dc=subject_dc or [],
+        )
+
+        request_id = uuid.uuid4().int
+        storage_crt_path = os.path.join(certs_dir, f"{request_id}.pem")
+        storage_key_path = os.path.join(private_dir, f"{request_id}.key.pem")
+
+        fullchain_pem = _compose_fullchain_pem(cert_pem, conf=conf, ca=ca)
+
+        _atomic_write(storage_crt_path, fullchain_pem, mode=0o644)
+        _atomic_write(storage_key_path, key_pem, mode=stat.S_IRUSR | stat.S_IWUSR)
+
+        if crt_path:
+            _copy_if_different(storage_crt_path, crt_path, mode=0o644)
+        if key_path:
+            _copy_if_different(storage_key_path, key_path, mode=stat.S_IRUSR | stat.S_IWUSR)
+        print(f"    ket_cert_pem: {storage_crt_path}")
+        print(f"    ket_key_pem: {storage_key_path}")
+        return 0
+
+    except Exception as e:
+        print(f"ERROR: create KET certificate failed: {e}", file=sys.stderr)
+        return 1
 
 def _read_all_bytes(paths: list[str]) -> bytes:
     out = b""

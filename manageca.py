@@ -91,6 +91,7 @@ from utils_crt import (
     _cli_find_ca_by_id,
     _cmd_resign_crl,
     _cmd_create_ca,
+    _cmd_create_ket_cert,
     _compose_fullchain_pem
 )
 
@@ -1733,6 +1734,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="Create a new CA certificate, private key and an empty CRL, then exit (no GUI).")
     p.add_argument("--issue-cert", action="store_true",
                    help="Issue a new RSA leaf certificate + private key and exit (no GUI).")
+    p.add_argument("--create-ket-cert", action="store_true",
+                   help="Issue a Microsoft KET/CAExchange-style certificate + private key and exit (no GUI).")
     p.add_argument("--signer-ca-id", "--ca-id", dest="ca_id", type=str,
                    help="When used with --create-ca, --issue-cert or --resign-crl: CA identifier as defined in adcs.yaml (field 'id' or 'display_name'). For --create-ca, this is the parent CA; if omitted, the new CA is self-signed.")
     p.add_argument("--cn", type=str,
@@ -1839,6 +1842,32 @@ if __name__ == "__main__":
             conf=confadcs,
             crt_path=args.crt_path,
             key_path=args.key_path,
+        )
+        sys.exit(rc)
+
+    if args.create_ket_cert:
+        if not args.ca_id:
+            print("ERROR: --ca-id is required with --create-ket-cert", file=sys.stderr)
+            sys.exit(1)
+        if not args.cn:
+            cn = "%s-Xchg" %  args.ca_id
+        else:
+            cn = args.cn
+
+        if not args.rsa_bits:
+            rsa_bits = 4096
+        else:
+            rsa_bits = int(args.rsa_bits)
+
+        confadcs = load_yaml_conf(args.confadcs)
+        rc = _cmd_create_ket_cert(
+            ca_id=args.ca_id,
+            common_name=cn,
+            conf=confadcs,
+            crt_path=args.crt_path,
+            key_path=args.key_path,
+            rsa_bits=rsa_bits,
+            valid_days=args.valid_days if args.valid_days else 3650
         )
         sys.exit(rc)
 
