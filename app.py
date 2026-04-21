@@ -129,6 +129,9 @@ def extract_challenge_response_and_request_id(xml_data: str):
         namespaces=ns
     )
 
+    if request_id:
+        request_id = int(request_id)
+    
     return {
         "is_challenge_response": challenge_response != "",
         "challenge_response": challenge_response.replace('&#xD;','').replace('\n',''),
