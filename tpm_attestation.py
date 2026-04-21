@@ -404,8 +404,10 @@ def _verify_aik_full(
     if expected_nonce is not None and not hmac.compare_digest(attest.extra_data, expected_nonce):
         raise TPMAttestationError("Nonce mismatch — possible replay attack")
     _verify_tpm_signature(bundle.attest_raw, bundle.attest_sig_raw, aik_pub)
-    if attest.certified_name and attest.certified_name != aik_pub.compute_name():
-        raise TPMAttestationError("Certified name in TPMS_ATTEST does not match AIK public key name")
+    if not attest.certified_name:
+        raise TPMAttestationError("TPMS_ATTEST certified_name is empty; attestation cannot be verified")
+    if attest.certified_name != aik_pub.compute_name():
+        raise TPMAttestationError("Certified name in TPMS_ATTEST does not match AIK public key name")    
     _check_key_policy(aik_pub, require_fixed_tpm, require_fixed_parent, require_restricted)
     return AttestationResult(
         success=True,
