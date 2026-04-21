@@ -75,22 +75,6 @@ def _template_tpm_policy(template: dict) -> Optional[dict]:
     }
 
 
-def _load_trusted_ek_roots(template: dict, policy: dict) -> list:
-    if not policy.get("ek_validate_cert"):
-        return []
-
-    roots = []
-    roots_dir = template.get("trusted_ek_roots_dir")
-    if roots_dir:
-        roots.extend(tpm_mod.load_trusted_ek_roots_from_dir(roots_dir))
-    for pem_b64 in template.get("inline_ek_roots", []) or []:
-        roots.append(x509.load_pem_x509_certificate(base64.b64decode(pem_b64)))
-
-    if not roots and not policy.get("ek_trust_on_use"):
-        raise ValueError(
-            "EK certificate validation is enabled but no trusted EK roots are defined in the callback template"
-        )
-    return roots
 
 
 def _build_bundle_from_json(data: dict):
@@ -195,6 +179,68 @@ def _spki_sha256(csr: x509.CertificateSigningRequest) -> str:
     return hashlib.sha256(spki).hexdigest()
 
 
+def _ek_cert_from_der(ek_cert_der: Optional[bytes]):
+    if not ek_cert_der:
+        return None
+    return x509.load_der_x509_certificate(ek_cert_der)
+
+
+def _public_key_to_spki_der(public_key) -> Optional[bytes]:
+    if public_key is None:
+        return None
+    return public_key.public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+
+
+def _public_key_from_spki_der(spki_der: Optional[bytes]):
+    if not spki_der:
+        return None
+    return serialization.load_der_public_key(spki_der)
+
+
+def _extract_ek_materials_from_bundle(bundle) -> tuple[object | None, object | None]:
+    ek_cert = None
+    ek_pub = None
+    try:
+        ek_cert = _ek_cert_from_der(getattr(bundle, "ek_cert_der", None))
+    except Exception as exc:
+        logger.debug("Could not parse EK certificate from bundle: %s", exc)
+        ek_cert = None
+    if ek_cert is not None:
+        try:
+            ek_pub = ek_cert.public_key()
+        except Exception as exc:
+            logger.debug("Could not extract EK public key from EK certificate: %s", exc)
+            ek_pub = None
+    return ek_cert, ek_pub
+
+
+def _restore_ek_materials(payload: Optional[dict]) -> tuple[object | None, object | None]:
+    payload = payload or {}
+    ek_cert_der_b64 = payload.get("ek_cert_der_b64")
+    ek_pub_der_b64 = payload.get("ek_pub_der_b64")
+    ek_cert = None
+    ek_pub = None
+    if ek_cert_der_b64:
+        try:
+            ek_cert = _ek_cert_from_der(base64.b64decode(ek_cert_der_b64))
+        except Exception as exc:
+            logger.debug("Could not restore EK certificate from pending payload: %s", exc)
+    if ek_pub_der_b64:
+        try:
+            ek_pub = _public_key_from_spki_der(base64.b64decode(ek_pub_der_b64))
+        except Exception as exc:
+            logger.debug("Could not restore EK public key from pending payload: %s", exc)
+    elif ek_cert is not None:
+        try:
+            ek_pub = ek_cert.public_key()
+        except Exception as exc:
+            logger.debug("Could not restore EK public key from EK certificate: %s", exc)
+    return ek_cert, ek_pub
+
+
 def _coerce_bytes(value) -> Optional[bytes]:
     if value is None:
         return None
@@ -253,6 +299,8 @@ def _verify_pending_challenge_response(
     if request_id is not None:
         _delete_pending_challenge(request_id)
 
+    ek_cert, ek_pub = _restore_ek_materials(pending_challenge)
+
     return {
         "status": "ok",
         "used": True,
@@ -262,6 +310,8 @@ def _verify_pending_challenge_response(
         "challenge_verified": True,
         "microsoft_native_attestation": True,
         "request_id": int(request_id) if request_id is not None else None,
+        "ek_cert": ek_cert,
+        "ek_pub": ek_pub,
     }
 
 
@@ -300,6 +350,9 @@ def create_microsoft_certify_challenge_response(*, csr, bundle, template: dict, 
         signer_chain_pems=materials["ca_sign_chain_pems"],
     )
 
+    ek_cert = _ek_cert_from_der(bundle.ek_cert_der) if bundle.ek_cert_der else None
+    ek_pub_der = _public_key_to_spki_der(ek_pub)
+
     pending_payload = {
         "mode": "CERTIFY",
         "template_name": template.get("common_name"),
@@ -308,6 +361,8 @@ def create_microsoft_certify_challenge_response(*, csr, bundle, template: dict, 
         "created_at": int(time.time()),
         "encryption_algorithm_oid": encryption_algorithm_oid,
         "ek_cert_present": bool(bundle.ek_cert_der),
+        "ek_cert_der_b64": base64.b64encode(bundle.ek_cert_der).decode("ascii") if bundle.ek_cert_der else None,
+        "ek_pub_der_b64": base64.b64encode(ek_pub_der).decode("ascii") if ek_pub_der else None,
         "attestation_without_policy": (_template_tpm_policy(template) or {}).get("attestation_without_policy", False),
     }
     _save_pending_challenge(str(request_id), pending_payload)
@@ -323,6 +378,8 @@ def create_microsoft_certify_challenge_response(*, csr, bundle, template: dict, 
         "ek_info_decrypted": True,
         "fully_decoded": False,
         "pending_challenge": pending_payload,
+        "ek_cert": ek_cert,
+        "ek_pub": ek_pub,
     }
 
 
@@ -338,7 +395,7 @@ def verify_tpm_for_template(
 ) -> dict:
     policy = _template_tpm_policy(template)
     if not policy:
-        return {"status": "ok", "used": False, "attestation_valid": False}
+        return {"status": "ok", "used": False, "attestation_valid": False, "ek_cert": None, "ek_pub": None}
 
     csr = x509.load_der_x509_csr(csr_der)
 
@@ -390,7 +447,7 @@ def verify_tpm_for_template(
             raise ValueError(
                 "TPM attestation required by template but no Microsoft key-attestation attributes were found in the PKCS#10 request"
             )
-        return {"status": "ok", "used": False, "attestation_valid": False}
+        return {"status": "ok", "used": False, "attestation_valid": False, "ek_cert": None, "ek_pub": None}
 
     if getattr(bundle, "mode", None) == "MICROSOFT_PKCS10":
         if getattr(bundle, "ms_ek_info_raw", None) is not None:
@@ -414,7 +471,6 @@ def verify_tpm_for_template(
     ):
         result = tpm_mod.verify_tpm_attestation(
             bundle=bundle,
-            trusted_ek_roots=_load_trusted_ek_roots(template, policy),
             expected_nonce=None,
             require_fixed_tpm=True,
             require_fixed_parent=True,
@@ -443,6 +499,8 @@ def verify_tpm_for_template(
             "firmware_version": result.firmware_version,
             "attestation_without_policy": policy["attestation_without_policy"],
             "attestation_valid": True,
+            "ek_cert": result.ek_cert,
+            "ek_pub": result.ek_pub,
         }
 
     if pending_challenge and challenge_response_der:
@@ -457,4 +515,4 @@ def verify_tpm_for_template(
 
     if policy["required"]:
         raise ValueError("TPM attestation required but request did not contain usable AIK_INFO/EK_INFO")
-    return {"status": "ok", "used": False, "attestation_valid": False}
+    return {"status": "ok", "used": False, "attestation_valid": False, "ek_cert": None, "ek_pub": None}

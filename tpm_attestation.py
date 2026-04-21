@@ -201,6 +201,7 @@ class AttestationResult:
     mode: str
     message: str
     ek_cert: Optional[x509.Certificate] = None
+    ek_pub: Optional[object] = None
     aik_public_key: Optional[TPMPublicKey] = None
     certified_key_obj: Optional[TPMPublicKey] = None
     is_fixed_tpm: bool = False
@@ -388,7 +389,7 @@ def _verify_aik_full(
     if not bundle.ek_cert_der or not bundle.aik_pub_raw or not bundle.attest_raw or not bundle.attest_sig_raw:
         raise TPMAttestationError("AIK_FULL mode requires ek_cert_der, aik_pub_raw, attest_raw and attest_sig_raw")
     ek_cert = _load_cert(bundle.ek_cert_der)
-    _verify_ek_cert(ek_cert, trusted_ek_roots)
+    ek_pub = ek_cert.public_key()
     aik_pub = parse_tpmt_public(bundle.aik_pub_raw)
     _check_aik_attributes(aik_pub)
     attest = parse_tpms_attest(bundle.attest_raw)
@@ -405,6 +406,7 @@ def _verify_aik_full(
         mode="AIK_FULL",
         message="AIK attestation verified",
         ek_cert=ek_cert,
+        ek_pub=ek_pub,
         aik_public_key=aik_pub,
         is_fixed_tpm=bool(aik_pub.object_attr & TPMA_OBJECT_FIXEDTPM),
         is_fixed_parent=bool(aik_pub.object_attr & TPMA_OBJECT_FIXEDPARENT),
@@ -427,7 +429,7 @@ def _verify_certify(
             "CERTIFY mode requires ek_cert_der, aik_pub_raw, certified_key_raw, attest_raw and attest_sig_raw"
         )
     ek_cert = _load_cert(bundle.ek_cert_der)
-    _verify_ek_cert(ek_cert, trusted_ek_roots)
+    ek_pub = ek_cert.public_key()
     aik_pub = parse_tpmt_public(bundle.aik_pub_raw)
     _check_aik_attributes(aik_pub)
     cert_key = parse_tpmt_public(bundle.certified_key_raw)
@@ -449,6 +451,7 @@ def _verify_certify(
         mode="CERTIFY",
         message="TPM2_Certify attestation verified",
         ek_cert=ek_cert,
+        ek_pub=ek_pub,
         aik_public_key=aik_pub,
         certified_key_obj=cert_key,
         is_fixed_tpm=bool(cert_key.object_attr & TPMA_OBJECT_FIXEDTPM),
@@ -461,7 +464,7 @@ def _verify_certify(
 
 def verify_tpm_attestation(
     bundle: TPMAttestationBundle,
-    trusted_ek_roots: list,
+    trusted_ek_roots: Optional[list] = None,
     expected_nonce: Optional[bytes] = None,
     require_fixed_tpm: bool = True,
     require_fixed_parent: bool = True,
