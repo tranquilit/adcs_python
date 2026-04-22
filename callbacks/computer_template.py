@@ -11,7 +11,7 @@ from cryptography.x509.oid import (
 )
 
 # helpers/structs already present in your project
-from utils import  NtdsCASecurityExt, search_user
+from utils import  NtdsCASecurityExt, search_user, is_directly_issued_by_cert_in_folder
 from utils import _apply_static_extensions,validate_csr
 import hashlib
 
@@ -287,8 +287,13 @@ def emit_certificate(
     CAID,
     request = None,
     body_part_id = None,
-    p7_der=None
+    p7_der=None,
+    tpm_result=None
 ) -> Dict[str, Any]:
+
+    #https://go.microsoft.com/fwlink/?linkid=2097925
+    #print(is_directly_issued_by_cert_in_folder(tpm_result['ek_cert'], "/etc/adcs/TrustedTpm"))
+    #print(tpm_result['ek_public_key_pkcs1_sha256'])
 
     # if ssl auth
     XSslClientSha1 = request.headers.get('X-Ssl-Client-Sha1', None)

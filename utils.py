@@ -11,6 +11,9 @@ from xml.dom import minidom
 from asn1crypto import csr
 from asn1crypto import cms as a_cms, x509 as a_x509, core as a_core
 
+from pathlib import Path
+from cryptography.x509.oid import ExtensionOID
+
 from cryptography import x509 as cx509
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import (
@@ -1982,3 +1985,53 @@ def build_ket_response(uuid_request: str, uuid_random: str, ket_cert_der: str) -
 
     raw = ET.tostring(env, encoding="utf-8", xml_declaration=True)
     return _prettify(raw)
+
+
+
+def load_cert_file(path: Path):
+    data = path.read_bytes()
+
+    try:
+        if b"-----BEGIN CERTIFICATE-----" in data:
+            return [cx509.load_pem_x509_certificate(data)]
+    except Exception:
+        pass
+
+    try:
+        return [cx509.load_der_x509_certificate(data)]
+    except Exception:
+        pass
+
+    return []
+
+
+def is_ca(cert: cx509.Certificate) -> bool:
+    try:
+        bc = cert.extensions.get_extension_for_oid(
+            ExtensionOID.BASIC_CONSTRAINTS
+        ).value
+        return bool(bc.ca)
+    except cx509.ExtensionNotFound:
+        return False
+
+
+def is_directly_issued_by_cert_in_folder(cert: cx509.Certificate, folder: str):
+    for path in Path(folder).rglob("*"):
+        if not path.is_file():
+            continue
+
+        for candidate in load_cert_file(path):
+            # facultatif
+            if not is_ca(candidate):
+                continue
+
+            if cert.issuer != candidate.subject:
+                continue
+
+            try:
+                cert.verify_directly_issued_by(candidate)
+                return True, candidate, str(path)
+            except Exception:
+                pass
+
+    return False, None, None
