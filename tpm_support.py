@@ -339,7 +339,7 @@ def _verify_pending_challenge_response(
     if ek_pub:
         der = ek_pub.public_bytes(
             encoding=serialization.Encoding.DER,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+            format=serialization.PublicFormat.PKCS1,
         )
         ek_public_key_pkcs1_sha256 = hashlib.sha256(der).hexdigest()
     else:
