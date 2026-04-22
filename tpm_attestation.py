@@ -405,13 +405,18 @@ def _verify_aik_full(
     attest = parse_tpms_attest(bundle.attest_raw)
     if attest.magic != TPM2_GENERATED_VALUE:
         raise TPMAttestationError(f"TPMS_ATTEST magic invalid: {attest.magic:#010x}")
+    if attest.attest_type != TPM2_ST_ATTEST_CERTIFY:
+        raise TPMAttestationError(
+            f"AIK_FULL mode expected ST_ATTEST_CERTIFY ({TPM2_ST_ATTEST_CERTIFY:#06x}), "
+            f"got {attest.attest_type:#06x}"
+        )
     if expected_nonce is not None and not hmac.compare_digest(attest.extra_data, expected_nonce):
         raise TPMAttestationError("Nonce mismatch — possible replay attack")
     _verify_tpm_signature(bundle.attest_raw, bundle.attest_sig_raw, aik_pub)
     if not attest.certified_name:
         raise TPMAttestationError("TPMS_ATTEST certified_name is empty; attestation cannot be verified")
     if attest.certified_name != aik_pub.compute_name():
-        raise TPMAttestationError("Certified name in TPMS_ATTEST does not match AIK public key name")    
+        raise TPMAttestationError("Certified name in TPMS_ATTEST does not match AIK public key name")
     _check_key_policy(aik_pub, require_fixed_tpm, require_fixed_parent, require_restricted)
     return AttestationResult(
         success=True,
@@ -658,7 +663,8 @@ def _decrypt_cms_enveloped_data(content_info_der: bytes, recipient_cert_der: Opt
     else:
         raise ValueError(f"Unsupported CMS content encryption algorithm: {enc_name}")
 
-    padded = cipher.decryptor().update(encrypted_content) + cipher.decryptor().finalize()
+    dec = cipher.decryptor()
+    padded = dec.update(encrypted_content) + dec.finalize()
     unpadder = sym_padding.PKCS7(cipher.algorithm.block_size).unpadder()
     return unpadder.update(padded) + unpadder.finalize()
 
@@ -837,13 +843,20 @@ def _b64_or_none(value) -> Optional[bytes]:
 
 
 def extract_tpm_bundle_from_pkcs10_der(csr_der: bytes) -> Optional[TPMAttestationBundle]:
+    _ALLOWED_BUNDLE_MODES = {"CERTIFY", "AIK_FULL"}
     csr = x509.load_der_x509_csr(csr_der)
     try:
         for ext in csr.extensions:
             if ext.oid.dotted_string == OID_TPM_ATTESTATION_BUNDLE:
                 blob = __import__("json").loads(ext.value.value.decode("utf-8", errors="replace"))
+                mode = blob.get("mode", "AIK_FULL")
+                if mode not in _ALLOWED_BUNDLE_MODES:
+                    raise TPMAttestationError(
+                        f"Invalid TPM bundle mode in CSR extension: {mode!r}; "
+                        f"must be one of {sorted(_ALLOWED_BUNDLE_MODES)}"
+                    )
                 return TPMAttestationBundle(
-                    mode=blob.get("mode", "AIK_FULL"),
+                    mode=mode,
                     ek_cert_der=_b64_or_none(blob.get("ek_cert")),
                     aik_pub_raw=_b64_or_none(blob.get("aik_pub")),
                     attest_raw=_b64_or_none(blob.get("attest")),
@@ -851,6 +864,8 @@ def extract_tpm_bundle_from_pkcs10_der(csr_der: bytes) -> Optional[TPMAttestatio
                     certified_key_raw=_b64_or_none(blob.get("cert_key")),
                     nonce=_b64_or_none(blob.get("nonce")),
                 )
+    except TPMAttestationError:
+        raise
     except Exception as exc:
         logger.debug("Could not parse legacy TPM JSON extension: %s", exc)
 
