@@ -79,12 +79,19 @@ def _template_tpm_policy(template: dict) -> Optional[dict]:
 
 
 def _build_bundle_from_json(data: dict):
+    _ALLOWED_MODES = {"CERTIFY", "AIK_FULL"}
+
     def _decode(key: str):
         value = data.get(key)
         return base64.b64decode(value) if value else None
 
+    mode = data.get("mode", "CERTIFY")
+    if mode not in _ALLOWED_MODES:
+        raise ValueError(
+            f"Invalid TPM bundle mode {mode!r}; must be one of {sorted(_ALLOWED_MODES)}"
+        )
     return tpm_mod.TPMAttestationBundle(
-        mode=data.get("mode", "CERTIFY"),
+        mode=mode,
         ek_cert_der=_decode("ek_cert"),
         aik_pub_raw=_decode("aik_pub"),
         attest_raw=_decode("attest"),
@@ -242,15 +249,28 @@ def _restore_ek_materials(payload: Optional[dict]) -> tuple[object | None, objec
     return ek_cert, ek_pub
 
 
+_MAX_COERCE_BYTES = 1 * 1024 * 1024 
+
+
 def _coerce_bytes(value) -> Optional[bytes]:
     if value is None:
         return None
     if isinstance(value, bytes):
+        if len(value) > _MAX_COERCE_BYTES:
+            raise ValueError(f"Binary value too large: {len(value)} bytes (max {_MAX_COERCE_BYTES})")
         return value
     if isinstance(value, bytearray):
+        if len(value) > _MAX_COERCE_BYTES:
+            raise ValueError(f"Binary value too large: {len(value)} bytes (max {_MAX_COERCE_BYTES})")
         return bytes(value)
     if isinstance(value, str):
-        return base64.b64decode(value)
+        # Base64 overhead ≈ 4/3 — check pre-decode length to avoid allocating huge buffers
+        if len(value) > _MAX_COERCE_BYTES * 4 // 3 + 4:
+            raise ValueError(f"Base64 string too large: {len(value)} chars (max {_MAX_COERCE_BYTES * 4 // 3 + 4})")
+        decoded = base64.b64decode(value)
+        if len(decoded) > _MAX_COERCE_BYTES:
+            raise ValueError(f"Decoded binary value too large: {len(decoded)} bytes (max {_MAX_COERCE_BYTES})")
+        return decoded
     raise TypeError(f"Unsupported binary value type: {type(value).__name__}")
 
 
@@ -296,8 +316,10 @@ def _verify_pending_challenge_response(
         )
 
     expected_spki_sha256 = pending_challenge.get("spki_sha256")
+    if not expected_spki_sha256:
+        raise ValueError("pending_challenge is missing spki_sha256; cannot bind challenge response to CSR")
     current_spki_sha256 = _spki_sha256(csr)
-    if expected_spki_sha256 and current_spki_sha256 != expected_spki_sha256:
+    if current_spki_sha256 != expected_spki_sha256:
         raise ValueError("CSR public key does not match the pending challenge context")
 
     materials = _resolve_ca_materials_for_tpm(template, ca)

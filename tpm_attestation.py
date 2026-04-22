@@ -176,11 +176,15 @@ class TPMPublicKey:
         if self.alg_type == TPM2_ALG_ECC:
             x = int.from_bytes(self.ecc_x, "big")
             y = int.from_bytes(self.ecc_y, "big")
-            curve = {
+            _curve_map = {
                 TPM2_ECC_NIST_P256: ec.SECP256R1(),
                 TPM2_ECC_NIST_P384: ec.SECP384R1(),
-            }.get(self.ecc_curve, ec.SECP256R1())
-            return ec.EllipticCurvePublicNumbers(x, y, curve).public_key()
+            }
+            if self.ecc_curve not in _curve_map:
+                raise TPMAttestationError(
+                    f"Unsupported TPM ECC curve: {self.ecc_curve:#06x}"
+                )
+            return ec.EllipticCurvePublicNumbers(x, y, _curve_map[self.ecc_curve]).public_key()
         raise TPMAttestationError(f"Unsupported TPM key algorithm: {self.alg_type:#06x}")
 
     def compute_name(self) -> bytes:
