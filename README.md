@@ -391,20 +391,27 @@ It is up to you to implement and validate the authentication logic (for example,
 Make sure your authentication process responds **within the allowed time frame** - otherwise, the request will **timeout** and fail.
 
 
-Can this project be used as a gateway/proxy to another PKI without holding a private key?
+**Can this project be used as a gateway/proxy to another PKI without holding a private key?**  
 -----------------------------------------------------------------------------------------------------
 
 Yes.
 
-You can run this ADCS Python server as a pass-through gateway, where it does not hold the CA private key itself. Instead, it simply forwards the CSR to another PKI system and then wraps the returned certificate in a response that looks like Microsoft ADCS.
+This ADCS Python server can be used as a transparent (pass-through) gateway without hosting the private key of the Certification Authority. It simply forwards the CSR to a remote PKI and then wraps the issued certificate into a response compatible with what a Microsoft ADCS client expects.
 
-In practice, the ADCS web enrollment client expects a PKCS#7/CMS response containing the issued certificate (and optionally the chain).
-From my tests, the PKCS#7 structure can be “degenerate” (i.e. contain the certificate but no signature / no signers) and it will still be accepted by the Windows client.
+In practice, Windows enrollment clients (web enrollment, CertEnroll, etc.) expect a PKCS#7/CMS response containing the issued certificate (and optionally the certificate chain).
 
-However, a real Microsoft ADCS instance signs the PKCS#7 it returns, so this behavior is somewhat fragile and could change between versions or environments.
+According to CMS specifications (RFC 5652) and Microsoft ADCS behavior (MS-WCCE), this structure can be **“degenerate”** (i.e., without a signature, with `signerInfos` absent). In that case, it acts purely as a container for certificates. This format is accepted by Windows clients.
 
-To do things cleanly and stay as close as possible to actual ADCS behavior, you should also ensure that:
+However, a real Microsoft ADCS instance can return a **signed full CMC response**, especially when the client sets the `CR_IN_FULLRESPONSE` flag.
 
-The certificate template OID corresponding to the requested template is correctly added as an extension on the issued certificate.
+In this specific case, this project will not be able to respond correctly if it does not have access to a private key capable of signing the CMC response. A degenerate PKCS#7 response will not satisfy this requirement.
 
-In short: yes, you can use this project as a stateless gateway in front of another PKI, but be aware that relying on unsigned (“degenerate”) PKCS#7 responses is a bit touchy and should be tested carefully in your environment.
+To stay as close as possible to actual ADCS behavior, it is recommended to:
+
+- Return a signed CMC response when possible  
+- Include the full certificate chain in the response  
+- Add the certificate template OID as an extension in the issued certificate  
+- Ensure the client properly validates the certification chain and the CA identity  
+
+**Summary:**  
+Yes, this project can be used as a stateless gateway in front of another PKI, as long as the client does not explicitly require a signed CMC response (`CR_IN_FULLRESPONSE`).
