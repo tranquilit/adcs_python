@@ -283,6 +283,62 @@ You can submit a CSR directly from the command line without using the API interf
 /opt/adcs_python/manageca.py --submit-csr --signer-ca-id 'ca_inter_test' --username 'srvads$@MYDOMAIN.LAN' --template-name 'dc' --csr-path srvads.csr
 ```
 
+🔐 TPM Attestation
+============================
+
+The server supports **TPM attestation** during certificate enrollment.
+
+During a request, it:
+
+-   Verifies that the **TPM attestation challenge is correctly
+    resolved**
+-   Verifies that **EKPub / EKCert** were used to produce the
+    attestation response
+
+👉 This ensures the attestation is **technically valid**, but does **not
+imply trust** in the TPM.
+
+The following data is then passed to the callback:
+
+-   `ek_cert`
+-   `ek_public_key_pkcs1_sha256`
+
+Callback decision
+--------------------
+
+The callback is responsible for the final decision:
+
+-   ✅ Issue the certificate\
+-   ⏳ Put the request on hold\
+-   ❌ Reject the request
+
+### Example checks
+
+**Validate TPM manufacturer (EKCert)**
+
+Microsoft provides a list of TPM manufacturer certificates:\
+👉 https://go.microsoft.com/fwlink/?linkid=2097925
+
+``` python
+is_directly_issued_by_cert_in_folder(
+    tpm_result['ek_cert'],
+    "/etc/adcs/TrustedTpm"
+)
+```
+
+**Validate known device (EKPub fingerprint)**
+
+``` python
+tpm_result['ek_public_key_pkcs1_sha256']
+```
+
+This value can be matched against an internal inventory, or whitelist.
+
+The server validates the TPM attestation proof, while the callback
+enforces the **trust policy** (manufacturer, device, business rules).
+
+
+
 Desired enhancements for the project.
 ==========================================
 
