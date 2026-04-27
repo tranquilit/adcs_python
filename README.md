@@ -226,7 +226,7 @@ Test on a Windows client
 ---------------------------------------------------------
 
 - Install the root CA generated: ``http://testadcs.mydomain.lan/certs/ca_root_test/ca_root_test.crt.pem``  
-- Install the intermediate CA generated: ``http://testadcs.mydomain.lan/ca_inter_test/ca_inter_test.crt.pem``  
+- Install the intermediate CA generated: ``http://testadcs.mydomain.lan/certs/ca_inter_test/ca_inter_test.crt.pem``  
 
 - In the Windows **MMC Certificates** console → **Personal** → **Certificates** → *Request a certificate*  
   → Provide the service URL, for example:
