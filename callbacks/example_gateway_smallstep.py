@@ -202,7 +202,8 @@ def emit_certificate(
     CAID,
     request = None,
     body_part_id = None,
-    p7_der=None
+    p7_der=None,
+    tpm_result=None
 ) -> Dict[str, Any]:
 
 
