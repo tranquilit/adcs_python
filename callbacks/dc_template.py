@@ -225,6 +225,7 @@ def emit_certificate(
     CAID,
     request=None,
     body_part_id=None,
+    tpm_result=None,
     **kwargs
 ) -> Dict[str, Any]:
 
