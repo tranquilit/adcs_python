@@ -133,7 +133,7 @@ Configure Nginx
 - Replace the default configuration:
 
 ```
-cp -f /opt/adcs_python/nginx-conf.conf.template /etc/nginx/sites-enabled/default
+cp -f /opt/adcs_python/nginx-conf.conf.template /etc/nginx/sites-available/default
 ```
 
 - Generate Diffie-Hellman parameters:
