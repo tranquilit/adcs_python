@@ -187,14 +187,13 @@ kinit <user>@MYDOMAIN.LAN
 net ads join
 ```
 
-Manage SPN and Keytab
+Manage SPN 
 ---------------------------------------------------------
 
-- In Active Directory, register the HTTP SPN and msDS-SupportedEncryptionTypes for the machine account:
+- In Active Directory, register the HTTP SPN for the machine account:
 
 ```
-servicePrincipalName: HTTP/testadcs.mydomain.lan
-msDS-SupportedEncryptionTypes: 24
+samba-tool spn add "HTTP/testadcs.mydomain.lan" "testadcs$" -H ldap://srvads.mydomain.lan:389 -P
 ```
 
 Note that the URL must be in **lowercase**.
