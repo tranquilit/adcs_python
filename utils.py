@@ -10,6 +10,7 @@ from xml.dom import minidom
 
 from asn1crypto import csr
 from asn1crypto import cms as a_cms, x509 as a_x509, core as a_core
+from functools import lru_cache
 
 from pathlib import Path
 from cryptography.x509.oid import ExtensionOID
@@ -2014,24 +2015,26 @@ def is_ca(cert: cx509.Certificate) -> bool:
     except cx509.ExtensionNotFound:
         return False
 
+@lru_cache(maxsize=1)
+def _load_trusted_tpm_certs(folder: str) -> list:
+    certs = []
+    for path in Path(folder).rglob("*"):
+        if path.is_file():
+            for cert in load_cert_file(path):
+                if is_ca(cert):
+                    certs.append((cert, str(path)))
+    return certs
+
 
 def is_directly_issued_by_cert_in_folder(cert: cx509.Certificate, folder: str):
-    for path in Path(folder).rglob("*"):
-        if not path.is_file():
+    if cert is None:
+        return False, None, None
+    for candidate, path in _load_trusted_tpm_certs(folder):
+        if cert.issuer != candidate.subject:
             continue
-
-        for candidate in load_cert_file(path):
-            # facultatif
-            if not is_ca(candidate):
-                continue
-
-            if cert.issuer != candidate.subject:
-                continue
-
-            try:
-                cert.verify_directly_issued_by(candidate)
-                return True, candidate, str(path)
-            except Exception:
-                pass
-
+        try:
+            cert.verify_directly_issued_by(candidate)
+            return True, candidate, path
+        except Exception:
+            pass
     return False, None, None
