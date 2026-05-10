@@ -54,7 +54,7 @@ template_major_version = 100
 template_minor_version = 3
 auto_enroll            = True
 
-def define_template(*, app_conf, username=None, request=None):
+def define_template(*, app_conf, username=None, request=None, params=None):
 
     validity_seconds = 31536000       # 1 year
     renewal_seconds  = 3628800        # 42 days
@@ -226,6 +226,7 @@ def emit_certificate(
     request=None,
     body_part_id=None,
     tpm_result=None,
+    params=None,
     **kwargs
 ) -> Dict[str, Any]:
 

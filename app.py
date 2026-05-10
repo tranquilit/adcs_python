@@ -26,7 +26,7 @@ from utils import (
     build_ket_response
 )
 
-from adcs_config import load_yaml_conf, build_templates_for_policy_response
+from adcs_config import load_yaml_conf, build_templates_for_policy_response, _call_callback_with_params
 from callback_loader import load_func
 from tpm_support import verify_tpm_for_template
 
@@ -288,7 +288,9 @@ def ces_service(CAID):
 
         return response
 
-    result = emit_certificate(
+    result = _call_callback_with_params(
+        emit_certificate,
+        params=cb.get("params"),
         csr_der=csr_der,
         request_id=request_id,
         username=username,

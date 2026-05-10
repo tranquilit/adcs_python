@@ -4,6 +4,7 @@
 import base64
 import yaml
 import os
+import inspect
 from typing import Tuple
 
 from asn1crypto import x509 as a_x509, core as a_core
@@ -460,10 +461,34 @@ def load_yaml_conf(path="adcs.yaml"):
         conf["__template_decls__"].append({
             "path": cb_path,
             "define": cb_define,
-            "issue": cb_issue
+            "issue": cb_issue,
+            "params": cb.get("params"),
         })
     return conf
 
+
+
+
+def _callback_accepts_params(func) -> bool:
+    """Return True if a callback can receive the optional `params` kwarg."""
+    try:
+        sig = inspect.signature(func)
+    except (TypeError, ValueError):
+        return False
+    return (
+        "params" in sig.parameters
+        or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+    )
+
+def _call_callback_with_params(func, *, params=None, **kwargs):
+    """Call a callback, passing `params` only when its signature supports it.
+
+    This keeps existing callbacks compatible while allowing new callbacks to
+    declare `params=None` and receive the YAML object from `callback.params`.
+    """
+    if _callback_accepts_params(func):
+        kwargs["params"] = params
+    return func(**kwargs)
 
 # ---------------- Per-request build (CEP/CES): templates + OIDs (stateless) -----
 
@@ -516,7 +541,9 @@ def build_templates_for_policy_response(
             cb_path = os.path.join(os.path.dirname(os.path.realpath(__file__)),cb["path"])
 
         define_template = load_func(cb_path, cb["define"])
-        tpl = define_template(
+        tpl = _call_callback_with_params(
+            define_template,
+            params=cb.get("params"),
             app_conf=conf,                 # conf remains read-only
             username=username,
             request=request,
@@ -569,7 +596,7 @@ def build_templates_for_policy_response(
         _materialize_required_extensions_static_in_place(tpl)
 
         # Remember emission callback (for CES)
-        tpl["__callback"] = {"path": cb["path"], "issue": cb["issue"]}
+        tpl["__callback"] = {"path": cb["path"], "issue": cb["issue"], "params": cb.get("params")}
 
         templates_list.append(tpl)
 

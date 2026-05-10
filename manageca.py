@@ -47,7 +47,7 @@ from typing import List, Optional, Dict, Any, Set
 import base64
 
 from callback_loader import load_func
-from adcs_config import build_templates_for_policy_response
+from adcs_config import build_templates_for_policy_response, _call_callback_with_params
 from utils import exct_csr_from_cmc
 
 from textual.app import App, ComposeResult
@@ -301,7 +301,9 @@ def _cmd_submit_csr_cli(
         emit_certificate = load_func(cb_path, cb_issue)
 
         request_id = uuid.uuid4().int
-        result = emit_certificate(
+        result = _call_callback_with_params(
+            emit_certificate,
+            params=cb.get("params"),
             csr_der=csr_der,
             request_id=request_id,
             username=username.strip(),

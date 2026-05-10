@@ -15,7 +15,7 @@ caref = 'ca1-inter'
 
 auto_enroll            = True
 
-def define_template(*, app_conf, username=None , request=None):
+def define_template(*, app_conf, username=None, request=None, params=None):
     validity_seconds = 31536000       # 1 year
     renewal_seconds = 3628800         # 42 days
     auto_enroll = True
@@ -203,7 +203,8 @@ def emit_certificate(
     request = None,
     body_part_id = None,
     p7_der=None,
-    tpm_result=None
+    tpm_result=None,
+    params=None
 ) -> Dict[str, Any]:
 
 
