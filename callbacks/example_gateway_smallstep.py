@@ -11,7 +11,6 @@ template_oid           = "1.3.6.1.4.1.311.21.8.999.3"
 template_name          = "adcswebcomputer"
 template_major_version = 100
 template_minor_version = 3
-caref = 'ca1-inter'
 
 auto_enroll            = True
 
@@ -39,7 +38,7 @@ def define_template(*, app_conf, username=None, request=None, params=None):
             "major_version": template_major_version,
             "minor_version": template_minor_version,
         },
-        "ca_references": [caref],
+        "ca_references": params['ca_references'],
 
         "policy_schema": 2,
         "revision": {"major": template_major_version, "minor": template_minor_version},

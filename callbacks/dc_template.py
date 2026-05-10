@@ -81,7 +81,7 @@ def define_template(*, app_conf, username=None, request=None, params=None):
             "minor_version": template_minor_version,
         },
 
-        "ca_references": ["ca_inter_test"],
+        "ca_references": params['ca_references'],
         "policy_schema": 3,
 
         "revision": {

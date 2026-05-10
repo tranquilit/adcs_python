@@ -12,12 +12,27 @@ global:
 templates:
   - callback:
       path: "/etc/adcs/callbacks/user_template.py"
+        params:
+        ca_references:
+          - ca_inter_test
+
   - callback:
       path: "/etc/adcs/callbacks/computer_template.py"
+        params:
+        ca_references:
+          - ca_inter_test
+
   - callback:
       path: "/etc/adcs/callbacks/dc_template.py"
+        params:
+        ca_references:
+          - ca_inter_test
+
   - callback:
       path: "/etc/adcs/callbacks/smartcard_auth.py"
+        params:
+        ca_references:
+          - ca_inter_test
 
 
 
