@@ -300,7 +300,7 @@ imply trust** in the TPM.
 The following data is then passed to the callback:
 
 -   `ek_cert`
--   `ek_public_key_pkcs1_sha256`
+-   `ek_public_key_spki_sha256`
 
 Callback decision
 --------------------
