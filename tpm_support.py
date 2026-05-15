@@ -433,54 +433,41 @@ def verify_tpm_for_template(
     template: dict,
     request_id: Optional[int] = None,
     ca: Optional[dict] = None,
-    pending_challenge: Optional[dict] = None,
 ) -> dict:
     policy = _template_tpm_policy(template)
     if not policy:
         return {"status": "ok", "used": False, "attestation_valid": False, "ek_cert": None, "ek_pub": None}
 
     csr = x509.load_der_x509_csr(csr_der)
+    pending_challenge = _load_pending_challenge(request_id) if request_id is not None else None
 
-    if pending_challenge is None and request_id is not None:
-        pending_challenge = _load_pending_challenge(request_id)
-
-    challenge_response_der = p7_der
-    if pending_challenge and challenge_response_der:
-        try:
-            bundle_probe = tpm_mod.extract_tpm_bundle_from_cmc(challenge_response_der)
-        except Exception:
-            bundle_probe = None
-        if bundle_probe is None:
-            return _verify_pending_challenge_response(
-                csr=csr,
-                template=template,
-                ca=ca,
-                pending_challenge=pending_challenge,
-                challenge_response_der=challenge_response_der,
-                request_id=request_id,
-            )
+    def _verify_challenge_response(challenge_response_der: bytes) -> dict:
+        assert pending_challenge is not None
+        return _verify_pending_challenge_response(
+            csr=csr,
+            template=template,
+            ca=ca,
+            pending_challenge=pending_challenge,
+            challenge_response_der=challenge_response_der,
+            request_id=request_id,
+        )
 
     bundle = None
     if p7_der:
         try:
             bundle = tpm_mod.extract_tpm_bundle_from_cmc(p7_der)
         except Exception as exc:
+            if pending_challenge:
+                return _verify_challenge_response(p7_der)
             logger.debug("Could not extract TPM bundle from CMS/CMC request: %s", exc)
+
+        if pending_challenge and bundle is None:
+            return _verify_challenge_response(p7_der)
 
     if bundle is None:
         bundle = tpm_mod.extract_tpm_bundle_from_pkcs10_der(csr_der)
 
-
     if bundle is None:
-        if pending_challenge and challenge_response_der:
-            return _verify_pending_challenge_response(
-                csr=csr,
-                template=template,
-                ca=ca,
-                pending_challenge=pending_challenge,
-                challenge_response_der=challenge_response_der,
-                request_id=request_id,
-            )
         if policy["required"]:
             raise ValueError(
                 "TPM attestation required by template but no Microsoft key-attestation attributes were found in the PKCS#10 request"
@@ -536,7 +523,6 @@ def verify_tpm_for_template(
         if csr_pub != attested_pub:
             raise ValueError("CSR public key does not match TPM certified key")
 
-
         return {
             "status": "ok",
             "used": True,
@@ -548,16 +534,6 @@ def verify_tpm_for_template(
             "ek_cert": result.ek_cert,
             "ek_pub": result.ek_pub,
         }
-
-    if pending_challenge and challenge_response_der:
-        return _verify_pending_challenge_response(
-            csr=csr,
-            template=template,
-            ca=ca,
-            pending_challenge=pending_challenge,
-            challenge_response_der=challenge_response_der,
-            request_id=request_id,
-        )
 
     if policy["required"]:
         raise ValueError("TPM attestation required but request did not contain usable AIK_INFO/EK_INFO")
