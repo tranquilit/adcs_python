@@ -334,6 +334,73 @@ def _verify_tpm_signature(data: bytes, sig_raw: bytes, pub_key: TPMPublicKey):
     raise TPMAttestationError(f"Unsupported signature algorithm: {sig_alg:#06x}")
 
 
+
+def _verify_microsoft_key_attestation_signature(data: bytes, signature: bytes, aik_pub: TPMPublicKey):
+    """Verify the MS-WCCE keyAttestation signature.
+
+    MS-WCCE stores the keyAttestation.signature field as an opaque signature
+    byte array, not as a marshalled TPMT_SIGNATURE in all Windows outputs.
+    First accept TPMT_SIGNATURE for compatibility, then fall back to raw
+    signatures produced by the Microsoft Platform Crypto Provider.
+    """
+    try:
+        _verify_tpm_signature(data, signature, aik_pub)
+        return
+    except Exception as first_error:
+        last_error = first_error
+
+    crypto_key = aik_pub.to_cryptography_public_key()
+    hash_algs = []
+    if aik_pub.name_alg in (TPM2_ALG_SHA1, TPM2_ALG_SHA256, TPM2_ALG_SHA384, TPM2_ALG_SHA512):
+        hash_algs.append(_tpm_alg_to_hash_obj(aik_pub.name_alg))
+    for alg in (TPM2_ALG_SHA256, TPM2_ALG_SHA384, TPM2_ALG_SHA512, TPM2_ALG_SHA1):
+        obj = _tpm_alg_to_hash_obj(alg)
+        if all(obj.name != existing.name for existing in hash_algs):
+            hash_algs.append(obj)
+
+    if aik_pub.alg_type == TPM2_ALG_RSA:
+        for hash_obj in hash_algs:
+            try:
+                crypto_key.verify(signature, data, padding.PKCS1v15(), hash_obj)
+                return
+            except Exception as exc:
+                last_error = exc
+            try:
+                crypto_key.verify(
+                    signature,
+                    data,
+                    padding.PSS(mgf=padding.MGF1(hash_obj), salt_length=padding.PSS.MAX_LENGTH),
+                    hash_obj,
+                )
+                return
+            except Exception as exc:
+                last_error = exc
+
+    if aik_pub.alg_type == TPM2_ALG_ECC:
+        from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
+        # Some providers emit DER ECDSA directly.
+        for hash_obj in hash_algs:
+            try:
+                crypto_key.verify(signature, data, ec.ECDSA(hash_obj))
+                return
+            except Exception as exc:
+                last_error = exc
+        # Others emit fixed-width r||s.
+        if len(signature) % 2 == 0:
+            half = len(signature) // 2
+            der_sig = encode_dss_signature(
+                int.from_bytes(signature[:half], "big"),
+                int.from_bytes(signature[half:], "big"),
+            )
+            for hash_obj in hash_algs:
+                try:
+                    crypto_key.verify(der_sig, data, ec.ECDSA(hash_obj))
+                    return
+                except Exception as exc:
+                    last_error = exc
+
+    raise TPMAttestationError("Microsoft keyAttestation signature verification failed") from last_error
+
 def _check_aik_attributes(aik: TPMPublicKey):
     required = TPMA_OBJECT_RESTRICTED | TPMA_OBJECT_SIGN
     if aik.object_attr & required != required:
@@ -362,7 +429,6 @@ def _load_cert(der_or_pem: bytes) -> x509.Certificate:
 
 def _verify_aik_full(
     bundle: TPMAttestationBundle,
-    trusted_ek_roots: list,
     expected_nonce: Optional[bytes],
     require_fixed_tpm: bool,
     require_fixed_parent: bool,
@@ -407,7 +473,6 @@ def _verify_aik_full(
 
 def _verify_certify(
     bundle: TPMAttestationBundle,
-    trusted_ek_roots: list,
     expected_nonce: Optional[bytes],
     require_fixed_tpm: bool,
     require_fixed_parent: bool,
@@ -453,7 +518,6 @@ def _verify_certify(
 
 def verify_tpm_attestation(
     bundle: TPMAttestationBundle,
-    trusted_ek_roots: Optional[list] = None,
     expected_nonce: Optional[bytes] = None,
     require_fixed_tpm: bool = True,
     require_fixed_parent: bool = True,
@@ -463,7 +527,6 @@ def verify_tpm_attestation(
         if bundle.mode == "AIK_FULL":
             return _verify_aik_full(
                 bundle,
-                trusted_ek_roots,
                 expected_nonce,
                 require_fixed_tpm,
                 require_fixed_parent,
@@ -472,7 +535,6 @@ def verify_tpm_attestation(
         if bundle.mode == "CERTIFY":
             return _verify_certify(
                 bundle,
-                trusted_ek_roots,
                 expected_nonce,
                 require_fixed_tpm,
                 require_fixed_parent,
@@ -1237,12 +1299,7 @@ def _parse_microsoft_key_attestation_statement(blob: bytes) -> dict:
 
 
 def _extract_aik_name_from_id_binding(id_binding: bytes) -> bytes:
-    if len(id_binding) < 2:
-        raise ValueError("Empty TPM 2.0 idBinding")
-    public_len = struct.unpack(">H", id_binding[:2])[0]
-    if public_len <= 0 or public_len > len(id_binding) - 2:
-        raise ValueError("Invalid TPM2B_PUBLIC length in idBinding")
-    return parse_tpmt_public(id_binding[2:2 + public_len]).compute_name()
+    return _extract_aik_public_from_id_binding(id_binding).compute_name()
 
 
 def _extract_aik_name_from_microsoft_attestation_blob(attestation_blob_raw: bytes) -> bytes:
@@ -1306,6 +1363,162 @@ def _extract_aik_name_from_microsoft_attestation_blob(attestation_blob_raw: byte
         raise ValueError("Could not locate a TPMT_PUBLIC candidate inside attestation blob")
     candidates.sort(key=lambda item: (-item[0], item[1]))
     return candidates[0][2].compute_name()
+
+
+
+
+def _parse_microsoft_platform2_id_binding(id_binding: bytes) -> tuple[TPMPublicKey, bytes, bytes, bytes]:
+    """Parse the TPM 2.0 idBinding field from MS-WCCE KeyAttestationStatement.
+
+    Per MS-WCCE, platform 2 idBinding is:
+      TPM2B_PUBLIC || TPM2B_CREATION_DATA || TPM2B_ATTEST || TPMT_SIGNATURE
+    We only need the AIK public area to verify keyAttestation signatures and to
+    bind MakeCredential to the AIK name.
+    """
+    r = _Reader(id_binding)
+    aik_public_raw = r.tpm2b()
+    creation_data_raw = r.tpm2b()
+    attest_raw = r.tpm2b()
+    signature_raw = id_binding[r.tell():]
+    return parse_tpmt_public(aik_public_raw), creation_data_raw, attest_raw, signature_raw
+
+
+def _extract_aik_public_from_id_binding(id_binding: bytes) -> TPMPublicKey:
+    aik_pub, _creation_data, _attest, _signature = _parse_microsoft_platform2_id_binding(id_binding)
+    return aik_pub
+
+
+def _parse_microsoft_key_attestation(key_attestation: bytes) -> dict:
+    """Parse MS-WCCE keyAttestation.
+
+    Structure from MS-WCCE 2.2.2.5:
+      UINT32 Magic == 0x5344414B
+      UINT32 Platform
+      UINT32 HeaderSize
+      UINT32 cbKeyAttest
+      UINT32 cbSignature
+      UINT32 cbKeyBlob
+      BYTE keyAttest[cbKeyAttest]
+      BYTE signature[cbSignature]
+      BYTE keyBlob[cbKeyBlob]
+    """
+    if len(key_attestation) < 24:
+        raise ValueError("Microsoft keyAttestation is truncated")
+    magic, platform, header_size, cb_key_attest, cb_signature, cb_key_blob = struct.unpack_from("<6I", key_attestation, 0)
+    if magic != 0x5344414B:
+        raise ValueError(f"Unexpected Microsoft keyAttestation magic: {magic:#010x}")
+    if platform != 2:
+        raise ValueError(f"Unsupported Microsoft keyAttestation platform: {platform}")
+    if header_size < 24 or header_size > len(key_attestation):
+        raise ValueError("Invalid Microsoft keyAttestation header size")
+    start = header_size
+    end_key_attest = start + cb_key_attest
+    end_signature = end_key_attest + cb_signature
+    end_key_blob = end_signature + cb_key_blob
+    if end_key_blob > len(key_attestation):
+        raise ValueError("Truncated Microsoft keyAttestation payload")
+    return {
+        "platform": platform,
+        "key_attest": key_attestation[start:end_key_attest],
+        "signature": key_attestation[end_key_attest:end_signature],
+        "key_blob": key_attestation[end_signature:end_key_blob],
+    }
+
+
+def _iter_tpmt_public_candidates(blob: bytes):
+    """Yield TPMT_PUBLIC candidates found in an opaque Microsoft keyBlob.
+
+    Windows documents keyBlob as CSP/KSP-specific opaque data, so this scans for
+    an embedded TPMT_PUBLIC both raw and as TPM2B_PUBLIC. A candidate is accepted
+    later only if its SPKI exactly matches the CSR public key and its TPM name
+    exactly matches the certified name in keyAttest.
+    """
+    seen = set()
+    for pos in range(len(blob)):
+        for raw in (blob[pos:], None):
+            if raw is None:
+                if pos + 2 > len(blob):
+                    continue
+                length = struct.unpack(">H", blob[pos:pos + 2])[0]
+                if length <= 0 or length > len(blob) - pos - 2:
+                    continue
+                raw = blob[pos + 2:pos + 2 + length]
+            if len(raw) < 16:
+                continue
+            try:
+                pub = parse_tpmt_public(raw)
+            except Exception:
+                continue
+            key = (pos, pub.compute_name())
+            if key in seen:
+                continue
+            seen.add(key)
+            yield pub
+
+
+def validate_microsoft_key_attestation_binding(attestation_blob_raw: bytes, csr_public_key) -> dict:
+    """Validate that the Microsoft attestation statement binds the CSR key to TPM state.
+
+    This complements the MakeCredential/ActivateCredential challenge. The
+    challenge proves EK<->AIK possession. This function proves the key requested
+    in the CSR is the key certified by the AIK inside the Microsoft
+    keyAttestation statement.
+    """
+    parsed_statement = _parse_microsoft_key_attestation_statement(attestation_blob_raw)
+    if parsed_statement.get("platform") != 2:
+        raise ValueError(f"Unsupported Microsoft attestation platform: {parsed_statement.get('platform')}")
+    if not parsed_statement.get("id_binding"):
+        raise ValueError("Microsoft attestation statement is missing idBinding")
+    if not parsed_statement.get("key_attestation"):
+        raise ValueError("Microsoft attestation statement is missing keyAttestation")
+
+    aik_pub = _extract_aik_public_from_id_binding(parsed_statement["id_binding"])
+    _check_aik_attributes(aik_pub)
+
+    parsed_key = _parse_microsoft_key_attestation(parsed_statement["key_attestation"])
+    key_attest_raw = parsed_key["key_attest"]
+    signature_raw = parsed_key["signature"]
+    key_blob = parsed_key["key_blob"]
+    if not key_attest_raw or not signature_raw or not key_blob:
+        raise ValueError("Microsoft keyAttestation is missing keyAttest, signature, or keyBlob")
+
+    _verify_microsoft_key_attestation_signature(key_attest_raw, signature_raw, aik_pub)
+    key_attest = parse_tpms_attest(key_attest_raw)
+    if key_attest.magic != TPM2_GENERATED_VALUE:
+        raise ValueError(f"Microsoft keyAttest has invalid TPMS_ATTEST magic: {key_attest.magic:#010x}")
+    if key_attest.attest_type != TPM2_ST_ATTEST_CERTIFY:
+        raise ValueError(f"Microsoft keyAttest is not ST_ATTEST_CERTIFY: {key_attest.attest_type:#06x}")
+    if not key_attest.certified_name:
+        raise ValueError("Microsoft keyAttest does not contain a certified name")
+
+    csr_spki = csr_public_key.public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    for candidate in _iter_tpmt_public_candidates(key_blob):
+        try:
+            candidate_spki = candidate.to_cryptography_public_key().public_bytes(
+                serialization.Encoding.DER,
+                serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+        except Exception:
+            continue
+        if candidate_spki != csr_spki:
+            continue
+        if not hmac.compare_digest(candidate.compute_name(), key_attest.certified_name):
+            continue
+        _check_key_policy(candidate, require_fixed_tpm=True, require_fixed_parent=True, require_restricted=False)
+        return {
+            "aik_public_key": aik_pub,
+            "certified_key_obj": candidate,
+            "certified_key_name": key_attest.certified_name,
+            "firmware_version": key_attest.firmware_version,
+            "is_fixed_tpm": bool(candidate.object_attr & TPMA_OBJECT_FIXEDTPM),
+            "is_fixed_parent": bool(candidate.object_attr & TPMA_OBJECT_FIXEDPARENT),
+            "is_restricted": bool(candidate.object_attr & TPMA_OBJECT_RESTRICTED),
+        }
+
+    raise ValueError("CSR public key is not the TPM key certified by Microsoft keyAttestation")
 
 
 def _make_tach_blob(

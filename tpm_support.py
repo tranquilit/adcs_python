@@ -267,7 +267,7 @@ def _verify_pending_challenge_response(
     return {
         "status": "ok",
         "used": True,
-        "mode": pending_challenge.get("mode", "CERTIFY"),
+        "mode": pending_challenge.get("mode", "MICROSOFT_PKCS10"),
         "attestation_without_policy": pending_challenge.get("attestation_without_policy", False),
         "attestation_valid": True,
         "challenge_verified": True,
@@ -297,6 +297,18 @@ def create_microsoft_certify_challenge_response(*, csr, bundle, template: dict, 
         embedded_certificates_der=bundle.ms_embedded_certificates_der,
         ek_cert_der=bundle.ek_cert_der,
     )
+
+    attestation_blob_raw = (
+        getattr(bundle, "ms_attestation_statement_raw", None)
+        or getattr(bundle, "ms_attestation_blob_raw", None)
+    )
+    if not attestation_blob_raw:
+        raise ValueError("Microsoft key-attestation statement is required")
+    certified_binding = tpm_mod.validate_microsoft_key_attestation_binding(
+        attestation_blob_raw,
+        csr.public_key(),
+    )
+
     encryption_algorithm_oid = tpm_mod.extract_encryption_algorithm_for_challenge_response(bundle.ms_ek_info_raw)
     xchg_cert_der = (materials["ca_exchange_chain_der"] or [None])[0]
     aik_info_hash = hashlib.sha1(xchg_cert_der).digest() if xchg_cert_der else None
@@ -308,7 +320,7 @@ def create_microsoft_certify_challenge_response(*, csr, bundle, template: dict, 
         encryption_algorithm_oid=encryption_algorithm_oid,
         aik_info_hash=aik_info_hash,
         aik_pub_raw=getattr(bundle, "ms_aik_info_raw", None),
-        attestation_blob_raw=getattr(bundle, "ms_attestation_statement_raw", None) or getattr(bundle, "ms_attestation_blob_raw", None),
+        attestation_blob_raw=attestation_blob_raw,
         signer_cert_pem=materials["ca_sign_cert_pem"],
         signer_key_pem=materials["ca_sign_key_pem"],
         signer_chain_pems=materials["ca_sign_chain_pems"],
@@ -318,7 +330,7 @@ def create_microsoft_certify_challenge_response(*, csr, bundle, template: dict, 
     ek_pub_der = _public_key_to_spki_der(ek_pub)
 
     pending_payload = {
-        "mode": "CERTIFY",
+        "mode": "MICROSOFT_PKCS10",
         "template_name": template.get("common_name"),
         "spki_sha256": _spki_sha256(csr),
         "secret_b64": base64.b64encode(challenge["secret"]).decode("ascii"),
@@ -328,13 +340,14 @@ def create_microsoft_certify_challenge_response(*, csr, bundle, template: dict, 
         "ek_cert_der_b64": base64.b64encode(bundle.ek_cert_der).decode("ascii") if bundle.ek_cert_der else None,
         "ek_pub_der_b64": base64.b64encode(ek_pub_der).decode("ascii") if ek_pub_der else None,
         "attestation_without_policy": (_template_tpm_policy(template) or {}).get("attestation_without_policy", False),
+        "certified_key_name_b64": base64.b64encode(certified_binding["certified_key_name"]).decode("ascii"),
     }
     _save_pending_challenge(str(request_id), pending_payload)
 
     return {
         "status": "pending",
         "used": True,
-        "mode": "CERTIFY",
+        "mode": "MICROSOFT_PKCS10",
         "request_id": int(request_id),
         "challenge_pkcs7_der": challenge["signed_pkcs7_der"],
         "attestation_valid": False,
@@ -344,6 +357,7 @@ def create_microsoft_certify_challenge_response(*, csr, bundle, template: dict, 
         "pending_challenge": pending_payload,
         "ek_cert": ek_cert,
         "ek_pub": ek_pub,
+        "certified_key_obj": certified_binding.get("certified_key_obj"),
     }
 
 
