@@ -291,6 +291,28 @@ def _public_key_from_spki_der(spki_der: Optional[bytes]):
     return serialization.load_der_public_key(spki_der)
 
 
+def _public_key_to_legacy_ek_hash_der(public_key) -> Optional[bytes]:
+    """Return the EK public-key DER used by the legacy public hash.
+
+    Historical callers compared ek_public_key_spki_sha256 against the SHA-256
+    of RSA PKCS#1 RSAPublicKey DER, despite the field name saying SPKI. Keep
+    that wire value for compatibility. For non-RSA keys, PKCS#1 is not valid,
+    so fall back to SubjectPublicKeyInfo DER.
+    """
+    if public_key is None:
+        return None
+    try:
+        return public_key.public_bytes(
+            serialization.Encoding.DER,
+            serialization.PublicFormat.PKCS1,
+        )
+    except (TypeError, ValueError):
+        return public_key.public_bytes(
+            serialization.Encoding.DER,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+
+
 def _spki_der_from_public_key(public_key) -> bytes:
     return public_key.public_bytes(
         serialization.Encoding.DER,
@@ -330,9 +352,10 @@ def _cert_sha256(cert: Optional[x509.Certificate]) -> Optional[str]:
 
 
 def _ek_pub_sha256(public_key) -> Optional[str]:
-    if public_key is None:
+    der = _public_key_to_legacy_ek_hash_der(public_key)
+    if der is None:
         return None
-    return hashlib.sha256(_spki_der_from_public_key(public_key)).hexdigest()
+    return hashlib.sha256(der).hexdigest()
 
 
 def _restore_ek_materials(payload: Optional[dict]) -> tuple[object | None, object | None]:
@@ -454,7 +477,6 @@ def _verify_pending_challenge_response(
     return {
         "status": "ok",
         "used": True,
-        "mode": pending_challenge.get("mode", "MICROSOFT_PKCS10"),
         "attestation_without_policy": pending_challenge.get("attestation_without_policy", False),
         "attestation_valid": True,
         "challenge_verified": True,
@@ -483,7 +505,7 @@ def create_microsoft_certify_challenge_response(*, csr, bundle, template: dict, 
     decrypted = tpm_mod.decrypt_microsoft_ek_info(bundle.ms_ek_info_raw, ket_cert_der, ket_priv)
     bundle.ms_ek_info_decrypted_raw = decrypted.get("decrypted_raw")
     bundle.ms_embedded_certificates_der = decrypted.get("embedded_certificates_der") or []
-    if decrypted.get("ek_cert_der") and not bundle.ek_cert_der:
+    if decrypted.get("ek_cert_der") and not getattr(bundle, "ek_cert_der", None):
         bundle.ek_cert_der = decrypted["ek_cert_der"]
     if not bundle.ms_ek_info_decrypted_raw:
         raise ValueError("Microsoft EK_INFO was present but could not be decrypted")
@@ -491,7 +513,7 @@ def create_microsoft_certify_challenge_response(*, csr, bundle, template: dict, 
     extracted_ek_pub = tpm_mod.extract_ek_pub_from_decrypted_ek_info(
         bundle.ms_ek_info_decrypted_raw,
         embedded_certificates_der=bundle.ms_embedded_certificates_der,
-        ek_cert_der=bundle.ek_cert_der,
+        ek_cert_der=getattr(bundle, "ek_cert_der", None),
     )
     policy = _template_tpm_policy(template) or {}
     ek_cert, ek_pub = _select_ek_public_key_for_challenge(
@@ -530,11 +552,11 @@ def create_microsoft_certify_challenge_response(*, csr, bundle, template: dict, 
     )
 
     ek_pub_der = _public_key_to_spki_der(ek_pub)
+    ek_pub_hash_der = _public_key_to_legacy_ek_hash_der(ek_pub)
     ek_cert_der = ek_cert.public_bytes(serialization.Encoding.DER) if ek_cert is not None else None
     safe_request_id = _normalize_request_id(request_id)
 
     pending_payload = {
-        "mode": "MICROSOFT_PKCS10",
         "request_id": safe_request_id,
         "template_name": template.get("common_name"),
         "template_fingerprint": _template_fingerprint(template),
@@ -548,7 +570,7 @@ def create_microsoft_certify_challenge_response(*, csr, bundle, template: dict, 
         "ek_cert_der_b64": base64.b64encode(ek_cert_der).decode("ascii") if ek_cert_der else None,
         "ek_cert_sha256": hashlib.sha256(ek_cert_der).hexdigest() if ek_cert_der else None,
         "ek_pub_der_b64": base64.b64encode(ek_pub_der).decode("ascii") if ek_pub_der else None,
-        "ek_pub_spki_sha256": hashlib.sha256(ek_pub_der).hexdigest() if ek_pub_der else None,
+        "ek_pub_spki_sha256": hashlib.sha256(ek_pub_hash_der).hexdigest() if ek_pub_hash_der else None,
         "attestation_without_policy": policy.get("attestation_without_policy", False),
         "aik_name_b64": certified_binding.get("aik_name_b64"),
         "id_binding_creation_attest_type": certified_binding.get("id_binding_creation_attest_type"),
@@ -564,7 +586,6 @@ def create_microsoft_certify_challenge_response(*, csr, bundle, template: dict, 
     return {
         "status": "pending",
         "used": True,
-        "mode": "MICROSOFT_PKCS10",
         "request_id": int(request_id),
         "challenge_pkcs7_der": challenge["signed_pkcs7_der"],
         "attestation_valid": False,
@@ -648,68 +669,22 @@ def verify_tpm_for_template(
             )
         return {"status": "ok", "used": False, "attestation_valid": False, "ek_cert": None, "ek_pub": None}
 
-    if getattr(bundle, "mode", None) == "MICROSOFT_PKCS10":
-        if getattr(bundle, "ms_ek_info_raw", None) is not None:
-            if request_id is None or ca is None:
-                raise ValueError("request_id and ca are required to build a TPM challenge response")
-            return create_microsoft_certify_challenge_response(
-                csr=csr,
-                bundle=bundle,
-                template=template,
-                request_id=int(_normalize_request_id(request_id)),
-                ca=ca,
-            )
-        if getattr(bundle, "ms_aik_info_raw", None) is not None:
-            raise ValueError(
-                "Microsoft AIK_INFO-only key attestation requests are not yet handled by this path; EK_INFO is required here to build the activation challenge."
-            )
-
-    if any(
-        getattr(bundle, name, None) is not None
-        for name in ("aik_pub_raw", "attest_raw", "attest_sig_raw", "certified_key_raw", "nonce")
-    ):
-        if server_nonce is None:
-            raise ValueError(
-                "Generic TPM attestation requires a server-provided nonce; refusing to use the client-supplied nonce as replay protection"
-            )
-        result = tpm_mod.verify_tpm_attestation(
+    if getattr(bundle, "ms_ek_info_raw", None) is not None:
+        if request_id is None or ca is None:
+            raise ValueError("request_id and ca are required to build a TPM challenge response")
+        return create_microsoft_certify_challenge_response(
+            csr=csr,
             bundle=bundle,
-            expected_nonce=server_nonce,
-            require_fixed_tpm=True,
-            require_fixed_parent=True,
-            require_restricted=True,
+            template=template,
+            request_id=int(_normalize_request_id(request_id)),
+            ca=ca,
         )
-        if not result.success:
-            raise ValueError(result.message)
 
-        if result.certified_key_obj is None:
-            raise ValueError("TPM attestation did not include a certified key bound to the CSR")
-
-        csr_pub = csr.public_key().public_bytes(
-            serialization.Encoding.DER,
-            serialization.PublicFormat.SubjectPublicKeyInfo,
+    if getattr(bundle, "ms_aik_info_raw", None) is not None:
+        raise ValueError(
+            "Microsoft AIK_INFO-only key attestation requests are not supported by this path; EK_INFO is required to build the activation challenge."
         )
-        attested_pub = result.certified_key_obj.to_cryptography_public_key().public_bytes(
-            serialization.Encoding.DER,
-            serialization.PublicFormat.SubjectPublicKeyInfo,
-        )
-        if csr_pub != attested_pub:
-            raise ValueError("CSR public key does not match TPM certified key")
-
-        return {
-            "status": "ok",
-            "used": True,
-            "mode": result.mode,
-            "manufacturer": result.manufacturer,
-            "firmware_version": result.firmware_version,
-            "attestation_without_policy": policy["attestation_without_policy"],
-            "attestation_valid": True,
-            "ek_cert": result.ek_cert,
-            "ek_pub": result.ek_pub,
-            "ek_cert_sha256": _cert_sha256(result.ek_cert),
-            "ek_public_key_spki_sha256": _ek_pub_sha256(result.ek_pub) or "",
-        }
 
     if policy["required"]:
-        raise ValueError("TPM attestation required but request did not contain usable AIK_INFO/EK_INFO")
+        raise ValueError("TPM attestation required but request did not contain usable Microsoft EK_INFO")
     return {"status": "ok", "used": False, "attestation_valid": False, "ek_cert": None, "ek_pub": None}

@@ -18,7 +18,6 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, padding as sym_padding, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.x509.oid import NameOID
 
 logger = logging.getLogger("adcs.tpm_attestation")
 
@@ -86,13 +85,25 @@ class AttestationData:
 
 @dataclass
 class TPMAttestationBundle:
+    """Microsoft PKCS#10 TPM attestation attributes extracted from a request.
+
+    This module intentionally supports only the Microsoft ADCS/PKCS#10
+    attestation flow. Microsoft keyAttestation still verifies the TPM
+    ST_ATTEST_CERTIFY structure where required.
+    """
+
+    ms_attestation_statement_raw: Optional[bytes] = None
+    ms_attestation_blob_raw: Optional[bytes] = None
+    ms_ek_info_raw: Optional[bytes] = None
+    ms_aik_info_raw: Optional[bytes] = None
+    ms_ksp_name: Optional[str] = None
+    ms_ksp_name_raw: Optional[bytes] = None
+
+    # EK material recovered from Microsoft EK_INFO. This is still Microsoft-only
+    # state, not a generic attestation mode.
     ek_cert_der: Optional[bytes] = None
-    aik_pub_raw: Optional[bytes] = None
-    attest_raw: Optional[bytes] = None
-    attest_sig_raw: Optional[bytes] = None
-    certified_key_raw: Optional[bytes] = None
-    nonce: Optional[bytes] = None
-    mode: str = "AIK_FULL"
+    ms_ek_info_decrypted_raw: Optional[bytes] = None
+    ms_embedded_certificates_der: Optional[list[bytes]] = None
 
 
 class TPMAttestationError(Exception):
@@ -230,22 +241,6 @@ class TPMPublicKey:
         return out
 
 
-@dataclass
-class AttestationResult:
-    success: bool
-    mode: str
-    message: str
-    ek_cert: Optional[x509.Certificate] = None
-    ek_pub: Optional[object] = None
-    aik_public_key: Optional[TPMPublicKey] = None
-    certified_key_obj: Optional[TPMPublicKey] = None
-    is_fixed_tpm: bool = False
-    is_fixed_parent: bool = False
-    is_restricted: bool = False
-    firmware_version: Optional[int] = None
-    manufacturer: Optional[str] = None
-
-
 def parse_tpms_attest(raw: bytes) -> AttestationData:
     r = _Reader(raw)
     magic = r.u32()
@@ -312,22 +307,6 @@ def parse_tpmt_public(raw: bytes) -> TPMPublicKey:
         raise TPMAttestationError(f"Unsupported TPMT_PUBLIC algorithm: {alg_type:#06x}")
     out._raw_bytes = raw[:r.tell()]
     return out
-
-
-def _extract_tpm_manufacturer(cert: x509.Certificate) -> Optional[str]:
-    try:
-        san_ext = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
-        for name in san_ext.value:
-            if hasattr(name, "value") and hasattr(name.value, "type_id"):
-                oid_str = name.value.type_id.dotted_string
-                if oid_str.startswith(OID_TCG_SAN_TPM_DEVICE):
-                    return str(name.value.value)
-    except Exception:
-        pass
-    try:
-        return cert.subject.get_attributes_for_oid(NameOID.ORGANIZATION_NAME)[0].value
-    except Exception:
-        return None
 
 
 def _verify_tpm_signature(data: bytes, sig_raw: bytes, pub_key: TPMPublicKey):
@@ -468,132 +447,6 @@ def _check_key_policy(key: TPMPublicKey, require_fixed_tpm: bool, require_fixed_
         errors.append("RESTRICTED not set")
     if errors:
         raise TPMAttestationError("Certified key does not meet policy: " + "; ".join(errors))
-
-
-def _load_cert(der_or_pem: bytes) -> x509.Certificate:
-    return x509.load_pem_x509_certificate(der_or_pem) if b"-----BEGIN" in der_or_pem else x509.load_der_x509_certificate(der_or_pem)
-
-
-def _verify_aik_full(
-    bundle: TPMAttestationBundle,
-    expected_nonce: Optional[bytes],
-    require_fixed_tpm: bool,
-    require_fixed_parent: bool,
-    require_restricted: bool,
-) -> AttestationResult:
-    if not bundle.ek_cert_der or not bundle.aik_pub_raw or not bundle.attest_raw or not bundle.attest_sig_raw:
-        raise TPMAttestationError("AIK_FULL mode requires ek_cert_der, aik_pub_raw, attest_raw and attest_sig_raw")
-    ek_cert = _load_cert(bundle.ek_cert_der)
-    ek_pub = ek_cert.public_key()
-    aik_pub = parse_tpmt_public(bundle.aik_pub_raw)
-    _check_aik_attributes(aik_pub)
-    attest = parse_tpms_attest(bundle.attest_raw)
-    if attest.magic != TPM2_GENERATED_VALUE:
-        raise TPMAttestationError(f"TPMS_ATTEST magic invalid: {attest.magic:#010x}")
-    if attest.attest_type != TPM2_ST_ATTEST_CERTIFY:
-        raise TPMAttestationError(
-            f"AIK_FULL mode expected ST_ATTEST_CERTIFY ({TPM2_ST_ATTEST_CERTIFY:#06x}), "
-            f"got {attest.attest_type:#06x}"
-        )
-    if expected_nonce is not None and not hmac.compare_digest(attest.extra_data, expected_nonce):
-        raise TPMAttestationError("Nonce mismatch — possible replay attack")
-    _verify_tpm_signature(bundle.attest_raw, bundle.attest_sig_raw, aik_pub)
-    if not attest.certified_name:
-        raise TPMAttestationError("TPMS_ATTEST certified_name is empty; attestation cannot be verified")
-    if attest.certified_name != aik_pub.compute_name():
-        raise TPMAttestationError("Certified name in TPMS_ATTEST does not match AIK public key name")
-    _check_key_policy(aik_pub, require_fixed_tpm, require_fixed_parent, require_restricted)
-    return AttestationResult(
-        success=True,
-        mode="AIK_FULL",
-        message="AIK attestation verified",
-        ek_cert=ek_cert,
-        ek_pub=ek_pub,
-        aik_public_key=aik_pub,
-        is_fixed_tpm=bool(aik_pub.object_attr & TPMA_OBJECT_FIXEDTPM),
-        is_fixed_parent=bool(aik_pub.object_attr & TPMA_OBJECT_FIXEDPARENT),
-        is_restricted=bool(aik_pub.object_attr & TPMA_OBJECT_RESTRICTED),
-        firmware_version=attest.firmware_version,
-        manufacturer=_extract_tpm_manufacturer(ek_cert),
-    )
-
-
-def _verify_certify(
-    bundle: TPMAttestationBundle,
-    expected_nonce: Optional[bytes],
-    require_fixed_tpm: bool,
-    require_fixed_parent: bool,
-    require_restricted: bool,
-) -> AttestationResult:
-    if not bundle.ek_cert_der or not bundle.aik_pub_raw or not bundle.certified_key_raw or not bundle.attest_raw or not bundle.attest_sig_raw:
-        raise TPMAttestationError(
-            "CERTIFY mode requires ek_cert_der, aik_pub_raw, certified_key_raw, attest_raw and attest_sig_raw"
-        )
-    ek_cert = _load_cert(bundle.ek_cert_der)
-    ek_pub = ek_cert.public_key()
-    aik_pub = parse_tpmt_public(bundle.aik_pub_raw)
-    _check_aik_attributes(aik_pub)
-    cert_key = parse_tpmt_public(bundle.certified_key_raw)
-    attest = parse_tpms_attest(bundle.attest_raw)
-    if attest.magic != TPM2_GENERATED_VALUE:
-        raise TPMAttestationError(f"Bad magic: {attest.magic:#010x}")
-    if attest.attest_type != TPM2_ST_ATTEST_CERTIFY:
-        raise TPMAttestationError(
-            f"Expected ST_ATTEST_CERTIFY ({TPM2_ST_ATTEST_CERTIFY:#06x}), got {attest.attest_type:#06x}"
-        )
-    if expected_nonce is not None and not hmac.compare_digest(attest.extra_data, expected_nonce):
-        raise TPMAttestationError("Nonce mismatch — possible replay attack")
-    _verify_tpm_signature(bundle.attest_raw, bundle.attest_sig_raw, aik_pub)
-    if attest.certified_name != cert_key.compute_name():
-        raise TPMAttestationError("certifiedName in TPMS_ATTEST does not match the certified key")
-    _check_key_policy(cert_key, require_fixed_tpm, require_fixed_parent, require_restricted)
-    return AttestationResult(
-        success=True,
-        mode="CERTIFY",
-        message="TPM2_Certify attestation verified",
-        ek_cert=ek_cert,
-        ek_pub=ek_pub,
-        aik_public_key=aik_pub,
-        certified_key_obj=cert_key,
-        is_fixed_tpm=bool(cert_key.object_attr & TPMA_OBJECT_FIXEDTPM),
-        is_fixed_parent=bool(cert_key.object_attr & TPMA_OBJECT_FIXEDPARENT),
-        is_restricted=bool(cert_key.object_attr & TPMA_OBJECT_RESTRICTED),
-        firmware_version=attest.firmware_version,
-        manufacturer=_extract_tpm_manufacturer(ek_cert),
-    )
-
-
-def verify_tpm_attestation(
-    bundle: TPMAttestationBundle,
-    expected_nonce: Optional[bytes] = None,
-    require_fixed_tpm: bool = True,
-    require_fixed_parent: bool = True,
-    require_restricted: bool = True,
-) -> AttestationResult:
-    try:
-        if bundle.mode == "AIK_FULL":
-            return _verify_aik_full(
-                bundle,
-                expected_nonce,
-                require_fixed_tpm,
-                require_fixed_parent,
-                require_restricted,
-            )
-        if bundle.mode == "CERTIFY":
-            return _verify_certify(
-                bundle,
-                expected_nonce,
-                require_fixed_tpm,
-                require_fixed_parent,
-                require_restricted,
-            )
-        raise TPMAttestationError(f"Unsupported attestation mode: {bundle.mode}")
-    except TPMAttestationError as exc:
-        logger.warning("TPM attestation failed: %s", exc)
-        return AttestationResult(success=False, mode=bundle.mode, message=str(exc))
-    except Exception as exc:
-        logger.exception("Unexpected error during TPM attestation")
-        return AttestationResult(success=False, mode=bundle.mode, message=f"Internal error: {exc}")
 
 
 def _decode_any_string(value) -> Optional[str]:
@@ -908,14 +761,14 @@ def extract_tpm_bundle_from_pkcs10_der(csr_der: bytes) -> Optional[TPMAttestatio
     ms_attrs = extract_microsoft_key_attestation_attributes_from_csr_der(csr_der)
     if ms_attrs is None:
         return None
-    bundle = TPMAttestationBundle(mode="MICROSOFT_PKCS10")
-    bundle.ms_attestation_statement_raw = ms_attrs.get("attestation_statement_raw")
-    bundle.ms_attestation_blob_raw = ms_attrs.get("attestation_blob_raw")
-    bundle.ms_ek_info_raw = ms_attrs.get("ek_info_raw")
-    bundle.ms_aik_info_raw = ms_attrs.get("aik_info_raw")
-    bundle.ms_ksp_name = ms_attrs.get("ksp_name")
-    bundle.ms_ksp_name_raw = ms_attrs.get("ksp_name_raw")
-    return bundle
+    return TPMAttestationBundle(
+        ms_attestation_statement_raw=ms_attrs.get("attestation_statement_raw"),
+        ms_attestation_blob_raw=ms_attrs.get("attestation_blob_raw"),
+        ms_ek_info_raw=ms_attrs.get("ek_info_raw"),
+        ms_aik_info_raw=ms_attrs.get("aik_info_raw"),
+        ms_ksp_name=ms_attrs.get("ksp_name"),
+        ms_ksp_name_raw=ms_attrs.get("ksp_name_raw"),
+    )
 
 
 def extract_tpm_bundle_from_cmc(p7_der: bytes) -> Optional[TPMAttestationBundle]:
