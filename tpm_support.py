@@ -91,10 +91,7 @@ def _save_pending_challenge(request_id: str | int, payload: dict) -> None:
     safe_request_id = _normalize_request_id(request_id)
     pending_dir = Path(_PENDING_DIR)
     pending_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    try:
-        pending_dir.chmod(0o700)
-    except PermissionError:
-        logger.warning("Could not chmod TPM pending directory %s to 0700", pending_dir)
+    pending_dir.chmod(0o700)
     path = pending_dir / f"{safe_request_id}.json"
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
     fd = os.open(path, flags, 0o600)

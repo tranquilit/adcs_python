@@ -1461,10 +1461,6 @@ def _make_tach_blob(
         parsed = _parse_microsoft_key_attestation_statement(attestation_blob_raw)
         if parsed.get("platform") == 2 and parsed.get("aik_opaque"):
             pcpm_tail = parsed["aik_opaque"]
-        elif os.getenv("ADCS_TPM_ALLOW_PCPM_SCAN_FALLBACK", "").lower() in {"1", "true", "yes"}:
-            last_pcp = attestation_blob_raw.rfind(b"PCPM")
-            if last_pcp >= 0:
-                pcpm_tail = attestation_blob_raw[last_pcp:]
     header = b"TACH" + struct.pack("<I", 1) + struct.pack("<I", 2 if pcpm_tail else 1) + struct.pack("<I", 24)
     header += struct.pack("<I", len(makecred_raw)) + struct.pack("<I", len(pcpm_tail))
     return header + makecred_raw + pcpm_tail
