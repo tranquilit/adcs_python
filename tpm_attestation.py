@@ -37,9 +37,9 @@ OID_ENROLL_ENCRYPTION_ALGORITHM = "1.3.6.1.4.1.311.21.29"
 OID_ID_CCT_PKI_RESPONSE = "1.3.6.1.5.5.7.12.3"
 OID_ID_SIGNED_DATA = "1.2.840.113549.1.7.2"
 
-TPM2_ST_ATTEST_CERTIFY = 32791
-TPM2_ST_ATTEST_QUOTE = 32792
-TPM2_ST_ATTEST_CREATION = 32788
+TPM2_ST_ATTEST_CERTIFY = 0x8017
+TPM2_ST_ATTEST_QUOTE = 0x8018
+TPM2_ST_ATTEST_CREATION = 0x801A
 TPMA_OBJECT_FIXEDTPM = 0x00000002
 TPMA_OBJECT_FIXEDPARENT = 0x00000010
 TPMA_OBJECT_SENSITIVEDATAORIGIN = 0x00000020
@@ -1407,17 +1407,21 @@ def _validate_microsoft_platform2_id_binding(id_binding: bytes) -> dict:
     id_binding_name = None
     id_binding_hash = None
 
-    if id_attest.attest_type == TPM2_ST_ATTEST_CREATION:
+    # TPM 2.0 attestation type values used here:
+    #   0x8017 = TPM_ST_ATTEST_CERTIFY
+    #   0x801a = TPM_ST_ATTEST_CREATION
+    # Use the literal accepted values as well as constants so stale imports or
+    # packaging mistakes cannot make Windows idBinding fail on the common 0x801a case.
+    if id_attest.attest_type in (TPM2_ST_ATTEST_CREATION, 0x801A):
         id_binding_attest_type = "creation"
         id_binding_name = id_attest.creation_name
         id_binding_hash = id_attest.creation_hash
         if id_binding_name and not hmac.compare_digest(id_binding_name, aik_name):
             raise ValueError("Microsoft idBinding creation attestation does not name the AIK public area")
-    elif id_attest.attest_type == TPM2_ST_ATTEST_CERTIFY:
-        # Windows commonly emits ST_ATTEST_CERTIFY here. Treat it as an AIK
-        # binding proof only if the certified object name is exactly the AIK
-        # public area's TPM Name. This preserves the hardening without
-        # requiring ST_ATTEST_CREATION specifically.
+    elif id_attest.attest_type in (TPM2_ST_ATTEST_CERTIFY, 0x8017):
+        # Some Microsoft/PCP blobs may use a CERTIFY-style attestation here. Treat it
+        # as an AIK binding proof only if the certified object name is exactly the AIK
+        # public area's TPM Name.
         id_binding_attest_type = "certify"
         id_binding_name = id_attest.certified_name
         if id_binding_name and not hmac.compare_digest(id_binding_name, aik_name):
