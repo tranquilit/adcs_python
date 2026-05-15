@@ -39,6 +39,7 @@ OID_ID_SIGNED_DATA = "1.2.840.113549.1.7.2"
 
 TPM2_ST_ATTEST_CERTIFY = 32791
 TPM2_ST_ATTEST_QUOTE = 32792
+TPM2_ST_ATTEST_CREATION = 32788
 TPMA_OBJECT_FIXEDTPM = 0x00000002
 TPMA_OBJECT_FIXEDPARENT = 0x00000010
 TPMA_OBJECT_SENSITIVEDATAORIGIN = 0x00000020
@@ -76,6 +77,8 @@ class AttestationData:
     firmware_version: int
     certified_name: bytes = b""
     certified_qname: bytes = b""
+    creation_name: bytes = b""
+    creation_hash: bytes = b""
     pcr_selection: bytes = b""
     pcr_digest: bytes = b""
     raw: bytes = b""
@@ -266,6 +269,9 @@ def parse_tpms_attest(raw: bytes) -> AttestationData:
     if attest_type == TPM2_ST_ATTEST_CERTIFY:
         attest.certified_name = r.tpm2b()
         attest.certified_qname = r.tpm2b()
+    elif attest_type == TPM2_ST_ATTEST_CREATION:
+        attest.creation_name = r.tpm2b()
+        attest.creation_hash = r.tpm2b()
     elif attest_type == TPM2_ST_ATTEST_QUOTE:
         count = r.u32()
         selection = b""
@@ -1364,8 +1370,6 @@ def _parse_microsoft_platform2_id_binding(id_binding: bytes) -> tuple[TPMPublicK
 
     Per MS-WCCE, platform 2 idBinding is:
       TPM2B_PUBLIC || TPM2B_CREATION_DATA || TPM2B_ATTEST || TPMT_SIGNATURE
-    We only need the AIK public area to verify keyAttestation signatures and to
-    bind MakeCredential to the AIK name.
     """
     r = _Reader(id_binding)
     aik_public_raw = r.tpm2b()
@@ -1375,9 +1379,47 @@ def _parse_microsoft_platform2_id_binding(id_binding: bytes) -> tuple[TPMPublicK
     return parse_tpmt_public(aik_public_raw), creation_data_raw, attest_raw, signature_raw
 
 
+def _validate_microsoft_platform2_id_binding(id_binding: bytes) -> dict:
+    """Validate the Microsoft platform 2 idBinding AIK creation proof.
+
+    This verifies the AIK public area, the AIK creation attestation signature,
+    and the objectName contained in that creation attestation. It complements
+    MakeCredential/ActivateCredential, which proves live possession of the EK
+    private key and the AIK named here.
+    """
+    aik_pub, creation_data_raw, attest_raw, signature_raw = _parse_microsoft_platform2_id_binding(id_binding)
+    if not creation_data_raw:
+        raise ValueError("Microsoft idBinding is missing TPM2B_CREATION_DATA")
+    if not attest_raw:
+        raise ValueError("Microsoft idBinding is missing TPM2B_ATTEST")
+    if not signature_raw:
+        raise ValueError("Microsoft idBinding is missing TPMT_SIGNATURE")
+
+    _check_aik_attributes(aik_pub)
+    _verify_microsoft_key_attestation_signature(attest_raw, signature_raw, aik_pub)
+
+    creation_attest = parse_tpms_attest(attest_raw)
+    if creation_attest.magic != TPM2_GENERATED_VALUE:
+        raise ValueError(f"Microsoft idBinding creation attest has invalid magic: {creation_attest.magic:#010x}")
+    if creation_attest.attest_type != TPM2_ST_ATTEST_CREATION:
+        raise ValueError(f"Microsoft idBinding is not ST_ATTEST_CREATION: {creation_attest.attest_type:#06x}")
+
+    aik_name = aik_pub.compute_name()
+    if creation_attest.creation_name and not hmac.compare_digest(creation_attest.creation_name, aik_name):
+        raise ValueError("Microsoft idBinding creation attestation does not name the AIK public area")
+
+    return {
+        "aik_public_key": aik_pub,
+        "aik_name": aik_name,
+        "aik_name_b64": base64.b64encode(aik_name).decode("ascii"),
+        "id_binding_creation_attest_type": "creation",
+        "id_binding_creation_name_b64": base64.b64encode(creation_attest.creation_name).decode("ascii") if creation_attest.creation_name else None,
+        "id_binding_creation_hash_b64": base64.b64encode(creation_attest.creation_hash).decode("ascii") if creation_attest.creation_hash else None,
+    }
+
+
 def _extract_aik_public_from_id_binding(id_binding: bytes) -> TPMPublicKey:
-    aik_pub, _creation_data, _attest, _signature = _parse_microsoft_platform2_id_binding(id_binding)
-    return aik_pub
+    return _validate_microsoft_platform2_id_binding(id_binding)["aik_public_key"]
 
 
 def _parse_microsoft_key_attestation(key_attestation: bytes) -> dict:
@@ -1464,9 +1506,9 @@ def validate_microsoft_key_attestation_binding(attestation_blob_raw: bytes, csr_
     if not parsed_statement.get("key_attestation"):
         raise ValueError("Microsoft attestation statement is missing keyAttestation")
 
-    aik_pub = _extract_aik_public_from_id_binding(parsed_statement["id_binding"])
-    aik_name = aik_pub.compute_name()
-    _check_aik_attributes(aik_pub)
+    id_binding_info = _validate_microsoft_platform2_id_binding(parsed_statement["id_binding"])
+    aik_pub = id_binding_info["aik_public_key"]
+    aik_name = id_binding_info["aik_name"]
 
     parsed_key = _parse_microsoft_key_attestation(parsed_statement["key_attestation"])
     key_attest_raw = parsed_key["key_attest"]
@@ -1504,7 +1546,10 @@ def validate_microsoft_key_attestation_binding(attestation_blob_raw: bytes, csr_
         return {
             "aik_public_key": aik_pub,
             "aik_name": aik_name,
-            "aik_name_b64": base64.b64encode(aik_name).decode("ascii"),
+            "aik_name_b64": id_binding_info["aik_name_b64"],
+            "id_binding_creation_attest_type": id_binding_info.get("id_binding_creation_attest_type"),
+            "id_binding_creation_name_b64": id_binding_info.get("id_binding_creation_name_b64"),
+            "id_binding_creation_hash_b64": id_binding_info.get("id_binding_creation_hash_b64"),
             "certified_key_obj": candidate,
             "certified_key_name": key_attest.certified_name,
             "firmware_version": key_attest.firmware_version,
@@ -1535,13 +1580,10 @@ def _make_tach_blob(
     makecred_raw = _tpm2b(credential_blob) + _tpm2b(encrypted_secret)
     pcpm_tail = b""
     if attestation_blob_raw:
-        try:
-            parsed = _parse_microsoft_key_attestation_statement(attestation_blob_raw)
-            if parsed.get("platform") == 2 and parsed.get("aik_opaque"):
-                pcpm_tail = parsed["aik_opaque"]
-        except Exception:
-            pass
-        if not pcpm_tail:
+        parsed = _parse_microsoft_key_attestation_statement(attestation_blob_raw)
+        if parsed.get("platform") == 2 and parsed.get("aik_opaque"):
+            pcpm_tail = parsed["aik_opaque"]
+        elif os.getenv("ADCS_TPM_ALLOW_PCPM_SCAN_FALLBACK", "").lower() in {"1", "true", "yes"}:
             last_pcp = attestation_blob_raw.rfind(b"PCPM")
             if last_pcp >= 0:
                 pcpm_tail = attestation_blob_raw[last_pcp:]
