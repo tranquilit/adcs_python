@@ -260,8 +260,7 @@ def ces_service(CAID):
         p7_der=p7_der,
         template=tpl,
         request_id=request_id,
-        ca=ca,
-        extra_request_data=None,
+        ca=ca
     )
 
     if tpm_result.get("status") == "pending":

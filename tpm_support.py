@@ -77,30 +77,6 @@ def _template_tpm_policy(template: dict) -> Optional[dict]:
 
 
 
-
-def _build_bundle_from_json(data: dict):
-    _ALLOWED_MODES = {"CERTIFY", "AIK_FULL"}
-
-    def _decode(key: str):
-        value = data.get(key)
-        return base64.b64decode(value) if value else None
-
-    mode = data.get("mode", "CERTIFY")
-    if mode not in _ALLOWED_MODES:
-        raise ValueError(
-            f"Invalid TPM bundle mode {mode!r}; must be one of {sorted(_ALLOWED_MODES)}"
-        )
-    return tpm_mod.TPMAttestationBundle(
-        mode=mode,
-        ek_cert_der=_decode("ek_cert"),
-        aik_pub_raw=_decode("aik_pub"),
-        attest_raw=_decode("attest"),
-        attest_sig_raw=_decode("sig") or _decode("attest_sig"),
-        certified_key_raw=_decode("certified_key") or _decode("cert_key"),
-        nonce=_decode("nonce"),
-    )
-
-
 def _resolve_ca_materials_for_tpm(template: dict, ca: Optional[dict] = None) -> dict:
     def _pick(*values):
         for value in values:
@@ -208,23 +184,6 @@ def _public_key_from_spki_der(spki_der: Optional[bytes]):
     return serialization.load_der_public_key(spki_der)
 
 
-def _extract_ek_materials_from_bundle(bundle) -> tuple[object | None, object | None]:
-    ek_cert = None
-    ek_pub = None
-    try:
-        ek_cert = _ek_cert_from_der(getattr(bundle, "ek_cert_der", None))
-    except Exception as exc:
-        logger.debug("Could not parse EK certificate from bundle: %s", exc)
-        ek_cert = None
-    if ek_cert is not None:
-        try:
-            ek_pub = ek_cert.public_key()
-        except Exception as exc:
-            logger.debug("Could not extract EK public key from EK certificate: %s", exc)
-            ek_pub = None
-    return ek_cert, ek_pub
-
-
 def _restore_ek_materials(payload: Optional[dict]) -> tuple[object | None, object | None]:
     payload = payload or {}
     ek_cert_der_b64 = payload.get("ek_cert_der_b64")
@@ -247,47 +206,6 @@ def _restore_ek_materials(payload: Optional[dict]) -> tuple[object | None, objec
         except Exception as exc:
             logger.debug("Could not restore EK public key from EK certificate: %s", exc)
     return ek_cert, ek_pub
-
-
-_MAX_COERCE_BYTES = 1 * 1024 * 1024 
-
-
-def _coerce_bytes(value) -> Optional[bytes]:
-    if value is None:
-        return None
-    if isinstance(value, bytes):
-        if len(value) > _MAX_COERCE_BYTES:
-            raise ValueError(f"Binary value too large: {len(value)} bytes (max {_MAX_COERCE_BYTES})")
-        return value
-    if isinstance(value, bytearray):
-        if len(value) > _MAX_COERCE_BYTES:
-            raise ValueError(f"Binary value too large: {len(value)} bytes (max {_MAX_COERCE_BYTES})")
-        return bytes(value)
-    if isinstance(value, str):
-        # Base64 overhead ≈ 4/3 — check pre-decode length to avoid allocating huge buffers
-        if len(value) > _MAX_COERCE_BYTES * 4 // 3 + 4:
-            raise ValueError(f"Base64 string too large: {len(value)} chars (max {_MAX_COERCE_BYTES * 4 // 3 + 4})")
-        decoded = base64.b64decode(value)
-        if len(decoded) > _MAX_COERCE_BYTES:
-            raise ValueError(f"Decoded binary value too large: {len(decoded)} bytes (max {_MAX_COERCE_BYTES})")
-        return decoded
-    raise TypeError(f"Unsupported binary value type: {type(value).__name__}")
-
-
-def _extract_challenge_response_der(*, p7_der: Optional[bytes], extra_request_data: Optional[dict]) -> Optional[bytes]:
-    if extra_request_data:
-        for key in (
-            "challenge_response_der",
-            "challenge_response",
-            "challenge_response_b64",
-            "challenge_blob",
-            "challenge_blob_b64",
-            "pending_response",
-            "pending_response_b64",
-        ):
-            if key in extra_request_data and extra_request_data.get(key) is not None:
-                return _coerce_bytes(extra_request_data.get(key))
-    return p7_der
 
 
 def _verify_pending_challenge_response(
@@ -345,7 +263,7 @@ def _verify_pending_challenge_response(
     else:
         ek_public_key_spki_sha256 = ''
 
-    
+
     return {
         "status": "ok",
         "used": True,
@@ -436,7 +354,6 @@ def verify_tpm_for_template(
     template: dict,
     request_id: Optional[int] = None,
     ca: Optional[dict] = None,
-    extra_request_data: Optional[dict] = None,
     pending_challenge: Optional[dict] = None,
 ) -> dict:
     policy = _template_tpm_policy(template)
@@ -448,10 +365,7 @@ def verify_tpm_for_template(
     if pending_challenge is None and request_id is not None:
         pending_challenge = _load_pending_challenge(request_id)
 
-    challenge_response_der = _extract_challenge_response_der(
-        p7_der=p7_der,
-        extra_request_data=extra_request_data,
-    )
+    challenge_response_der = p7_der
     if pending_challenge and challenge_response_der:
         try:
             bundle_probe = tpm_mod.extract_tpm_bundle_from_cmc(challenge_response_der)
@@ -476,8 +390,7 @@ def verify_tpm_for_template(
 
     if bundle is None:
         bundle = tpm_mod.extract_tpm_bundle_from_pkcs10_der(csr_der)
-    if bundle is None and extra_request_data:
-        bundle = _build_bundle_from_json(extra_request_data)
+
 
     if bundle is None:
         if pending_challenge and challenge_response_der:
@@ -532,7 +445,7 @@ def verify_tpm_for_template(
 
         if result.certified_key_obj is None:
             raise ValueError("TPM attestation did not include a certified key bound to the CSR")
-        
+
         csr_pub = csr.public_key().public_bytes(
             serialization.Encoding.DER,
             serialization.PublicFormat.SubjectPublicKeyInfo,
@@ -543,7 +456,7 @@ def verify_tpm_for_template(
         )
         if csr_pub != attested_pub:
             raise ValueError("CSR public key does not match TPM certified key")
-        
+
 
         return {
             "status": "ok",

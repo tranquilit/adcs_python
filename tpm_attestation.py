@@ -1,5 +1,4 @@
 from pathlib import Path
-import base64
 import hashlib
 import hmac
 import logging
@@ -23,7 +22,6 @@ from cryptography.x509.oid import NameOID
 logger = logging.getLogger("adcs.tpm_attestation")
 
 OID_TCG_SAN_TPM_DEVICE = "2.23.133.2"
-OID_TPM_ATTESTATION_BUNDLE = "1.3.6.1.4.1.99999.1.1"
 OID_MS_ENROLL_EK_INFO = "1.3.6.1.4.1.311.21.23"
 OID_MS_ENROLL_AIK_INFO = "1.3.6.1.4.1.311.21.39"
 OID_MS_ENROLL_KSP_NAME = "1.3.6.1.4.1.311.21.25"
@@ -284,32 +282,6 @@ def parse_tpmt_public(raw: bytes) -> TPMPublicKey:
         raise TPMAttestationError(f"Unsupported TPMT_PUBLIC algorithm: {alg_type:#06x}")
     out._raw_bytes = raw[:r.tell()]
     return out
-
-
-def _verify_signature_by(cert: x509.Certificate, issuer_cert: x509.Certificate):
-    pub = issuer_cert.public_key()
-    if isinstance(pub, rsa.RSAPublicKey):
-        pub.verify(cert.signature, cert.tbs_certificate_bytes, padding.PKCS1v15(), cert.signature_hash_algorithm)
-    elif isinstance(pub, ec.EllipticCurvePublicKey):
-        pub.verify(cert.signature, cert.tbs_certificate_bytes, ec.ECDSA(cert.signature_hash_algorithm))
-    else:
-        raise TPMAttestationError("Unsupported issuer key type")
-
-
-def _verify_ek_cert(ek_cert: x509.Certificate, trusted_roots: list):
-    if not trusted_roots:
-        return
-    for root in trusted_roots:
-        if root.subject != ek_cert.issuer:
-            continue
-        try:
-            _verify_signature_by(ek_cert, root)
-            return
-        except Exception:
-            pass
-    raise TPMAttestationError(
-        "EK certificate does not chain to any trusted TPM manufacturer CA root. Add the manufacturer's CA to trusted_ek_roots."
-    )
 
 
 def _extract_tpm_manufacturer(cert: x509.Certificate) -> Optional[str]:
@@ -822,52 +794,7 @@ def extract_microsoft_key_attestation_attributes_from_csr_der(csr_der: bytes) ->
     return result if result["found"] else None
 
 
-def load_trusted_ek_roots_from_dir(path: str) -> list:
-    roots = []
-    if not os.path.isdir(path):
-        return roots
-    for entry in os.listdir(path):
-        file_path = os.path.join(path, entry)
-        if not os.path.isfile(file_path):
-            continue
-        try:
-            data = Path(file_path).read_bytes()
-            roots.append(x509.load_pem_x509_certificate(data) if b"-----BEGIN" in data else x509.load_der_x509_certificate(data))
-        except Exception as exc:
-            logger.warning("Could not load EK root from %s: %s", file_path, exc)
-    return roots
-
-
-def _b64_or_none(value) -> Optional[bytes]:
-    return None if value is None else base64.b64decode(value)
-
-
 def extract_tpm_bundle_from_pkcs10_der(csr_der: bytes) -> Optional[TPMAttestationBundle]:
-    _ALLOWED_BUNDLE_MODES = {"CERTIFY", "AIK_FULL"}
-    csr = x509.load_der_x509_csr(csr_der)
-    try:
-        for ext in csr.extensions:
-            if ext.oid.dotted_string == OID_TPM_ATTESTATION_BUNDLE:
-                blob = __import__("json").loads(ext.value.value.decode("utf-8", errors="replace"))
-                mode = blob.get("mode", "AIK_FULL")
-                if mode not in _ALLOWED_BUNDLE_MODES:
-                    raise TPMAttestationError(
-                        f"Invalid TPM bundle mode in CSR extension: {mode!r}; "
-                        f"must be one of {sorted(_ALLOWED_BUNDLE_MODES)}"
-                    )
-                return TPMAttestationBundle(
-                    mode=mode,
-                    ek_cert_der=_b64_or_none(blob.get("ek_cert")),
-                    aik_pub_raw=_b64_or_none(blob.get("aik_pub")),
-                    attest_raw=_b64_or_none(blob.get("attest")),
-                    attest_sig_raw=_b64_or_none(blob.get("sig")),
-                    certified_key_raw=_b64_or_none(blob.get("cert_key")),
-                    nonce=_b64_or_none(blob.get("nonce")),
-                )
-    except TPMAttestationError:
-        raise
-    except Exception as exc:
-        logger.debug("Could not parse legacy TPM JSON extension: %s", exc)
 
     ms_attrs = extract_microsoft_key_attestation_attributes_from_csr_der(csr_der)
     if ms_attrs is None:
