@@ -1,4 +1,5 @@
 from pathlib import Path
+import base64
 import hashlib
 import hmac
 import logging
@@ -1343,67 +1344,18 @@ def _extract_aik_name_from_id_binding(id_binding: bytes) -> bytes:
 
 
 def _extract_aik_name_from_microsoft_attestation_blob(attestation_blob_raw: bytes) -> bytes:
+    """Extract the AIK TPM Name from a Microsoft KAST statement only.
+
+    This intentionally does not scan heuristically for TPMT_PUBLIC blobs. The
+    AIK name used for TPM2_MakeCredential must come from the same structured
+    idBinding that was validated by validate_microsoft_key_attestation_binding().
+    """
     if not attestation_blob_raw:
         raise ValueError("Empty attestation blob")
-    try:
-        parsed = _parse_microsoft_key_attestation_statement(attestation_blob_raw)
-        if parsed.get("platform") == 2 and parsed.get("id_binding"):
-            return _extract_aik_name_from_id_binding(parsed["id_binding"])
-    except Exception as exc:
-        logger.debug("Structured KAST parse failed, falling back to heuristic scan: %s", exc)
-
-    preferred_offsets = []
-    off = 0
-    while True:
-        pos = attestation_blob_raw.find(b"PCPM", off)
-        if pos < 0:
-            break
-        preferred_offsets.extend(range(max(0, pos - 96), min(len(attestation_blob_raw), pos + 1024)))
-        off = pos + 1
-    if not preferred_offsets:
-        preferred_offsets = list(range(len(attestation_blob_raw)))
-
-    ordered_offsets = []
-    seen = set()
-    for pos in preferred_offsets + list(range(len(attestation_blob_raw))):
-        if pos not in seen:
-            seen.add(pos)
-            ordered_offsets.append(pos)
-
-    candidates = []
-    for pos in ordered_offsets:
-        for raw in (attestation_blob_raw[pos:], None):
-            if raw is None and pos + 2 <= len(attestation_blob_raw):
-                length = struct.unpack(">H", attestation_blob_raw[pos:pos + 2])[0]
-                if 0 < length <= len(attestation_blob_raw) - pos - 2:
-                    raw = attestation_blob_raw[pos + 2:pos + 2 + length]
-                else:
-                    continue
-            if raw is None or len(raw) < 16:
-                continue
-            try:
-                pub = parse_tpmt_public(raw)
-            except Exception:
-                continue
-            score = 0
-            if pub.object_attr & TPMA_OBJECT_RESTRICTED:
-                score += 3
-            if pub.object_attr & TPMA_OBJECT_SIGN:
-                score += 3
-            if not pub.object_attr & TPMA_OBJECT_DECRYPT:
-                score += 2
-            if pub.alg_type in (TPM2_ALG_RSA, TPM2_ALG_ECC):
-                score += 1
-            if pub.name_alg in (TPM2_ALG_SHA1, TPM2_ALG_SHA256, TPM2_ALG_SHA384, TPM2_ALG_SHA512):
-                score += 1
-            if pub.alg_type == TPM2_ALG_RSA and pub.rsa_key_bits in (2048, 3072, 4096):
-                score += 1
-            candidates.append((score, pos, pub))
-    if not candidates:
-        raise ValueError("Could not locate a TPMT_PUBLIC candidate inside attestation blob")
-    candidates.sort(key=lambda item: (-item[0], item[1]))
-    return candidates[0][2].compute_name()
-
+    parsed = _parse_microsoft_key_attestation_statement(attestation_blob_raw)
+    if parsed.get("platform") != 2 or not parsed.get("id_binding"):
+        raise ValueError("Microsoft attestation statement does not contain a platform 2 idBinding")
+    return _extract_aik_name_from_id_binding(parsed["id_binding"])
 
 
 
@@ -1513,6 +1465,7 @@ def validate_microsoft_key_attestation_binding(attestation_blob_raw: bytes, csr_
         raise ValueError("Microsoft attestation statement is missing keyAttestation")
 
     aik_pub = _extract_aik_public_from_id_binding(parsed_statement["id_binding"])
+    aik_name = aik_pub.compute_name()
     _check_aik_attributes(aik_pub)
 
     parsed_key = _parse_microsoft_key_attestation(parsed_statement["key_attestation"])
@@ -1550,6 +1503,8 @@ def validate_microsoft_key_attestation_binding(attestation_blob_raw: bytes, csr_
         _check_key_policy(candidate, require_fixed_tpm=True, require_fixed_parent=True, require_restricted=False)
         return {
             "aik_public_key": aik_pub,
+            "aik_name": aik_name,
+            "aik_name_b64": base64.b64encode(aik_name).decode("ascii"),
             "certified_key_obj": candidate,
             "certified_key_name": key_attest.certified_name,
             "firmware_version": key_attest.firmware_version,
@@ -1693,6 +1648,7 @@ def build_and_sign_microsoft_attestation_challenge(
     signer_chain_pems=None,
     secret: bytes | None = None,
     openssl_bin: str = "openssl",
+    aik_name: bytes | None = None,
     aik_pub_raw: bytes | None = None,
     attestation_blob_raw: bytes | None = None,
 ) -> dict:
@@ -1701,17 +1657,17 @@ def build_and_sign_microsoft_attestation_challenge(
         secret = os.urandom(32)
     ek_name_alg = infer_ek_name_alg_from_public_key(ek_pub)
 
-    aik_name = None
-    if aik_pub_raw is not None:
+    if aik_name is None and aik_pub_raw is not None:
         try:
             aik_name = parse_tpmt_public(aik_pub_raw).compute_name()
         except Exception:
             aik_name = None
     if aik_name is None and attestation_blob_raw is not None:
+        # Strict structured extraction only; no heuristic scanning.
         aik_name = _extract_aik_name_from_microsoft_attestation_blob(attestation_blob_raw)
     if aik_name is None:
         raise ValueError(
-            "Could not recover the AIK TPM name from the Microsoft attestation statement/blob; refusing to emit an invalid TPM2_MakeCredential challenge."
+            "Could not recover the structured AIK TPM name; refusing to emit an invalid TPM2_MakeCredential challenge."
         )
 
     tach_blob = _make_tach_blob(

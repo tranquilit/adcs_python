@@ -163,6 +163,24 @@ def _spki_sha256(csr: x509.CertificateSigningRequest) -> str:
     return hashlib.sha256(spki).hexdigest()
 
 
+
+def _current_microsoft_binding_from_csr(csr: x509.CertificateSigningRequest) -> Optional[dict]:
+    """Re-parse and validate Microsoft key attestation from the current CSR."""
+    csr_der = csr.public_bytes(serialization.Encoding.DER)
+    bundle = tpm_mod.extract_tpm_bundle_from_pkcs10_der(csr_der)
+    if bundle is None:
+        return None
+    attestation_blob_raw = (
+        getattr(bundle, "ms_attestation_statement_raw", None)
+        or getattr(bundle, "ms_attestation_blob_raw", None)
+    )
+    if not attestation_blob_raw:
+        return None
+    return tpm_mod.validate_microsoft_key_attestation_binding(
+        attestation_blob_raw,
+        csr.public_key(),
+    )
+
 def _ek_cert_from_der(ek_cert_der: Optional[bytes]):
     if not ek_cert_der:
         return None
@@ -240,6 +258,17 @@ def _verify_pending_challenge_response(
     if current_spki_sha256 != expected_spki_sha256:
         raise ValueError("CSR public key does not match the pending challenge context")
 
+    expected_certified_key_name_b64 = pending_challenge.get("certified_key_name_b64")
+    if expected_certified_key_name_b64:
+        current_binding = _current_microsoft_binding_from_csr(csr)
+        if current_binding is None:
+            raise ValueError("Pending challenge expects Microsoft key attestation, but current CSR does not contain it")
+        current_certified_key_name_b64 = base64.b64encode(
+            current_binding["certified_key_name"]
+        ).decode("ascii")
+        if not hmac.compare_digest(current_certified_key_name_b64, expected_certified_key_name_b64):
+            raise ValueError("Certified TPM key name does not match the pending challenge context")
+
     materials = _resolve_ca_materials_for_tpm(template, ca)
     ket_priv = tpm_mod._load_private_key_from_pem(materials["ket_key_pem"])
     ket_cert_der = tpm_mod.pem_cert_to_der(materials["ket_cert_pem"])
@@ -276,6 +305,7 @@ def _verify_pending_challenge_response(
         "ek_cert": ek_cert,
         "ek_pub": ek_pub,
         "ek_public_key_spki_sha256": ek_public_key_spki_sha256,
+        "aik_name_b64": pending_challenge.get("aik_name_b64"),
         "certified_key_attributes": pending_challenge.get("certified_key_attributes"),
         "certified_key_name_alg": pending_challenge.get("certified_key_name_alg"),
         "certified_key_alg": pending_challenge.get("certified_key_alg"),
@@ -323,6 +353,7 @@ def create_microsoft_certify_challenge_response(*, csr, bundle, template: dict, 
         ca_exchange_chain_der=materials["ca_exchange_chain_der"],
         encryption_algorithm_oid=encryption_algorithm_oid,
         aik_info_hash=aik_info_hash,
+        aik_name=certified_binding["aik_name"],
         aik_pub_raw=getattr(bundle, "ms_aik_info_raw", None),
         attestation_blob_raw=attestation_blob_raw,
         signer_cert_pem=materials["ca_sign_cert_pem"],
@@ -344,6 +375,7 @@ def create_microsoft_certify_challenge_response(*, csr, bundle, template: dict, 
         "ek_cert_der_b64": base64.b64encode(bundle.ek_cert_der).decode("ascii") if bundle.ek_cert_der else None,
         "ek_pub_der_b64": base64.b64encode(ek_pub_der).decode("ascii") if ek_pub_der else None,
         "attestation_without_policy": (_template_tpm_policy(template) or {}).get("attestation_without_policy", False),
+        "aik_name_b64": certified_binding.get("aik_name_b64"),
         "certified_key_name_b64": base64.b64encode(certified_binding["certified_key_name"]).decode("ascii"),
         "certified_key_attributes": certified_binding.get("certified_key_attributes"),
         "certified_key_name_alg": certified_binding.get("certified_key_name_alg"),
@@ -365,6 +397,7 @@ def create_microsoft_certify_challenge_response(*, csr, bundle, template: dict, 
         "ek_cert": ek_cert,
         "ek_pub": ek_pub,
         "certified_key_obj": certified_binding.get("certified_key_obj"),
+        "aik_name_b64": certified_binding.get("aik_name_b64"),
         "certified_key_attributes": certified_binding.get("certified_key_attributes"),
         "certified_key_name_alg": certified_binding.get("certified_key_name_alg"),
         "certified_key_alg": certified_binding.get("certified_key_alg"),
