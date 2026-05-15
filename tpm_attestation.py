@@ -21,7 +21,6 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 logger = logging.getLogger("adcs.tpm_attestation")
 
-OID_TCG_SAN_TPM_DEVICE = "2.23.133.2"
 OID_MS_ENROLL_EK_INFO = "1.3.6.1.4.1.311.21.23"
 OID_MS_ENROLL_AIK_INFO = "1.3.6.1.4.1.311.21.39"
 OID_MS_ENROLL_KSP_NAME = "1.3.6.1.4.1.311.21.25"

@@ -82,11 +82,6 @@ def _ca_fingerprint(ca: Optional[dict]) -> str:
     return _fingerprint_dict(ca, _CA_CONTEXT_KEYS)
 
 
-def _sha256_b64_or_none(data: Optional[bytes]) -> Optional[str]:
-    if not data:
-        return None
-    return hashlib.sha256(data).hexdigest()
-
 def _save_pending_challenge(request_id: str | int, payload: dict) -> None:
     safe_request_id = _normalize_request_id(request_id)
     pending_dir = Path(_PENDING_DIR)
@@ -137,12 +132,8 @@ def _template_tpm_policy(template: dict) -> Optional[dict]:
             flags_value |= 0x00002000
         if flags.get("attestation_without_policy"):
             flags_value |= 0x00004000
-        if flags.get("ek_trust_on_use"):
-            flags_value |= 0x00000200
         if flags.get("ek_validate_cert"):
             flags_value |= 0x00000400
-        if flags.get("ek_validate_key"):
-            flags_value |= 0x00000800
     else:
         raise TypeError(
             f"template flags.private_key_flags must be int or dict, got {type(flags).__name__}"
@@ -156,9 +147,7 @@ def _template_tpm_policy(template: dict) -> Optional[dict]:
         "required": attest_required,
         "preferred": attest_preferred,
         "attestation_without_policy": bool(flags_value & 0x00004000),
-        "ek_trust_on_use": bool(flags_value & 0x00000200),
         "ek_validate_cert": bool(flags_value & 0x00000400),
-        "ek_validate_key": bool(flags_value & 0x00000800),
     }
 
 
@@ -610,7 +599,6 @@ def verify_tpm_for_template(
     template: dict,
     request_id: Optional[int] = None,
     ca: Optional[dict] = None,
-    server_nonce: Optional[bytes] = None,
 ) -> dict:
     """Verify TPM attestation for a template.
 
