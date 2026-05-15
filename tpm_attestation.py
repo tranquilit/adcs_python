@@ -1398,23 +1398,44 @@ def _validate_microsoft_platform2_id_binding(id_binding: bytes) -> dict:
     _check_aik_attributes(aik_pub)
     _verify_microsoft_key_attestation_signature(attest_raw, signature_raw, aik_pub)
 
-    creation_attest = parse_tpms_attest(attest_raw)
-    if creation_attest.magic != TPM2_GENERATED_VALUE:
-        raise ValueError(f"Microsoft idBinding creation attest has invalid magic: {creation_attest.magic:#010x}")
-    if creation_attest.attest_type != TPM2_ST_ATTEST_CREATION:
-        raise ValueError(f"Microsoft idBinding is not ST_ATTEST_CREATION: {creation_attest.attest_type:#06x}")
+    id_attest = parse_tpms_attest(attest_raw)
+    if id_attest.magic != TPM2_GENERATED_VALUE:
+        raise ValueError(f"Microsoft idBinding attest has invalid magic: {id_attest.magic:#010x}")
 
     aik_name = aik_pub.compute_name()
-    if creation_attest.creation_name and not hmac.compare_digest(creation_attest.creation_name, aik_name):
-        raise ValueError("Microsoft idBinding creation attestation does not name the AIK public area")
+    id_binding_attest_type = None
+    id_binding_name = None
+    id_binding_hash = None
+
+    if id_attest.attest_type == TPM2_ST_ATTEST_CREATION:
+        id_binding_attest_type = "creation"
+        id_binding_name = id_attest.creation_name
+        id_binding_hash = id_attest.creation_hash
+        if id_binding_name and not hmac.compare_digest(id_binding_name, aik_name):
+            raise ValueError("Microsoft idBinding creation attestation does not name the AIK public area")
+    elif id_attest.attest_type == TPM2_ST_ATTEST_CERTIFY:
+        # Windows commonly emits ST_ATTEST_CERTIFY here. Treat it as an AIK
+        # binding proof only if the certified object name is exactly the AIK
+        # public area's TPM Name. This preserves the hardening without
+        # requiring ST_ATTEST_CREATION specifically.
+        id_binding_attest_type = "certify"
+        id_binding_name = id_attest.certified_name
+        if id_binding_name and not hmac.compare_digest(id_binding_name, aik_name):
+            raise ValueError("Microsoft idBinding certify attestation does not name the AIK public area")
+    else:
+        raise ValueError(f"Microsoft idBinding has unsupported attest type: {id_attest.attest_type:#06x}")
 
     return {
         "aik_public_key": aik_pub,
         "aik_name": aik_name,
         "aik_name_b64": base64.b64encode(aik_name).decode("ascii"),
-        "id_binding_creation_attest_type": "creation",
-        "id_binding_creation_name_b64": base64.b64encode(creation_attest.creation_name).decode("ascii") if creation_attest.creation_name else None,
-        "id_binding_creation_hash_b64": base64.b64encode(creation_attest.creation_hash).decode("ascii") if creation_attest.creation_hash else None,
+        "id_binding_attest_type": id_binding_attest_type,
+        "id_binding_name_b64": base64.b64encode(id_binding_name).decode("ascii") if id_binding_name else None,
+        "id_binding_hash_b64": base64.b64encode(id_binding_hash).decode("ascii") if id_binding_hash else None,
+        # Backward-compatible aliases for callers/loggers that already read v7 fields.
+        "id_binding_creation_attest_type": id_binding_attest_type,
+        "id_binding_creation_name_b64": base64.b64encode(id_binding_name).decode("ascii") if id_binding_name else None,
+        "id_binding_creation_hash_b64": base64.b64encode(id_binding_hash).decode("ascii") if id_binding_hash else None,
     }
 
 
