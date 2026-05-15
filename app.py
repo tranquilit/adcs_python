@@ -249,20 +249,23 @@ def ces_service(CAID):
     if challenge['is_challenge_response']:
         tpm_result = verify_tpm_for_template(
             csr_der=csr_der,
-            p7_der=base64.b64decode(challenge['challenge_response']),
+            challenge_response_der=base64.b64decode(
+                challenge["challenge_response"],
+                validate=True,
+            ),
             template=tpl,
             request_id=request_id,
             ca=ca,
         )
     else:
         tpm_result = verify_tpm_for_template(
-        csr_der=csr_der,
-        p7_der=p7_der,
-        template=tpl,
-        request_id=request_id,
-        ca=ca
-    )
-
+            csr_der=csr_der,
+            cmc_der=p7_der,
+            template=tpl,
+            request_id=request_id,
+            ca=ca,
+        )
+    
     if tpm_result.get("status") == "pending":
         status_text = "En attente de traitement"
         xml_body, http_code = build_ws_trust_response(
@@ -431,7 +434,7 @@ if __name__ == "__main__":
     os.makedirs(app.confadcs['path_list_request_id'], exist_ok=True)
     decls = app.confadcs.get("__template_decls__") or []
     print("Loaded config with", len(decls), "template declaration(s).")
-    #app.run(host='127.0.0.1', port=8080)
+    app.run(host='127.0.0.1', port=8080)
     serve(app, host="127.0.0.1", port=8080)
 
 

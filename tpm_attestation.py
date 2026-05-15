@@ -704,7 +704,7 @@ def _decrypt_cms_enveloped_data(content_info_der: bytes, recipient_cert_der: Opt
         key_alg = getattr(key_alg_field, "dotted", None) or key_alg_field.native
         encrypted_key = ktri["encrypted_key"].native
         if key_alg in ("rsa", "rsaes_pkcs1v15", "1.2.840.113549.1.1.1"):
-            cek = recipient_key.decrypt(encrypted_key, padding.PKCS1v15())
+            raise ValueError("Insecure CMS key transport algorithm RSAES-PKCS1-v1_5 is not accepted")
         elif key_alg in ("rsaes_oaep", "1.2.840.113549.1.1.7"):
             oaep_params = ktri["key_encryption_algorithm"]["parameters"]
             hash_alg = hashes.SHA1()
@@ -740,7 +740,7 @@ def _decrypt_cms_enveloped_data(content_info_der: bytes, recipient_cert_der: Opt
     if enc_name in ("aes128_cbc", "aes192_cbc", "aes256_cbc"):
         cipher = Cipher(algorithms.AES(cek), modes.CBC(params))
     elif enc_name == "tripledes_3key":
-        cipher = Cipher(algorithms.TripleDES(cek), modes.CBC(params))
+        raise ValueError("Insecure CMS content encryption algorithm 3DES is not accepted")
     else:
         raise ValueError(f"Unsupported CMS content encryption algorithm: {enc_name}")
 

@@ -18,25 +18,108 @@ _PENDING_DIR = "/var/lib/adcs/tpm-pending"
 _PENDING_CHALLENGE_MAX_AGE_SECONDS = int(os.environ.get("ADCS_TPM_PENDING_TTL_SECONDS", "300"))
 
 
-def _save_pending_challenge(request_id: str, payload: dict) -> None:
+
+def _normalize_request_id(request_id: str | int) -> str:
+    """Return a safe, canonical decimal request id for filesystem use."""
+    s = str(request_id)
+    if not s.isdigit():
+        raise ValueError("Invalid request_id")
+    return str(int(s))
+
+
+def _stable_primitive(value):
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, bytes):
+        return {"sha256": hashlib.sha256(value).hexdigest(), "len": len(value)}
+    if isinstance(value, dict):
+        return {str(k): _stable_primitive(v) for k, v in sorted(value.items(), key=lambda item: str(item[0]))}
+    if isinstance(value, (list, tuple, set)):
+        return [_stable_primitive(v) for v in value]
+    return str(value)
+
+
+def _fingerprint_dict(value: dict | None, keys: tuple[str, ...]) -> str:
+    selected = {}
+    value = value or {}
+    for key in keys:
+        if key in value:
+            selected[key] = _stable_primitive(value[key])
+    encoded = json.dumps(selected, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+_TEMPLATE_CONTEXT_KEYS = (
+    "common_name",
+    "name",
+    "display_name",
+    "oid",
+    "template_oid",
+    "schema_version",
+    "major_version",
+    "minor_version",
+    "flags",
+)
+_CA_CONTEXT_KEYS = (
+    "name",
+    "id",
+    "ca_id",
+    "common_name",
+    "subject",
+    "thumbprint",
+    "certificate_thumbprint",
+    "cert_pem",
+    "signing_cert_pem",
+    "ket_cert_pem",
+)
+
+
+def _template_fingerprint(template: dict) -> str:
+    return _fingerprint_dict(template, _TEMPLATE_CONTEXT_KEYS)
+
+
+def _ca_fingerprint(ca: Optional[dict]) -> str:
+    return _fingerprint_dict(ca, _CA_CONTEXT_KEYS)
+
+
+def _sha256_b64_or_none(data: Optional[bytes]) -> Optional[str]:
+    if not data:
+        return None
+    return hashlib.sha256(data).hexdigest()
+
+def _save_pending_challenge(request_id: str | int, payload: dict) -> None:
+    safe_request_id = _normalize_request_id(request_id)
     pending_dir = Path(_PENDING_DIR)
     pending_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
         pending_dir.chmod(0o700)
     except PermissionError:
         logger.warning("Could not chmod TPM pending directory %s to 0700", pending_dir)
-    (pending_dir / f"{request_id}.json").write_text(json.dumps(payload), encoding="utf-8")
+    path = pending_dir / f"{safe_request_id}.json"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(path, flags, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, sort_keys=True)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
 
 
 def _load_pending_challenge(request_id: str | int) -> Optional[dict]:
-    path = Path(_PENDING_DIR) / f"{request_id}.json"
+    safe_request_id = _normalize_request_id(request_id)
+    path = Path(_PENDING_DIR) / f"{safe_request_id}.json"
     if not path.is_file():
         return None
     return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _delete_pending_challenge(request_id: str | int) -> None:
-    path = Path(_PENDING_DIR) / f"{request_id}.json"
+    safe_request_id = _normalize_request_id(request_id)
+    path = Path(_PENDING_DIR) / f"{safe_request_id}.json"
     try:
         path.unlink()
     except FileNotFoundError:
@@ -208,6 +291,50 @@ def _public_key_from_spki_der(spki_der: Optional[bytes]):
     return serialization.load_der_public_key(spki_der)
 
 
+def _spki_der_from_public_key(public_key) -> bytes:
+    return public_key.public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+
+
+def _public_keys_equal(left, right) -> bool:
+    return hmac.compare_digest(_spki_der_from_public_key(left), _spki_der_from_public_key(right))
+
+
+def _select_ek_public_key_for_challenge(*, bundle, extracted_ek_pub, policy: dict):
+    """Bind EKPub to EKCert and return the only EK public key allowed for MakeCredential.
+
+    If an EK certificate is present, its public key is authoritative. Any separate SPKI
+    found in EK_INFO must match it exactly. If the template requires EK certificate
+    validation, absence of EKCert is a hard failure.
+    """
+    ek_cert = _ek_cert_from_der(bundle.ek_cert_der) if getattr(bundle, "ek_cert_der", None) else None
+    if ek_cert is not None:
+        ek_pub_from_cert = ek_cert.public_key()
+        if extracted_ek_pub is not None and not _public_keys_equal(extracted_ek_pub, ek_pub_from_cert):
+            raise ValueError("EK public key does not match EK certificate")
+        return ek_cert, ek_pub_from_cert
+
+    if policy.get("ek_validate_cert"):
+        raise ValueError("Template requires EK certificate validation, but no EK certificate was provided")
+    if extracted_ek_pub is None:
+        raise ValueError("Could not locate an EK public key for TPM challenge generation")
+    return None, extracted_ek_pub
+
+
+def _cert_sha256(cert: Optional[x509.Certificate]) -> Optional[str]:
+    if cert is None:
+        return None
+    return hashlib.sha256(cert.public_bytes(serialization.Encoding.DER)).hexdigest()
+
+
+def _ek_pub_sha256(public_key) -> Optional[str]:
+    if public_key is None:
+        return None
+    return hashlib.sha256(_spki_der_from_public_key(public_key)).hexdigest()
+
+
 def _restore_ek_materials(payload: Optional[dict]) -> tuple[object | None, object | None]:
     payload = payload or {}
     ek_cert_der_b64 = payload.get("ek_cert_der_b64")
@@ -216,12 +343,12 @@ def _restore_ek_materials(payload: Optional[dict]) -> tuple[object | None, objec
     ek_pub = None
     if ek_cert_der_b64:
         try:
-            ek_cert = _ek_cert_from_der(base64.b64decode(ek_cert_der_b64))
+            ek_cert = _ek_cert_from_der(base64.b64decode(ek_cert_der_b64, validate=True))
         except Exception as exc:
             logger.debug("Could not restore EK certificate from pending payload: %s", exc)
     if ek_pub_der_b64:
         try:
-            ek_pub = _public_key_from_spki_der(base64.b64decode(ek_pub_der_b64))
+            ek_pub = _public_key_from_spki_der(base64.b64decode(ek_pub_der_b64, validate=True))
         except Exception as exc:
             logger.debug("Could not restore EK public key from pending payload: %s", exc)
     elif ek_cert is not None:
@@ -242,27 +369,44 @@ def _verify_pending_challenge_response(
     request_id: Optional[int] = None,
     max_age_seconds: int = _PENDING_CHALLENGE_MAX_AGE_SECONDS,
 ) -> dict:
+    if request_id is None:
+        raise ValueError("request_id is required to verify a TPM challenge response")
+    safe_request_id = _normalize_request_id(request_id)
+
+    if str(pending_challenge.get("request_id")) != safe_request_id:
+        _delete_pending_challenge(safe_request_id)
+        raise ValueError("pending_challenge request_id does not match the current request")
+
     expected_secret_b64 = pending_challenge.get("secret_b64")
     if not expected_secret_b64:
         raise ValueError("pending_challenge does not contain secret_b64")
 
     created_at = pending_challenge.get("created_at")
     if created_at is None:
-        if request_id is not None:
-            _delete_pending_challenge(request_id)
+        _delete_pending_challenge(safe_request_id)
         raise ValueError("pending_challenge does not contain created_at; cannot verify expiry")
     try:
         age = int(time.time()) - int(created_at)
     except (TypeError, ValueError):
-        if request_id is not None:
-            _delete_pending_challenge(request_id)
+        _delete_pending_challenge(safe_request_id)
         raise ValueError("pending_challenge contains invalid created_at; cannot verify expiry")
     if age < 0 or age > max_age_seconds:
-        if request_id is not None:
-            _delete_pending_challenge(request_id)
+        _delete_pending_challenge(safe_request_id)
         raise ValueError(
             f"TPM challenge has expired (age={age}s, max={max_age_seconds}s)"
         )
+
+    expected_template_fingerprint = pending_challenge.get("template_fingerprint")
+    if expected_template_fingerprint and expected_template_fingerprint != _template_fingerprint(template):
+        raise ValueError("Current template does not match the pending TPM challenge context")
+
+    expected_ca_fingerprint = pending_challenge.get("ca_fingerprint")
+    if expected_ca_fingerprint and expected_ca_fingerprint != _ca_fingerprint(ca):
+        raise ValueError("Current CA does not match the pending TPM challenge context")
+
+    expected_csr_sha256 = pending_challenge.get("csr_sha256")
+    if expected_csr_sha256 and expected_csr_sha256 != hashlib.sha256(csr.public_bytes(serialization.Encoding.DER)).hexdigest():
+        raise ValueError("Current CSR does not match the pending TPM challenge context")
 
     expected_spki_sha256 = pending_challenge.get("spki_sha256")
     if not expected_spki_sha256:
@@ -286,25 +430,26 @@ def _verify_pending_challenge_response(
     ket_priv = tpm_mod._load_private_key_from_pem(materials["ket_key_pem"])
     ket_cert_der = tpm_mod.pem_cert_to_der(materials["ket_cert_pem"])
 
-    clear = tpm_mod._decrypt_cms_enveloped_data(challenge_response_der, ket_cert_der, ket_priv)
-    expected_secret = base64.b64decode(expected_secret_b64)
+    try:
+        clear = tpm_mod._decrypt_cms_enveloped_data(challenge_response_der, ket_cert_der, ket_priv)
+        expected_secret = base64.b64decode(expected_secret_b64, validate=True)
+    except Exception:
+        raise ValueError("Invalid TPM challenge response") from None
     if not hmac.compare_digest(clear, expected_secret):
         raise ValueError("TPM challenge response does not match the pending secret")
 
-    if request_id is not None:
-        _delete_pending_challenge(request_id)
+    _delete_pending_challenge(safe_request_id)
 
     ek_cert, ek_pub = _restore_ek_materials(pending_challenge)
+    ek_cert_sha256 = _cert_sha256(ek_cert)
+    ek_public_key_spki_sha256 = _ek_pub_sha256(ek_pub) or ""
 
-    if ek_pub:
-        der = ek_pub.public_bytes(
-            encoding=serialization.Encoding.DER,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo,
-        )
-        ek_public_key_spki_sha256 = hashlib.sha256(der).hexdigest()
-    else:
-        ek_public_key_spki_sha256 = ''
-
+    expected_ek_cert_sha256 = pending_challenge.get("ek_cert_sha256")
+    if expected_ek_cert_sha256 and expected_ek_cert_sha256 != ek_cert_sha256:
+        raise ValueError("Restored EK certificate does not match the pending TPM challenge context")
+    expected_ek_pub_sha256 = pending_challenge.get("ek_pub_spki_sha256")
+    if expected_ek_pub_sha256 and expected_ek_pub_sha256 != ek_public_key_spki_sha256:
+        raise ValueError("Restored EK public key does not match the pending TPM challenge context")
 
     return {
         "status": "ok",
@@ -314,9 +459,10 @@ def _verify_pending_challenge_response(
         "attestation_valid": True,
         "challenge_verified": True,
         "microsoft_native_attestation": True,
-        "request_id": int(request_id) if request_id is not None else None,
+        "request_id": int(safe_request_id),
         "ek_cert": ek_cert,
         "ek_pub": ek_pub,
+        "ek_cert_sha256": ek_cert_sha256,
         "ek_public_key_spki_sha256": ek_public_key_spki_sha256,
         "aik_name_b64": pending_challenge.get("aik_name_b64"),
         "id_binding_creation_attest_type": pending_challenge.get("id_binding_creation_attest_type"),
@@ -342,10 +488,16 @@ def create_microsoft_certify_challenge_response(*, csr, bundle, template: dict, 
     if not bundle.ms_ek_info_decrypted_raw:
         raise ValueError("Microsoft EK_INFO was present but could not be decrypted")
 
-    ek_pub = tpm_mod.extract_ek_pub_from_decrypted_ek_info(
+    extracted_ek_pub = tpm_mod.extract_ek_pub_from_decrypted_ek_info(
         bundle.ms_ek_info_decrypted_raw,
         embedded_certificates_der=bundle.ms_embedded_certificates_der,
         ek_cert_der=bundle.ek_cert_der,
+    )
+    policy = _template_tpm_policy(template) or {}
+    ek_cert, ek_pub = _select_ek_public_key_for_challenge(
+        bundle=bundle,
+        extracted_ek_pub=extracted_ek_pub,
+        policy=policy,
     )
 
     attestation_blob_raw = (
@@ -377,20 +529,27 @@ def create_microsoft_certify_challenge_response(*, csr, bundle, template: dict, 
         signer_chain_pems=materials["ca_sign_chain_pems"],
     )
 
-    ek_cert = _ek_cert_from_der(bundle.ek_cert_der) if bundle.ek_cert_der else None
     ek_pub_der = _public_key_to_spki_der(ek_pub)
+    ek_cert_der = ek_cert.public_bytes(serialization.Encoding.DER) if ek_cert is not None else None
+    safe_request_id = _normalize_request_id(request_id)
 
     pending_payload = {
         "mode": "MICROSOFT_PKCS10",
+        "request_id": safe_request_id,
         "template_name": template.get("common_name"),
+        "template_fingerprint": _template_fingerprint(template),
+        "ca_fingerprint": _ca_fingerprint(ca),
+        "csr_sha256": hashlib.sha256(csr.public_bytes(serialization.Encoding.DER)).hexdigest(),
         "spki_sha256": _spki_sha256(csr),
         "secret_b64": base64.b64encode(challenge["secret"]).decode("ascii"),
         "created_at": int(time.time()),
         "encryption_algorithm_oid": encryption_algorithm_oid,
-        "ek_cert_present": bool(bundle.ek_cert_der),
-        "ek_cert_der_b64": base64.b64encode(bundle.ek_cert_der).decode("ascii") if bundle.ek_cert_der else None,
+        "ek_cert_present": bool(ek_cert_der),
+        "ek_cert_der_b64": base64.b64encode(ek_cert_der).decode("ascii") if ek_cert_der else None,
+        "ek_cert_sha256": hashlib.sha256(ek_cert_der).hexdigest() if ek_cert_der else None,
         "ek_pub_der_b64": base64.b64encode(ek_pub_der).decode("ascii") if ek_pub_der else None,
-        "attestation_without_policy": (_template_tpm_policy(template) or {}).get("attestation_without_policy", False),
+        "ek_pub_spki_sha256": hashlib.sha256(ek_pub_der).hexdigest() if ek_pub_der else None,
+        "attestation_without_policy": policy.get("attestation_without_policy", False),
         "aik_name_b64": certified_binding.get("aik_name_b64"),
         "id_binding_creation_attest_type": certified_binding.get("id_binding_creation_attest_type"),
         "id_binding_creation_name_b64": certified_binding.get("id_binding_creation_name_b64"),
@@ -400,7 +559,7 @@ def create_microsoft_certify_challenge_response(*, csr, bundle, template: dict, 
         "certified_key_name_alg": certified_binding.get("certified_key_name_alg"),
         "certified_key_alg": certified_binding.get("certified_key_alg"),
     }
-    _save_pending_challenge(str(request_id), pending_payload)
+    _save_pending_challenge(safe_request_id, pending_payload)
 
     return {
         "status": "pending",
@@ -429,20 +588,36 @@ def create_microsoft_certify_challenge_response(*, csr, bundle, template: dict, 
 def verify_tpm_for_template(
     *,
     csr_der: bytes,
-    p7_der: Optional[bytes],
+    cmc_der: Optional[bytes] = None,
+    challenge_response_der: Optional[bytes] = None,
     template: dict,
     request_id: Optional[int] = None,
     ca: Optional[dict] = None,
+    server_nonce: Optional[bytes] = None,
 ) -> dict:
+    """Verify TPM attestation for a template.
+
+    Strict API:
+      * cmc_der is only for the initial CMC/PKCS#7 request.
+      * challenge_response_der is only for the Microsoft pending challenge response.
+      * Passing both is refused.
+      * A challenge response is never auto-detected from cmc_der.
+    """
+    if cmc_der is not None and challenge_response_der is not None:
+        raise ValueError("cmc_der and challenge_response_der are mutually exclusive")
+
     policy = _template_tpm_policy(template)
     if not policy:
         return {"status": "ok", "used": False, "attestation_valid": False, "ek_cert": None, "ek_pub": None}
 
     csr = x509.load_der_x509_csr(csr_der)
-    pending_challenge = _load_pending_challenge(request_id) if request_id is not None else None
 
-    def _verify_challenge_response(challenge_response_der: bytes) -> dict:
-        assert pending_challenge is not None
+    if challenge_response_der is not None:
+        if request_id is None:
+            raise ValueError("request_id is required to verify a TPM challenge response")
+        pending_challenge = _load_pending_challenge(request_id)
+        if pending_challenge is None:
+            raise ValueError("No pending TPM challenge exists for this request_id")
         return _verify_pending_challenge_response(
             csr=csr,
             template=template,
@@ -452,25 +627,24 @@ def verify_tpm_for_template(
             request_id=request_id,
         )
 
+    if request_id is not None and _load_pending_challenge(request_id) is not None:
+        raise ValueError(
+            "A pending TPM challenge already exists for this request_id; submit the response via challenge_response_der"
+        )
+
     bundle = None
-    if p7_der:
+    if cmc_der is not None:
         try:
-            bundle = tpm_mod.extract_tpm_bundle_from_cmc(p7_der)
-        except Exception as exc:
-            if pending_challenge:
-                return _verify_challenge_response(p7_der)
-            logger.debug("Could not extract TPM bundle from CMS/CMC request: %s", exc)
-
-        if pending_challenge and bundle is None:
-            return _verify_challenge_response(p7_der)
-
-    if bundle is None:
+            bundle = tpm_mod.extract_tpm_bundle_from_cmc(cmc_der)
+        except Exception:
+            raise ValueError("Invalid CMC request; refusing to treat it as a TPM challenge response") from None
+    else:
         bundle = tpm_mod.extract_tpm_bundle_from_pkcs10_der(csr_der)
 
     if bundle is None:
         if policy["required"]:
             raise ValueError(
-                "TPM attestation required by template but no Microsoft key-attestation attributes were found in the PKCS#10 request"
+                "TPM attestation required by template but no Microsoft key-attestation attributes were found in the request"
             )
         return {"status": "ok", "used": False, "attestation_valid": False, "ek_cert": None, "ek_pub": None}
 
@@ -482,7 +656,7 @@ def verify_tpm_for_template(
                 csr=csr,
                 bundle=bundle,
                 template=template,
-                request_id=int(request_id),
+                request_id=int(_normalize_request_id(request_id)),
                 ca=ca,
             )
         if getattr(bundle, "ms_aik_info_raw", None) is not None:
@@ -494,14 +668,13 @@ def verify_tpm_for_template(
         getattr(bundle, name, None) is not None
         for name in ("aik_pub_raw", "attest_raw", "attest_sig_raw", "certified_key_raw", "nonce")
     ):
-        expected_nonce = getattr(bundle, "nonce", None)
-        if expected_nonce is None:
+        if server_nonce is None:
             raise ValueError(
-                "TPM bundle does not carry a nonce; refusing to verify without replay protection"
+                "Generic TPM attestation requires a server-provided nonce; refusing to use the client-supplied nonce as replay protection"
             )
         result = tpm_mod.verify_tpm_attestation(
             bundle=bundle,
-            expected_nonce=expected_nonce,
+            expected_nonce=server_nonce,
             require_fixed_tpm=True,
             require_fixed_parent=True,
             require_restricted=True,
@@ -533,6 +706,8 @@ def verify_tpm_for_template(
             "attestation_valid": True,
             "ek_cert": result.ek_cert,
             "ek_pub": result.ek_pub,
+            "ek_cert_sha256": _cert_sha256(result.ek_cert),
+            "ek_public_key_spki_sha256": _ek_pub_sha256(result.ek_pub) or "",
         }
 
     if policy["required"]:
