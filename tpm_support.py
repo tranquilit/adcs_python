@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Optional
@@ -14,11 +15,16 @@ import tpm_attestation as tpm_mod
 
 logger = logging.getLogger("adcs.tpm_support")
 _PENDING_DIR = "/var/lib/adcs/tpm-pending"
+_PENDING_CHALLENGE_MAX_AGE_SECONDS = int(os.environ.get("ADCS_TPM_PENDING_TTL_SECONDS", "300"))
 
 
 def _save_pending_challenge(request_id: str, payload: dict) -> None:
     pending_dir = Path(_PENDING_DIR)
-    pending_dir.mkdir(parents=True, exist_ok=True)
+    pending_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        pending_dir.chmod(0o700)
+    except PermissionError:
+        logger.warning("Could not chmod TPM pending directory %s to 0700", pending_dir)
     (pending_dir / f"{request_id}.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
@@ -234,7 +240,7 @@ def _verify_pending_challenge_response(
     pending_challenge: dict,
     challenge_response_der: bytes,
     request_id: Optional[int] = None,
-    max_age_seconds: int = 3600,
+    max_age_seconds: int = _PENDING_CHALLENGE_MAX_AGE_SECONDS,
 ) -> dict:
     expected_secret_b64 = pending_challenge.get("secret_b64")
     if not expected_secret_b64:
@@ -242,8 +248,15 @@ def _verify_pending_challenge_response(
 
     created_at = pending_challenge.get("created_at")
     if created_at is None:
+        if request_id is not None:
+            _delete_pending_challenge(request_id)
         raise ValueError("pending_challenge does not contain created_at; cannot verify expiry")
-    age = int(time.time()) - int(created_at)
+    try:
+        age = int(time.time()) - int(created_at)
+    except (TypeError, ValueError):
+        if request_id is not None:
+            _delete_pending_challenge(request_id)
+        raise ValueError("pending_challenge contains invalid created_at; cannot verify expiry")
     if age < 0 or age > max_age_seconds:
         if request_id is not None:
             _delete_pending_challenge(request_id)
