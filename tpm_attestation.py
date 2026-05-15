@@ -40,6 +40,10 @@ TPM2_ST_ATTEST_CERTIFY = 32791
 TPM2_ST_ATTEST_QUOTE = 32792
 TPMA_OBJECT_FIXEDTPM = 0x00000002
 TPMA_OBJECT_FIXEDPARENT = 0x00000010
+TPMA_OBJECT_SENSITIVEDATAORIGIN = 0x00000020
+TPMA_OBJECT_USERWITHAUTH = 0x00000040
+TPMA_OBJECT_ADMINWITHPOLICY = 0x00000080
+TPMA_OBJECT_NODA = 0x00000400
 TPMA_OBJECT_RESTRICTED = 0x00010000
 TPMA_OBJECT_DECRYPT = 0x00020000
 TPMA_OBJECT_SIGN = 0x00040000
@@ -138,6 +142,25 @@ def _tpm_alg_to_hash(alg: int) -> str:
     if alg not in mapping:
         raise TPMAttestationError(f"Unsupported TPM hash algorithm: {alg:#06x}")
     return mapping[alg]
+
+
+def _tpm_alg_name(alg: int) -> str:
+    mapping = {
+        TPM2_ALG_RSA: "rsa",
+        TPM2_ALG_ECC: "ecc",
+        TPM2_ALG_SHA1: "sha1",
+        TPM2_ALG_SHA256: "sha256",
+        TPM2_ALG_SHA384: "sha384",
+        TPM2_ALG_SHA512: "sha512",
+        TPM2_ALG_NULL: "null",
+        TPM2_ALG_RSASSA: "rsassa",
+        TPM2_ALG_RSAPSS: "rsapss",
+        TPM2_ALG_ECDSA: "ecdsa",
+        TPM2_ALG_ECDAA: "ecdaa",
+        TPM2_ALG_SM2: "sm2",
+        TPM2_ALG_ECSCHNORR: "ecschnorr",
+    }
+    return mapping.get(alg, f"unknown_{alg:#06x}")
 
 
 def _tpm_alg_to_hash_obj(alg: int):
@@ -409,6 +432,23 @@ def _check_aik_attributes(aik: TPMPublicKey):
         )
     if aik.object_attr & TPMA_OBJECT_DECRYPT:
         raise TPMAttestationError("AIK must NOT have the DECRYPT attribute (it must be a signing-only key)")
+
+
+def tpm_object_attributes_to_dict(object_attr: int) -> dict:
+    """Return user-facing TPMA_OBJECT flags for callback policy decisions."""
+    return {
+        "raw": int(object_attr),
+        "raw_hex": f"{object_attr:#010x}",
+        "fixed_tpm": bool(object_attr & TPMA_OBJECT_FIXEDTPM),
+        "fixed_parent": bool(object_attr & TPMA_OBJECT_FIXEDPARENT),
+        "sensitive_data_origin": bool(object_attr & TPMA_OBJECT_SENSITIVEDATAORIGIN),
+        "user_with_auth": bool(object_attr & TPMA_OBJECT_USERWITHAUTH),
+        "admin_with_policy": bool(object_attr & TPMA_OBJECT_ADMINWITHPOLICY),
+        "no_da": bool(object_attr & TPMA_OBJECT_NODA),
+        "restricted": bool(object_attr & TPMA_OBJECT_RESTRICTED),
+        "decrypt": bool(object_attr & TPMA_OBJECT_DECRYPT),
+        "sign_encrypt": bool(object_attr & TPMA_OBJECT_SIGN),
+    }
 
 
 def _check_key_policy(key: TPMPublicKey, require_fixed_tpm: bool, require_fixed_parent: bool, require_restricted: bool):
@@ -1513,9 +1553,9 @@ def validate_microsoft_key_attestation_binding(attestation_blob_raw: bytes, csr_
             "certified_key_obj": candidate,
             "certified_key_name": key_attest.certified_name,
             "firmware_version": key_attest.firmware_version,
-            "is_fixed_tpm": bool(candidate.object_attr & TPMA_OBJECT_FIXEDTPM),
-            "is_fixed_parent": bool(candidate.object_attr & TPMA_OBJECT_FIXEDPARENT),
-            "is_restricted": bool(candidate.object_attr & TPMA_OBJECT_RESTRICTED),
+            "certified_key_attributes": tpm_object_attributes_to_dict(candidate.object_attr),
+            "certified_key_name_alg": _tpm_alg_name(candidate.name_alg),
+            "certified_key_alg": _tpm_alg_name(candidate.alg_type),
         }
 
     raise ValueError("CSR public key is not the TPM key certified by Microsoft keyAttestation")

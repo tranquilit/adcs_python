@@ -275,7 +275,11 @@ def _verify_pending_challenge_response(
         "request_id": int(request_id) if request_id is not None else None,
         "ek_cert": ek_cert,
         "ek_pub": ek_pub,
-        "ek_public_key_spki_sha256": ek_public_key_spki_sha256
+        "ek_public_key_spki_sha256": ek_public_key_spki_sha256,
+        "certified_key_attributes": pending_challenge.get("certified_key_attributes"),
+        "certified_key_name_alg": pending_challenge.get("certified_key_name_alg"),
+        "certified_key_alg": pending_challenge.get("certified_key_alg"),
+        "certified_key_name_b64": pending_challenge.get("certified_key_name_b64"),
     }
 
 
@@ -341,6 +345,9 @@ def create_microsoft_certify_challenge_response(*, csr, bundle, template: dict, 
         "ek_pub_der_b64": base64.b64encode(ek_pub_der).decode("ascii") if ek_pub_der else None,
         "attestation_without_policy": (_template_tpm_policy(template) or {}).get("attestation_without_policy", False),
         "certified_key_name_b64": base64.b64encode(certified_binding["certified_key_name"]).decode("ascii"),
+        "certified_key_attributes": certified_binding.get("certified_key_attributes"),
+        "certified_key_name_alg": certified_binding.get("certified_key_name_alg"),
+        "certified_key_alg": certified_binding.get("certified_key_alg"),
     }
     _save_pending_challenge(str(request_id), pending_payload)
 
@@ -358,6 +365,9 @@ def create_microsoft_certify_challenge_response(*, csr, bundle, template: dict, 
         "ek_cert": ek_cert,
         "ek_pub": ek_pub,
         "certified_key_obj": certified_binding.get("certified_key_obj"),
+        "certified_key_attributes": certified_binding.get("certified_key_attributes"),
+        "certified_key_name_alg": certified_binding.get("certified_key_name_alg"),
+        "certified_key_alg": certified_binding.get("certified_key_alg"),
     }
 
 
