@@ -1365,7 +1365,7 @@ def search_user(userauth: str,ldap_filter='',dc_fqdn=None,basedn=None,password=N
     username = userauth.split("@", 1)[0].strip()
 
     if BAD_LDAP_CHARS_RE.search(username):
-        return None
+        raise ValueError("invalid username")
 
     lp = LoadParm()
     lp.load_default()
