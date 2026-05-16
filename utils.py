@@ -3,6 +3,7 @@
 
 import base64
 import hashlib
+import re
 from datetime import datetime, timezone
 from typing import Optional
 import xml.etree.ElementTree as ET
@@ -1353,11 +1354,19 @@ def build_ws_trust_response(
 # Active Directory user resolution (SAMBA/LDAP)
 # -----------------------------------------------------------------------------
 
+BAD_LDAP_CHARS_RE = re.compile(r'[\x00()*\\]')
+
 def search_user(userauth: str,ldap_filter='',dc_fqdn=None,basedn=None,password=None):
     """
     Resolve the SAM/LDAP entry for the Kerberos user 'user@REALM'.
     Returns (SamDB, entry) if found.
     """
+
+    username = userauth.split("@", 1)[0].strip()
+
+    if BAD_LDAP_CHARS_RE.search(username):
+        return None
+
     lp = LoadParm()
     lp.load_default()
 
