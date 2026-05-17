@@ -1,6 +1,11 @@
 Flask
+waitress
 asn1crypto
-pykerberos
+cryptography
 defusedxml
 pyasn1
-waitress
+PyYAML
+pykerberos
+requests
+textual
+python-pkcs11
