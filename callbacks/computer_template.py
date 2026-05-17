@@ -14,6 +14,7 @@ from cryptography.x509.oid import (
 from utils import  NtdsCASecurityExt, search_user, is_directly_issued_by_cert_in_folder
 from utils import _apply_static_extensions,validate_csr
 import hashlib
+from urllib.parse import unquote
 
 def _b(entry: dict, attr: str, default: str = "") -> str:
     vals = entry.get(attr) or []
@@ -305,6 +306,12 @@ def emit_certificate(
     if username :
        username = username
     else:
+        if not is_directly_issued_by_cert_in_folder(cx509.load_pem_x509_certificate(unquote(XSslClientCert).encode("utf-8")), ca['signing_cert_pem']):
+           return {
+               "status": "denied",
+               "status_text": "denied",
+           }
+
        username = XSslClientDn.split('=',1)[1]
 
     samdbr, sam_entry = search_user(username)
