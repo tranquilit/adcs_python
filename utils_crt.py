@@ -532,6 +532,18 @@ def revoked_serials_set(crl_path: Optional[str]) -> Set[int]:
         return set()
     return {rc.serial_number for rc in _iter_revoked(crl)}
 
+
+def is_certificate_revoked_by_crl(cert: Optional[cx509.Certificate], crl_path: Optional[str]) -> bool:
+    """Return True when `cert` serial is present in the CRL at `crl_path`.
+
+    Missing CRL configuration/file is treated as "not revoked" so callers can
+    decide separately whether the CRL must be mandatory for their flow.
+    Invalid/unreadable CRLs still raise, making configuration problems visible.
+    """
+    if cert is None or not crl_path:
+        return False
+    return cert.serial_number in revoked_serials_set(crl_path)
+
 def _extract_cn_and_sans(cert: cx509.Certificate) -> tuple[str, list[str]]:
     try:
         cn_attr = cert.subject.get_attributes_for_oid(cx509.NameOID.COMMON_NAME)

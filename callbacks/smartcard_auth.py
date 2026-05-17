@@ -17,6 +17,7 @@ from cryptography.x509.extensions import ExtensionNotFound
 # As before
 from utils import NtdsCASecurityExt,search_user,validate_csr
 from utils import _apply_static_extensions, is_directly_issued_by_cert_in_folder
+from utils_crt import is_certificate_revoked_by_crl
 import hashlib
 
 
@@ -349,7 +350,13 @@ def emit_certificate(
     if username:
         username = username
     else:
-        if not is_directly_issued_by_cert_in_folder(cx509.load_pem_x509_certificate(unquote(XSslClientCert).encode("utf-8")), ca['signing_cert_pem'])[0]:
+        client_cert = cx509.load_pem_x509_certificate(unquote(XSslClientCert).encode("utf-8"))
+        if not is_directly_issued_by_cert_in_folder(client_cert, ca['signing_cert_pem'])[0]:
+            return {
+                "status": "denied",
+                "status_text": "denied",
+            }
+        if is_certificate_revoked_by_crl(client_cert, ca.get("crl", {}).get("path_crl")):
             return {
                 "status": "denied",
                 "status_text": "denied",
