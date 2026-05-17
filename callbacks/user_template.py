@@ -14,9 +14,10 @@ from cryptography.x509.oid import (
 from cryptography.x509.extensions import ExtensionNotFound
 
 # As before
-from utils import NtdsCASecurityExt,search_user,validate_csr
+from utils import NtdsCASecurityExt,search_user,validate_csr, is_directly_issued_by_cert_in_folder
 from utils import _apply_static_extensions
 import hashlib
+from urllib.parse import unquote
 
 
 # ---------- helpers (optional) ----------
@@ -348,10 +349,16 @@ def emit_certificate(
     XSslClientDn = request.headers.get('X-Ssl-Client-Dn', None)
     XSslClientCert = request.headers.get('X-Ssl-Client-Cert', None)
 
-    if username :
-       username = username
+    if username:
+        username = username
     else:
-       username = XSslClientDn.split('=',1)[1] 
+        if not is_directly_issued_by_cert_in_folder(cx509.load_pem_x509_certificate(unquote(XSslClientCert).encode("utf-8")), ca['signing_cert_pem'])[0]:
+            return {
+                "status": "denied",
+                "status_text": "denied",
+            }
+        username = XSslClientDn.split('=', 1)[1]
+
     samdbr, sam_entry = search_user(username)
 
     denied = False

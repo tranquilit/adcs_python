@@ -1,11 +1,12 @@
 from typing import Iterable, Optional, Dict, Any
 from cryptography import x509 as cx509
 from cryptography.hazmat.primitives import serialization as crypto_serialization
-from utils import search_user
+from utils import search_user, is_directly_issued_by_cert_in_folder
 import requests
 import json
 import base64
 import subprocess
+from urllib.parse import unquote
 
 template_oid           = "1.3.6.1.4.1.311.21.8.999.3"
 template_name          = "adcswebcomputer"
@@ -206,6 +207,21 @@ def emit_certificate(
     params=None
 ) -> Dict[str, Any]:
 
+    # if ssl auth
+    XSslClientSha1 = request.headers.get('X-Ssl-Client-Sha1', None)
+    XSslAuthenticated = request.headers.get('X-Ssl-Authenticated', None)
+    XSslClientDn = request.headers.get('X-Ssl-Client-Dn', None)
+    XSslClientCert = request.headers.get('X-Ssl-Client-Cert', None)
+
+    if username:
+        username = username
+    else:
+        if not is_directly_issued_by_cert_in_folder(cx509.load_pem_x509_certificate(unquote(XSslClientCert).encode("utf-8")), ca['signing_cert_pem'])[0]:
+            return {
+                "status": "denied",
+                "status_text": "denied",
+            }
+        username = XSslClientDn.split('=', 1)[1]
 
     ca_url="https://ca.mydomain.lan"
     root_pem_path="/root/roots.pem"
