@@ -410,10 +410,17 @@ def _verify_microsoft_key_attestation_signature(data: bytes, signature: bytes, a
     raise TPMAttestationError("Microsoft keyAttestation signature verification failed") from last_error
 
 def _check_aik_attributes(aik: TPMPublicKey):
-    required = TPMA_OBJECT_RESTRICTED | TPMA_OBJECT_SIGN
+    required = (
+        TPMA_OBJECT_RESTRICTED
+        | TPMA_OBJECT_SIGN
+        | TPMA_OBJECT_FIXEDTPM
+        | TPMA_OBJECT_FIXEDPARENT
+        | TPMA_OBJECT_SENSITIVEDATAORIGIN
+    )
     if aik.object_attr & required != required:
         raise TPMAttestationError(
-            f"AIK must have RESTRICTED|SIGN attributes set. Got TPMA_OBJECT={aik.object_attr:#010x}"
+            "AIK must have RESTRICTED|SIGN|FIXEDTPM|FIXEDPARENT|"
+            f"SENSITIVEDATAORIGIN attributes set. Got TPMA_OBJECT={aik.object_attr:#010x}"
         )
     if aik.object_attr & TPMA_OBJECT_DECRYPT:
         raise TPMAttestationError("AIK must NOT have the DECRYPT attribute (it must be a signing-only key)")
