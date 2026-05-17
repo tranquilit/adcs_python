@@ -20,7 +20,7 @@ from cryptography.x509.oid import (
 )
 
 from utils import search_user
-from utils import _apply_static_extensions
+from utils import _apply_static_extensions,validate_csr
 import base64
 import json
 import textwrap
@@ -229,6 +229,9 @@ def emit_certificate(
     params=None,
     **kwargs
 ) -> Dict[str, Any]:
+
+    csr = cx509.load_der_x509_csr(csr_der)
+    validate_csr(csr)
 
     r = search_user(username,"(userAccountControl:1.2.840.113556.1.4.803:=8192)")
     samdbr, sam_entry = r
