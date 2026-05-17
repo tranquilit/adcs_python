@@ -42,7 +42,11 @@ def auth_required(f):
         auth_header = request.headers.get('Authorization')
         user = None
         response_token=None
-        x_ssl_client_sha1 = request.headers.get('X-Ssl-Client-Sha1') if request.headers.get('X-Ssl-Authenticated') == "SUCCESS" else None
+
+        if request.headers.get('X-Ssl-Client-Sha1') and request.headers.get('X-Ssl-Authenticated') != "SUCCESS":
+            return Response("Unauthorized", 401, {'WWW-Authenticate': 'Negotiate'})
+        
+        x_ssl_client_sha1 = request.headers.get('X-Ssl-Client-Sha1') 
 
         MAX_SOAP_BYTES = 2 * 1024 * 1024  
         raw = request.data or b""
