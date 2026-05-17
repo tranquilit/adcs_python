@@ -148,6 +148,10 @@ Restart Nginx:
 systemctl restart nginx
 ```
 
+Nginx is responsible for handling SSL/TLS authentication and securely exposing the ADCS Python service.
+
+Using a different Nginx configuration, or modifying the provided one without fully understanding the security implications, may compromise the authentication flow and weaken the overall security of the service.
+
 Join the Active Directory domain
 ---------------------------------------------------------
 
