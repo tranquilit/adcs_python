@@ -37,6 +37,8 @@ templates:
 
 auth:
   - kerberos: true
+  - tls: false
+  - username_password: true
   - callback:
       path: "/etc/adcs/callbacks/auth_basic_template.py"
 

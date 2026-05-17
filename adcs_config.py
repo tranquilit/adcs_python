@@ -359,11 +359,23 @@ def load_yaml_conf(path="adcs.yaml"):
 
     conf["auth_callbacks"] = []
 
+    # Authentication methods enabled at the reverse-proxy / SOAP layer.
+    # Kerberos keeps the historical default. TLS client cert and
+    # username/password are opt-in so they can be explicitly disabled.
     conf['auth_kerberos'] = True
+    conf['auth_tls'] = False
+    conf['auth_username_password'] = False
+
     for adecl in (cfg.get("auth") or []):
 
-        if adecl.get("kerberos") != None :
-            conf['auth_kerberos'] = adecl["kerberos"]
+        if adecl.get("kerberos") is not None:
+            conf['auth_kerberos'] = bool(adecl["kerberos"])
+
+        if adecl.get("tls") is not None:
+            conf['auth_tls'] = bool(adecl["tls"])
+
+        if adecl.get("username_password") is not None:
+            conf['auth_username_password'] = bool(adecl["username_password"])
 
         cb = adecl.get("callback") or {}
         cb_path = cb.get("path")
