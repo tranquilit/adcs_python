@@ -2027,11 +2027,18 @@ def is_ca(cert: cx509.Certificate) -> bool:
 @lru_cache(maxsize=1)
 def _load_trusted_tpm_certs(folder: str) -> list:
     certs = []
-    for path in Path(folder).rglob("*"):
-        if path.is_file():
-            for cert in load_cert_file(path):
-                if is_ca(cert):
-                    certs.append((cert, str(path)))
+    base = Path(folder)
+
+    paths = [base] if base.is_file() else base.rglob("*")
+
+    for path in paths:
+        if not path.is_file():
+            continue
+
+        for cert in load_cert_file(path):
+            if is_ca(cert):
+                certs.append((cert, str(path)))
+
     return certs
 
 
