@@ -436,12 +436,20 @@ def tpm_object_attributes_to_dict(object_attr: int) -> dict:
     }
 
 
-def _check_key_policy(key: TPMPublicKey, require_fixed_tpm: bool, require_fixed_parent: bool, require_restricted: bool):
+def _check_key_policy(
+    key: TPMPublicKey,
+    require_fixed_tpm: bool,
+    require_fixed_parent: bool,
+    require_restricted: bool,
+    require_sensitive_data_origin: bool = True,
+):
     errors = []
     if require_fixed_tpm and not (key.object_attr & TPMA_OBJECT_FIXEDTPM):
         errors.append("FIXEDTPM not set")
     if require_fixed_parent and not (key.object_attr & TPMA_OBJECT_FIXEDPARENT):
         errors.append("FIXEDPARENT not set")
+    if require_sensitive_data_origin and not (key.object_attr & TPMA_OBJECT_SENSITIVEDATAORIGIN):
+        errors.append("SENSITIVEDATAORIGIN not set")
     if require_restricted and not (key.object_attr & TPMA_OBJECT_RESTRICTED):
         errors.append("RESTRICTED not set")
     if errors:
@@ -1419,7 +1427,13 @@ def validate_microsoft_key_attestation_binding(attestation_blob_raw: bytes, csr_
             continue
         if not hmac.compare_digest(candidate.compute_name(), key_attest.certified_name):
             continue
-        _check_key_policy(candidate, require_fixed_tpm=True, require_fixed_parent=True, require_restricted=False)
+        _check_key_policy(
+            candidate,
+            require_fixed_tpm=True,
+            require_fixed_parent=True,
+            require_restricted=False,
+            require_sensitive_data_origin=True,
+        )
         return {
             "aik_public_key": aik_pub,
             "aik_name": aik_name,
