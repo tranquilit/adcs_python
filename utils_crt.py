@@ -501,9 +501,173 @@ def load_certificate_file(path: str) -> cx509.Certificate:
                 raise ValueError(f"File not recognized as X.509 certificate: {os.path.basename(path)}: {e}")
     return cx509.load_pem_x509_certificate(data)
 
+ML_DSA_PUBLIC_KEY_OIDS = {
+    "2.16.840.1.101.3.4.3.17": "ML-DSA-44",
+    "2.16.840.1.101.3.4.3.18": "ML-DSA-65",
+    "2.16.840.1.101.3.4.3.19": "ML-DSA-87",
+}
+
+
+def _der_read_len(data: bytes, offset: int) -> Tuple[int, int]:
+    if offset >= len(data):
+        raise ValueError("Invalid DER: missing length")
+
+    first = data[offset]
+    offset += 1
+
+    if first < 0x80:
+        return first, offset
+
+    n = first & 0x7F
+    if n == 0:
+        raise ValueError("Invalid DER: indefinite length is not allowed")
+    if offset + n > len(data):
+        raise ValueError("Invalid DER: truncated length")
+
+    length = int.from_bytes(data[offset:offset + n], "big")
+    offset += n
+    return length, offset
+
+
+def _der_read_tlv(data: bytes, offset: int = 0) -> Tuple[int, int, int, int]:
+    if offset >= len(data):
+        raise ValueError("Invalid DER: offset out of range")
+
+    start = offset
+    tag = data[offset]
+    offset += 1
+
+    # High-tag-number form. It is not expected for X.509 structures here,
+    # but accepting it keeps the DER scanner generic.
+    if (tag & 0x1F) == 0x1F:
+        while True:
+            if offset >= len(data):
+                raise ValueError("Invalid DER: truncated high tag")
+            b = data[offset]
+            offset += 1
+            if not (b & 0x80):
+                break
+
+    length, content_start = _der_read_len(data, offset)
+    end = content_start + length
+    if end > len(data):
+        raise ValueError("Invalid DER: truncated value")
+
+    return tag, start, content_start, end
+
+
+def _der_children(data: bytes, seq_start: int = 0) -> List[Tuple[int, int, int, int]]:
+    tag, _start, content_start, end = _der_read_tlv(data, seq_start)
+    if tag != 0x30:
+        raise ValueError(f"Invalid DER: expected SEQUENCE, got tag 0x{tag:02x}")
+
+    children: List[Tuple[int, int, int, int]] = []
+    offset = content_start
+
+    while offset < end:
+        child = _der_read_tlv(data, offset)
+        children.append(child)
+        offset = child[3]
+
+    if offset != end:
+        raise ValueError("Invalid DER: sequence boundary mismatch")
+
+    return children
+
+
+def _decode_der_oid_value(content: bytes) -> str:
+    if not content:
+        raise ValueError("Invalid DER OID: empty value")
+
+    first = content[0]
+    parts = [first // 40, first % 40]
+
+    value = 0
+    for b in content[1:]:
+        value = (value << 7) | (b & 0x7F)
+        if not (b & 0x80):
+            parts.append(value)
+            value = 0
+
+    if value != 0:
+        raise ValueError("Invalid DER OID: truncated base-128 integer")
+
+    return ".".join(str(x) for x in parts)
+
+
+def _cert_subject_public_key_oid(cert: cx509.Certificate) -> Optional[str]:
+    """
+    Read the certificate SubjectPublicKeyInfo algorithm OID directly from DER.
+
+    This avoids cert.public_key(), which fails for algorithms unsupported by the
+    installed cryptography version, such as ML-DSA.
+    """
+    cert_der = cert.public_bytes(serialization.Encoding.DER)
+
+    # Certificate ::= SEQUENCE {
+    #   tbsCertificate       TBSCertificate,
+    #   signatureAlgorithm   AlgorithmIdentifier,
+    #   signatureValue       BIT STRING
+    # }
+    cert_children = _der_children(cert_der, 0)
+    if len(cert_children) < 1:
+        return None
+
+    _tag, tbs_start, _tbs_content_start, tbs_end = cert_children[0]
+    tbs_der = cert_der[tbs_start:tbs_end]
+    tbs_children = _der_children(tbs_der, 0)
+
+    # TBSCertificate ::= SEQUENCE {
+    #   version         [0] EXPLICIT Version DEFAULT v1,
+    #   serialNumber     CertificateSerialNumber,
+    #   signature        AlgorithmIdentifier,
+    #   issuer           Name,
+    #   validity         Validity,
+    #   subject          Name,
+    #   subjectPublicKeyInfo SubjectPublicKeyInfo,
+    #   ...
+    # }
+    has_explicit_version = bool(tbs_children and tbs_children[0][0] == 0xA0)
+    spki_index = 6 if has_explicit_version else 5
+    if len(tbs_children) <= spki_index:
+        return None
+
+    _spki_tag, spki_start, _spki_content_start, spki_end = tbs_children[spki_index]
+    spki_der = tbs_der[spki_start:spki_end]
+
+    # SubjectPublicKeyInfo ::= SEQUENCE {
+    #   algorithm         AlgorithmIdentifier,
+    #   subjectPublicKey  BIT STRING
+    # }
+    spki_children = _der_children(spki_der, 0)
+    if len(spki_children) < 1:
+        return None
+
+    _alg_tag, alg_start, _alg_content_start, alg_end = spki_children[0]
+    alg_der = spki_der[alg_start:alg_end]
+    alg_children = _der_children(alg_der, 0)
+    if len(alg_children) < 1:
+        return None
+
+    oid_tag, oid_start, oid_content_start, oid_end = alg_children[0]
+    if oid_tag != 0x06:
+        return None
+
+    return _decode_der_oid_value(alg_der[oid_content_start:oid_end])
+
+
 def get_public_key_info(cert: cx509.Certificate) -> Tuple[str, Optional[int]]:
-    """Return ('RSA', bits) | ('EC(name)', None) | ('DSA', bits) | (class_name, None)."""
-    pk = cert.public_key()
+    """Return ('RSA', bits) | ('EC(name)', None) | ('DSA', bits) | ('ML-DSA-*', None) | (class_name, None)."""
+    try:
+        pk = cert.public_key()
+    except ValueError:
+        oid = _cert_subject_public_key_oid(cert)
+        if oid in ML_DSA_PUBLIC_KEY_OIDS:
+            return (ML_DSA_PUBLIC_KEY_OIDS[oid], None)
+        if oid:
+            return (f"OID({oid})", None)
+        return ("Unknown", None)
+
     if isinstance(pk, rsa.RSAPublicKey):
         return ("RSA", pk.key_size)
     if isinstance(pk, ec.EllipticCurvePublicKey):
@@ -514,6 +678,10 @@ def get_public_key_info(cert: cx509.Certificate) -> Tuple[str, Optional[int]]:
         return (f"EC({name})", None)
     if isinstance(pk, dsa.DSAPublicKey):
         return ("DSA", pk.key_size)
+    if isinstance(pk, ed25519.Ed25519PublicKey):
+        return ("Ed25519", None)
+    if isinstance(pk, ed448.Ed448PublicKey):
+        return ("Ed448", None)
     return (pk.__class__.__name__, None)
 
 def scan_cert_paths(cert_dir: str) -> List[str]:
