@@ -1575,10 +1575,16 @@ def build_get_policies_response(
         521: {"value": "1.3.132.0.35",       "group": 3, "default_name": "ECDH_P521"},
     }
 
-    # --- Supported algorithms (RSA/DSA are single OID entries) ---
+    # --- Supported algorithms (RSA/DSA/ML-DSA are single OID entries) ---
     ALGO_OIDS = {
         "rsa": {"value": "1.2.840.113549.1.1.1", "group": 3, "default_name": "RSA"},
         "dsa": {"value": "1.2.840.10040.4.1",    "group": 3, "default_name": "DSA"},
+
+        # ML-DSA / FIPS 204 / RFC 9882
+        "ml-dsa-44": {"value": "2.16.840.1.101.3.4.3.17", "group": 3, "default_name": "ML-DSA-44"},
+        "ml-dsa-65": {"value": "2.16.840.1.101.3.4.3.18", "group": 3, "default_name": "ML-DSA-65"},
+        "ml-dsa-87": {"value": "2.16.840.1.101.3.4.3.19", "group": 3, "default_name": "ML-DSA-87"},
+
         # ecc handled separately via curves + minimalKeyLength (+ keySpec for ECDH)
     }
 
@@ -1592,7 +1598,7 @@ def build_get_policies_response(
     }
 
     # map algo_key -> allocated refid (reuse same refid across templates)
-    # (algo_key = "rsa", "dsa", or "ecdsa:256"/"ecdh:256"/...)
+    # (algo_key = "rsa", "dsa", "ml-dsa-65", or "ecdsa:256"/"ecdh:256"/...)
     algo_refids: dict[str, int] = {}
 
     # <s:Envelope>
@@ -1674,8 +1680,20 @@ def build_get_policies_response(
         pk_perms = ET.SubElement(pka, ET.QName(NS_EP['ep'], 'permissions'))
         set_xsi_nil(pk_perms, True)
 
-        # --- algorithmOIDReference (RSA/ECDSA/ECDH/DSA) ---
-        algo = (t.get("private_key_attributes", {}).get("algorithm") or "").strip().lower()
+        # --- algorithmOIDReference (RSA/ECDSA/ECDH/DSA/ML-DSA) ---
+        algo = (
+            t.get("private_key_attributes", {})
+            .get("algorithm", "")
+            .strip()
+            .lower()
+            .replace("_", "-")
+        )
+        algo_aliases = {
+            "mldsa44": "ml-dsa-44",
+            "mldsa65": "ml-dsa-65",
+            "mldsa87": "ml-dsa-87",
+        }
+        algo = algo_aliases.get(algo.replace("-", ""), algo)
 
         # Decide EC signature vs key-exchange:
         # - If algo explicitly "ecdh" => ECDH
