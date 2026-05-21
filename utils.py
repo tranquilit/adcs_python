@@ -2072,3 +2072,242 @@ def is_directly_issued_by_cert_in_folder(cert: cx509.Certificate, folder: str):
         except Exception:
             pass
     return False, None, None
+
+# -----------------------------------------------------------------------------
+# ML-DSA / raw SubjectPublicKeyInfo helpers for certificate issuance callbacks
+# -----------------------------------------------------------------------------
+from asn1crypto import algos as a_algos
+from asn1crypto import keys as a_keys
+
+ML_DSA_PUBLIC_KEY_OIDS = {
+    "2.16.840.1.101.3.4.3.17",  # ML-DSA-44
+    "2.16.840.1.101.3.4.3.18",  # ML-DSA-65
+    "2.16.840.1.101.3.4.3.19",  # ML-DSA-87
+}
+
+
+def _asn1_time(dt):
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+
+    if dt.year < 2050:
+        return a_x509.Time({"utc_time": a_core.UTCTime(dt)})
+    return a_x509.Time({"general_time": a_core.GeneralizedTime(dt)})
+
+
+
+def _der_read_len(data: bytes, offset: int):
+    first = data[offset]
+    offset += 1
+
+    if first < 0x80:
+        return first, offset
+
+    n = first & 0x7F
+    if n == 0:
+        raise ValueError("Indefinite DER length is not allowed")
+
+    length = int.from_bytes(data[offset:offset + n], "big")
+    offset += n
+    return length, offset
+
+
+def _der_read_tlv(data: bytes, offset: int = 0):
+    start = offset
+    tag = data[offset]
+    offset += 1
+
+    # High-tag-number form, unlikely here but supported.
+    if (tag & 0x1F) == 0x1F:
+        while data[offset] & 0x80:
+            offset += 1
+        offset += 1
+
+    length, content_start = _der_read_len(data, offset)
+    end = content_start + length
+
+    if end > len(data):
+        raise ValueError("Invalid DER length")
+
+    return tag, start, content_start, end
+
+
+def _der_children(data: bytes, seq_start: int = 0):
+    tag, _start, content_start, end = _der_read_tlv(data, seq_start)
+
+    if tag != 0x30:
+        raise ValueError(f"Expected SEQUENCE, got tag 0x{tag:02x}")
+
+    children = []
+    offset = content_start
+
+    while offset < end:
+        c_tag, c_start, c_content_start, c_end = _der_read_tlv(data, offset)
+        children.append((c_tag, c_start, c_content_start, c_end))
+        offset = c_end
+
+    if offset != end:
+        raise ValueError("Invalid DER sequence boundaries")
+
+    return children
+
+
+def _raw_x509_extension(oid: str, critical: bool, extn_value_der: bytes) -> a_x509.Extension:
+    """
+    Build Extension ::= SEQUENCE {
+      extnID OBJECT IDENTIFIER,
+      critical BOOLEAN DEFAULT FALSE,
+      extnValue OCTET STRING -- containing DER of the real extension value
+    }
+
+    On fait ça en DER brut pour éviter qu'asn1crypto essaie de parser
+    certaines extensions reconnues.
+    """
+    contents = a_core.ObjectIdentifier(oid).dump()
+
+    if critical:
+        contents += a_core.Boolean(True).dump()
+
+    contents += a_core.OctetString(extn_value_der).dump()
+
+    return a_x509.Extension.load(_der_wrap_sequence(contents))
+
+
+def _csr_spki_from_der(csr_der: bytes):
+    """
+    Retourne:
+      - spki_obj: SubjectPublicKeyInfo ASN.1 brut, utilisable dans TbsCertificate
+      - oid: OID de l'algorithme de clé publique
+      - ski: SubjectKeyIdentifier calculé depuis le BIT STRING brut
+
+    Ne déclenche pas le parse typé de la clé publique, donc compatible ML-DSA.
+    """
+
+    # CertificationRequest ::= SEQUENCE {
+    #   certificationRequestInfo CertificationRequestInfo,
+    #   signatureAlgorithm AlgorithmIdentifier,
+    #   signature BIT STRING
+    # }
+    csr_children = _der_children(csr_der, 0)
+    if len(csr_children) < 1:
+        raise ValueError("Invalid CSR: missing CertificationRequestInfo")
+
+    _, cri_start, _, cri_end = csr_children[0]
+    cri_der = csr_der[cri_start:cri_end]
+
+    # CertificationRequestInfo ::= SEQUENCE {
+    #   version INTEGER,
+    #   subject Name,
+    #   subjectPKInfo SubjectPublicKeyInfo,
+    #   attributes [0] ...
+    # }
+    cri_children = _der_children(cri_der, 0)
+    if len(cri_children) < 3:
+        raise ValueError("Invalid CSR: missing subjectPKInfo")
+
+    _, spki_start, _, spki_end = cri_children[2]
+    spki_der = cri_der[spki_start:spki_end]
+
+    # SubjectPublicKeyInfo ::= SEQUENCE {
+    #   algorithm AlgorithmIdentifier,
+    #   subjectPublicKey BIT STRING
+    # }
+    spki_children = _der_children(spki_der, 0)
+    if len(spki_children) < 2:
+        raise ValueError("Invalid SPKI")
+
+    _, alg_start, _, alg_end = spki_children[0]
+    bitstr_tag, bitstr_start, bitstr_content_start, bitstr_end = spki_children[1]
+
+    alg_der = spki_der[alg_start:alg_end]
+    alg_children = _der_children(alg_der, 0)
+    if len(alg_children) < 1:
+        raise ValueError("Invalid AlgorithmIdentifier")
+
+    oid_tag, oid_start, _, oid_end = alg_children[0]
+    if oid_tag != 0x06:
+        raise ValueError(f"Expected OBJECT IDENTIFIER, got tag 0x{oid_tag:02x}")
+
+    oid_der = alg_der[oid_start:oid_end]
+    oid = a_core.ObjectIdentifier.load(oid_der).dotted
+
+    if bitstr_tag != 0x03 or spki_der[bitstr_start] != 0x03:
+        raise ValueError("Invalid SPKI: subjectPublicKey is not a BIT STRING")
+
+    bitstr_contents = spki_der[bitstr_content_start:bitstr_end]
+    if not bitstr_contents:
+        raise ValueError("Invalid BIT STRING")
+
+    unused_bits = bitstr_contents[0]
+    if unused_bits != 0:
+        raise ValueError("Unsupported subjectPublicKey BIT STRING with unused bits")
+
+    public_key_bytes = bitstr_contents[1:]
+    ski = hashlib.sha1(public_key_bytes).digest()
+
+    # Important : on charge l'objet brut, mais on ne fait pas spki_obj["algorithm"]
+    # ni spki_obj["public_key"] ensuite, sinon asn1crypto tente de parser ML-DSA.
+    spki_obj = a_keys.PublicKeyInfo.load(spki_der)
+
+    return spki_obj, oid, ski
+
+
+
+
+def _aia_extension_der(url: str) -> bytes:
+    aia = a_x509.AuthorityInfoAccessSyntax([
+        {
+            "access_method": "ca_issuers",
+            "access_location": {
+                "uniform_resource_identifier": url,
+            },
+        }
+    ])
+    return aia.dump()
+
+
+def _cdp_extension_der(url: str) -> bytes:
+    gn = a_x509.GeneralName(
+        name="uniform_resource_identifier",
+        value=url,
+    )
+
+    cdp = a_x509.CRLDistributionPoints([
+        a_x509.DistributionPoint({
+            "distribution_point": a_x509.DistributionPointName(
+                name="full_name",
+                value=a_x509.GeneralNames([gn]),
+            ),
+        })
+    ])
+
+    return cdp.dump()
+
+
+def _signature_algo_for_ca_key(priv):
+    if isinstance(priv, rsa.RSAPrivateKey):
+        return a_algos.SignedDigestAlgorithm({"algorithm": "sha256_rsa"})
+
+    if isinstance(priv, ec.EllipticCurvePrivateKey):
+        return a_algos.SignedDigestAlgorithm({"algorithm": "sha256_ecdsa"})
+
+    if isinstance(priv, ed25519.Ed25519PrivateKey):
+        return a_algos.SignedDigestAlgorithm({"algorithm": "ed25519"})
+
+    if isinstance(priv, ed448.Ed448PrivateKey):
+        return a_algos.SignedDigestAlgorithm({"algorithm": "ed448"})
+
+    raise ValueError(f"Unsupported CA private key type: {type(priv).__name__}")
+def _sign_tbs_with_ca_key(priv, tbs_der: bytes) -> bytes:
+    if isinstance(priv, rsa.RSAPrivateKey):
+        return priv.sign(tbs_der, padding.PKCS1v15(), hashes.SHA256())
+
+    if isinstance(priv, ec.EllipticCurvePrivateKey):
+        return priv.sign(tbs_der, ec.ECDSA(hashes.SHA256()))
+
+    if isinstance(priv, (ed25519.Ed25519PrivateKey, ed448.Ed448PrivateKey)):
+        return priv.sign(tbs_der)
+
+    raise ValueError(f"Unsupported CA private key type: {type(priv).__name__}")
