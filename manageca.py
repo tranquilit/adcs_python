@@ -1775,7 +1775,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--username", type=str,
                    help="Username to use with --submit-csr (equivalent to g.username in app.py).")
     p.add_argument("--csr-path", type=str,
-                   help="CSR/CMC request file (PEM or DER). If omitted with --submit-csr, data is read from stdin.")
+                   help="CSR/CMC request file (PEM or DER). With --create-ca, only the CSR public key is used; the CSR subject/extensions are ignored.")
     p.add_argument("--template-oid", type=str,
                    help="Certificate template OID to use with --submit-csr. Bypasses template extraction from the CSR when provided.")
     p.add_argument("--template-name", type=str,
@@ -1826,7 +1826,8 @@ if __name__ == "__main__":
             ec_curve=args.ec_curve,
             mldsa_variant=args.mldsa_variant,
             conf=confadcs,
-            cn=args.cn
+            cn=args.cn,
+            csr_path=args.csr_path,
         )
         sys.exit(rc)
 
