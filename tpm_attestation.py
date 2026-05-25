@@ -16,6 +16,7 @@ from asn1crypto import csr as a_csr
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, padding as sym_padding, serialization
+from utils import _signature_algo_for_ca_key, _sign_tbs_with_ca_key, _tbs_signed_attrs
 from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
@@ -1498,7 +1499,7 @@ def _sign_cmc_pki_response_python(
     *,
     pki_response_der: bytes,
     signer_cert_pem,
-    signer_key_pem,
+    signer_key_obj=None,
     extra_chain_pems=None,
     extra_certs_der=None,
 ) -> bytes:
@@ -1535,38 +1536,41 @@ def _sign_cmc_pki_response_python(
             a_cms.CMSAttribute({"type": "1.2.840.113549.1.9.4", "values": [hashlib.sha256(pki_response_der).digest()]}),
         ]
     )
-    signer_key = serialization.load_pem_private_key(_normalize_pem_bytes(signer_key_pem), password=None)
-    if isinstance(signer_key, rsa.RSAPrivateKey):
-        signature = signer_key.sign(signed_attrs.dump(force=True), padding.PKCS1v15(), hashes.SHA256())
-        sig_alg_asn1 = a_cms.SignedDigestAlgorithm({"algorithm": "rsassa_pkcs1v15", "parameters": a_core.Null()})
-    elif isinstance(signer_key, ec.EllipticCurvePrivateKey):
-        signature = signer_key.sign(signed_attrs.dump(force=True), ec.ECDSA(hashes.SHA256()))
-        sig_alg_asn1 = a_cms.SignedDigestAlgorithm({"algorithm": "sha256_ecdsa"})
+
+
+
+
+    to_be_signed = _tbs_signed_attrs(signed_attrs)
+
+    if signer_key_obj:
+        signature = _sign_tbs_with_ca_key(signer_key_obj, to_be_signed)
+        sig_alg_asn1 = _signature_algo_for_ca_key(signer_key_obj)
+
+        signer_info = [a_cms.SignerInfo(
+            {
+                "version": "v1",
+                "sid": a_cms.SignerIdentifier(
+                    {
+                        "issuer_and_serial_number": a_cms.IssuerAndSerialNumber(
+                            {"issuer": signer_asn1.issuer, "serial_number": signer_asn1.serial_number}
+                        )
+                    }
+                ),
+                "digest_algorithm": a_cms.DigestAlgorithm({"algorithm": "sha256", "parameters": a_core.Null()}),
+                "signed_attrs": signed_attrs,
+                "signature_algorithm": sig_alg_asn1,
+                "signature": signature,
+            }
+        )]
     else:
-        raise TPMAttestationError(f"Unsupported signer key type: {type(signer_key).__name__}")
-    signer_info = a_cms.SignerInfo(
-        {
-            "version": "v1",
-            "sid": a_cms.SignerIdentifier(
-                {
-                    "issuer_and_serial_number": a_cms.IssuerAndSerialNumber(
-                        {"issuer": signer_asn1.issuer, "serial_number": signer_asn1.serial_number}
-                    )
-                }
-            ),
-            "digest_algorithm": a_cms.DigestAlgorithm({"algorithm": "sha256", "parameters": a_core.Null()}),
-            "signed_attrs": signed_attrs,
-            "signature_algorithm": sig_alg_asn1,
-            "signature": signature,
-        }
-    )
+        signer_info = []
     signed_data = a_cms.SignedData(
         {
             "version": "v3",
             "digest_algorithms": [a_cms.DigestAlgorithm({"algorithm": "sha256", "parameters": a_core.Null()})],
             "encap_content_info": {"content_type": OID_ID_CCT_PKI_RESPONSE, "content": a_cms.ParsableOctetString(pki_response_der)},
             "certificates": OrderedCertificateSet(cert_choices),
-            "signer_infos": [signer_info],
+            "signer_infos": signer_info,
         }
     )
     return a_cms.ContentInfo({"content_type": OID_ID_SIGNED_DATA, "content": signed_data}).dump()
@@ -1580,7 +1584,7 @@ def build_and_sign_microsoft_attestation_challenge(
     encryption_algorithm_oid: str,
     aik_info_hash: bytes | None,
     signer_cert_pem,
-    signer_key_pem,
+    signer_key_obj=None,
     signer_chain_pems=None,
     secret: bytes | None = None,
     openssl_bin: str = "openssl",
@@ -1627,7 +1631,7 @@ def build_and_sign_microsoft_attestation_challenge(
     built["signed_pkcs7_der"] = _sign_cmc_pki_response_python(
         pki_response_der=built["response_body_der"],
         signer_cert_pem=signer_cert_pem,
-        signer_key_pem=signer_key_pem,
+        signer_key_obj=signer_key_obj,
         extra_chain_pems=signer_chain_pems,
         extra_certs_der=ca_exchange_chain_der,
     )

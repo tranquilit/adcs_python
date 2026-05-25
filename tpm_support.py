@@ -184,25 +184,6 @@ def _resolve_ca_materials_for_tpm(template: dict, ca: Optional[dict] = None) -> 
     ket_key_path = _pick(template.get("ket_key_pem"), ca.get("ket_key_pem"))
     ket_chain_path = _pick(template.get("ket_chain_pem"), ca.get("ket_chain_pem"))
 
-    signing_cert_path = _pick(
-        template.get("signing_cert_pem"),
-        template.get("cert_pem"),
-        ca.get("signing_cert_pem"),
-        ca.get("cert_pem"),
-    )
-    signing_key_path = _pick(
-        template.get("signing_key_pem"),
-        template.get("key_pem"),
-        ca.get("signing_key_pem"),
-        ca.get("key_pem"),
-    )
-    signing_chain_path = _pick(
-        template.get("signing_chain_pem"),
-        template.get("chain_pem"),
-        ca.get("signing_chain_pem"),
-        ca.get("chain_pem"),
-    )
-
     ket_cert_pem = _pick(template.get("__ket_certificate_pem"), ca.get("__ket_certificate_pem")) or _read_text(ket_cert_path)
     ket_key_pem = _pick(template.get("__ket_key_pem"), ca.get("__ket_key_pem")) or _read_text(ket_key_path)
     if not ket_cert_pem:
@@ -210,23 +191,14 @@ def _resolve_ca_materials_for_tpm(template: dict, ca: Optional[dict] = None) -> 
     if not ket_key_pem:
         raise ValueError("Missing ket_key_pem in template/CA config")
 
-    ca_sign_cert_pem = _pick(template.get("__certificate_pem"), ca.get("__certificate_pem")) or _read_text(signing_cert_path)
-    ca_sign_key_pem = _pick(template.get("__key_pem"), ca.get("__key_pem")) or _read_text(signing_key_path)
-    if not ca_sign_cert_pem or not ca_sign_key_pem:
-        raise ValueError(
-            "Missing signing certificate/key for CMC challenge signing; configure signing_cert_pem and signing_key_pem (or cert_pem/key_pem) with a matching pair"
-        )
-
     ket_chain_pem = _read_text(ket_chain_path) if ket_chain_path else None
-    signing_chain_pem = _read_text(signing_chain_path) if signing_chain_path else None
 
     return {
         "ket_cert_pem": ket_cert_pem,
         "ket_key_pem": ket_key_pem,
-        "ca_exchange_chain_der": [tpm_mod.pem_cert_to_der(ket_cert_pem)] + [tpm_mod.pem_cert_to_der(block) for block in _split_cert_chain(ket_chain_pem)],
-        "ca_sign_cert_pem": ca_sign_cert_pem,
-        "ca_sign_key_pem": ca_sign_key_pem,
-        "ca_sign_chain_pems": _split_cert_chain(signing_chain_pem),
+        "ca_exchange_chain_der": [tpm_mod.pem_cert_to_der(ket_cert_pem)] + [
+            tpm_mod.pem_cert_to_der(block) for block in _split_cert_chain(ket_chain_pem)
+        ],
     }
 
 
@@ -523,6 +495,12 @@ def create_microsoft_certify_challenge_response(*, csr, bundle, template: dict, 
     xchg_cert_der = (materials["ca_exchange_chain_der"] or [None])[0]
     aik_info_hash = hashlib.sha1(xchg_cert_der).digest() if xchg_cert_der else None
 
+
+    signer_cert_pem = ca.get("__certificate_pem") if ca else None
+    if signer_cert_pem is None:
+        raise ValueError("Missing CA certificate PEM for TPM challenge signing")
+    ca_key = ca.get("__key_obj") if ca else None
+
     challenge = tpm_mod.build_and_sign_microsoft_attestation_challenge(
         request_id=int(request_id),
         ek_pub=ek_pub,
@@ -532,9 +510,9 @@ def create_microsoft_certify_challenge_response(*, csr, bundle, template: dict, 
         aik_name=certified_binding["aik_name"],
         aik_pub_raw=getattr(bundle, "ms_aik_info_raw", None),
         attestation_blob_raw=attestation_blob_raw,
-        signer_cert_pem=materials["ca_sign_cert_pem"],
-        signer_key_pem=materials["ca_sign_key_pem"],
-        signer_chain_pems=materials["ca_sign_chain_pems"],
+        signer_cert_pem=signer_cert_pem,
+        signer_key_obj=ca_key,
+        signer_chain_pems=[],
     )
 
     ek_pub_der = _public_key_to_spki_der(ek_pub)
