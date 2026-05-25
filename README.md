@@ -405,6 +405,8 @@ In practice, Windows enrollment clients (web enrollment, CertEnroll, etc.) expec
 
 According to CMS specifications (RFC 5652) and Microsoft ADCS behavior (MS-WCCE), this structure can be **“degenerate”** (i.e., without a signature, with `signerInfos` absent). In that case, it acts purely as a container for certificates. This format is accepted by Windows clients.
 
+https://datatracker.ietf.org/doc/html/rfc8894#name-degenerate-certificates-onl
+
 However, a real Microsoft ADCS instance can return a **signed full CMC response**, especially when the client sets the `CR_IN_FULLRESPONSE` flag.
 
 In this specific case, this project will not be able to respond correctly if it does not have access to a private key capable of signing the CMC response. A degenerate PKCS#7 response will not satisfy this requirement.
