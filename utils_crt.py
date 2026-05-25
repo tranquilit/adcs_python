@@ -24,6 +24,10 @@ from cryptography.hazmat.primitives.asymmetric import (
     ed448,
     dsa,
 )
+try:
+    from cryptography.hazmat.primitives.asymmetric import mldsa
+except ImportError:  # cryptography < 47 or backend without ML-DSA
+    mldsa = None
 
 
 # -----------------------------------------------------------------------------
@@ -941,6 +945,29 @@ def _guess_ca_common_name(crt_path: str, key_path: str, crl_path: str, parent_ca
     return parent_ca_id or 'ca'
 
 
+def _is_mldsa_private_key(key) -> bool:
+    return (
+        mldsa is not None
+        and isinstance(key, (
+            mldsa.MLDSA44PrivateKey,
+            mldsa.MLDSA65PrivateKey,
+            mldsa.MLDSA87PrivateKey,
+        ))
+    )
+
+def _x509_signature_hash_for_key(key):
+    # Pure EdDSA and ML-DSA signatures do not take an external hash algorithm.
+    if isinstance(key, (ed25519.Ed25519PrivateKey, ed448.Ed448PrivateKey)) or _is_mldsa_private_key(key):
+        return None
+    return hashes.SHA256()
+
+def _private_key_pem_format_for_key(key):
+    # OpenSSL's traditional private key format is not available for modern
+    # algorithms such as ML-DSA. PKCS#8 is the portable format here.
+    if _is_mldsa_private_key(key):
+        return serialization.PrivateFormat.PKCS8
+    return serialization.PrivateFormat.TraditionalOpenSSL
+
 def create_ca(
     crt_path: str,
     key_path: str,
@@ -949,6 +976,9 @@ def create_ca(
     parent_ca: Optional[Dict[str, Any]] = None,
     common_name: Optional[str] = None,
     rsa_key_size: int = 4096,
+    key_type: str = "rsa",
+    ec_curve: str = "secp256r1",
+    mldsa_variant: str = "mldsa65",
 ):
     """Create a new CA certificate/key and initialize an empty CRL.
 
@@ -962,10 +992,54 @@ def create_ca(
         raise ValueError('Could not determine Common Name for the new CA.')
     if int(valid_days) <= 0:
         raise ValueError('--valid-days must be a positive integer.')
-    if int(rsa_key_size) not in (2048, 3072, 4096):
-        raise ValueError('--rsa-bits must be one of: 2048, 3072, 4096.')
-
-    key = rsa.generate_private_key(public_exponent=65537, key_size=int(rsa_key_size))
+    key_type_l = (key_type or "rsa").lower()
+    if key_type_l in ("ec", "ecc", "ecdsa"):
+        curve_map = {
+            "secp256r1": ec.SECP256R1(),
+            "prime256v1": ec.SECP256R1(),
+            "p-256": ec.SECP256R1(),
+            "secp384r1": ec.SECP384R1(),
+            "p-384": ec.SECP384R1(),
+            "secp521r1": ec.SECP521R1(),
+            "p-521": ec.SECP521R1(),
+        }
+        curve_name = (ec_curve or "secp256r1").lower()
+        curve = curve_map.get(curve_name)
+        if curve is None:
+            raise ValueError('--ec-curve must be one of: secp256r1, secp384r1, secp521r1 (aliases: prime256v1, p-256, p-384, p-521).')
+        key = ec.generate_private_key(curve)
+    elif key_type_l in ("mldsa", "ml-dsa", "ml_dsa", "mldsa44", "ml-dsa-44", "mldsa65", "ml-dsa-65", "mldsa87", "ml-dsa-87"):
+        if mldsa is None:
+            raise ValueError('ML-DSA key generation requires cryptography with ML-DSA support, for example cryptography >= 47 with a compatible backend.')
+        variant_name = (mldsa_variant or key_type_l or "mldsa65").lower().replace("_", "-")
+        if key_type_l in ("mldsa44", "ml-dsa-44"):
+            variant_name = "mldsa44"
+        elif key_type_l in ("mldsa65", "ml-dsa-65"):
+            variant_name = "mldsa65"
+        elif key_type_l in ("mldsa87", "ml-dsa-87"):
+            variant_name = "mldsa87"
+        variant_map = {
+            "mldsa44": mldsa.MLDSA44PrivateKey,
+            "ml-dsa-44": mldsa.MLDSA44PrivateKey,
+            "44": mldsa.MLDSA44PrivateKey,
+            "mldsa65": mldsa.MLDSA65PrivateKey,
+            "ml-dsa-65": mldsa.MLDSA65PrivateKey,
+            "65": mldsa.MLDSA65PrivateKey,
+            "mldsa87": mldsa.MLDSA87PrivateKey,
+            "ml-dsa-87": mldsa.MLDSA87PrivateKey,
+            "87": mldsa.MLDSA87PrivateKey,
+        }
+        cls = variant_map.get(variant_name)
+        if cls is None:
+            raise ValueError('--mldsa-variant must be one of: mldsa44, mldsa65, mldsa87 (aliases: ml-dsa-44, ml-dsa-65, ml-dsa-87, 44, 65, 87).')
+        key = cls.generate()
+        key_type_l = variant_name.replace("ml-dsa-", "mldsa")
+    elif key_type_l == "rsa":
+        if int(rsa_key_size) not in (2048, 3072, 4096):
+            raise ValueError('--rsa-bits must be one of: 2048, 3072, 4096.')
+        key = rsa.generate_private_key(public_exponent=65537, key_size=int(rsa_key_size))
+    else:
+        raise ValueError('--key-type must be one of: rsa, ec, mldsa.')
     subject = cx509.Name([
         cx509.NameAttribute(cx509.NameOID.COMMON_NAME, cn),
     ])
@@ -1041,11 +1115,11 @@ def create_ca(
                 critical=False,
             )
 
-    cert = builder.sign(private_key=signer_key, algorithm=hashes.SHA256())
+    cert = builder.sign(private_key=signer_key, algorithm=_x509_signature_hash_for_key(signer_key))
 
     key_pem = key.private_bytes(
         encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        format=_private_key_pem_format_for_key(key),
         encryption_algorithm=serialization.NoEncryption(),
     )
     cert_pem = cert.public_bytes(serialization.Encoding.PEM)
@@ -1070,7 +1144,7 @@ def create_ca(
         )
     except Exception:
         pass
-    crl = crl_builder.sign(private_key=key, algorithm=hashes.SHA256())
+    crl = crl_builder.sign(private_key=key, algorithm=_x509_signature_hash_for_key(key))
     _write_crl_file(crl_path, crl.public_bytes(encoding=serialization.Encoding.PEM))
     _write_sidecar_num(_crlnum_sidecar_path(crl_path), 1)
 
@@ -1081,6 +1155,10 @@ def create_ca(
         'key_path': key_path,
         'crl_path': crl_path,
         'issuer': cn if is_self_signed else str(parent_ca.get('id') or parent_ca.get('display_name')),
+        'key_type': key_type_l,
+        'ec_curve': getattr(key.curve, 'name', None) if isinstance(key, ec.EllipticCurvePrivateKey) else None,
+        'mldsa_variant': key_type_l if _is_mldsa_private_key(key) else None,
+        'rsa_key_size': getattr(key, 'key_size', None) if isinstance(key, rsa.RSAPrivateKey) else None,
     }
 
 
@@ -1091,6 +1169,9 @@ def _cmd_create_ca(
     crl_path: str,
     valid_days: int = 3650,
     rsa_key_size: int = 4096,
+    key_type: str = "rsa",
+    ec_curve: str = "secp256r1",
+    mldsa_variant: str = "mldsa65",
     conf=None,
     cn=None
 ) -> int:
@@ -1123,6 +1204,9 @@ def _cmd_create_ca(
         valid_days=valid_days,
         parent_ca=parent_ca,
         rsa_key_size=rsa_key_size,
+        key_type=key_type,
+        ec_curve=ec_curve,
+        mldsa_variant=mldsa_variant,
         common_name=cn
     )
 

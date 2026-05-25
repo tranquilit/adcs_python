@@ -1745,7 +1745,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--san", action="append",
                    help="SAN entry or comma-separated SAN list for --issue-cert. Repeat the option if needed.")
     p.add_argument("--rsa-bits", type=int, default=None,
-                   help="RSA key size for --issue-cert and --create-ca (2048/3072/4096; default: 2048).")
+                   help="RSA key size for --issue-cert and --create-ca (2048/3072/4096; default: 2048 for --issue-cert, 4096 for --create-ca).")
+    p.add_argument("--key-type", choices=("rsa", "ec", "ecc", "ecdsa", "mldsa", "ml-dsa", "mldsa44", "mldsa65", "mldsa87", "ml-dsa-44", "ml-dsa-65", "ml-dsa-87"), default="rsa",
+                   help="Key type for --create-ca (default: rsa). Use 'ec'/'ecc'/'ecdsa' for ECC or 'mldsa' for ML-DSA.")
+    p.add_argument("--ec-curve", default="secp256r1",
+                   help="ECC curve for --create-ca when --key-type is ec/ecc/ecdsa (secp256r1, secp384r1, secp521r1; aliases: prime256v1, p-256, p-384, p-521).")
+    p.add_argument("--mldsa-variant", default="mldsa65",
+                   help="ML-DSA variant for --create-ca when --key-type is mldsa/ml-dsa (mldsa44, mldsa65, mldsa87; aliases: ml-dsa-44, ml-dsa-65, ml-dsa-87, 44, 65, 87).")
     p.add_argument("--no-bump-number", action="store_true",
                    help="Do not increment CRLNumber when re-signing (keep the same number).")
     p.add_argument("--next-update-hours", default=None,
@@ -1816,6 +1822,9 @@ if __name__ == "__main__":
             crl_path=crl_path,
             valid_days=args.valid_days if args.valid_days else 3650,
             rsa_key_size=rsa_bits,
+            key_type=args.key_type,
+            ec_curve=args.ec_curve,
+            mldsa_variant=args.mldsa_variant,
             conf=confadcs,
             cn=args.cn
         )

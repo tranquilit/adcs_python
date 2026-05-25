@@ -25,6 +25,11 @@ from cryptography.hazmat.primitives.asymmetric import (
     ed25519,
     ed448,
 )
+
+try:
+    from cryptography.hazmat.primitives.asymmetric import mldsa
+except ImportError:  # cryptography versions without ML-DSA support
+    mldsa = None
 from cryptography.x509.oid import ObjectIdentifier as CObjectIdentifier
 
 # Samba / AD lookup (used by search_user)
@@ -1097,8 +1102,8 @@ def build_adcs_bst_pkiresponse_issued(
                 ),
                 "digest_algorithm": a_cms.DigestAlgorithm({"algorithm": "sha256"}),
                 "signed_attrs": signed_attrs,
-                "signature_algorithm": a_cms.SignedDigestAlgorithm({"algorithm": "sha256_rsa"}),
-                "signature": ca_key.sign(to_be_signed, padding.PKCS1v15(), hashes.SHA256()) if ca_key else b"",
+                "signature_algorithm": _signature_algo_for_ca_key(ca_key),
+                "signature": _sign_tbs_with_ca_key(ca_key, to_be_signed),
             }
         )]
     else:
@@ -1176,12 +1181,12 @@ def build_adcs_bst_pkiresponse(
             ),
             "digest_algorithm": a_cms.DigestAlgorithm({"algorithm": "sha256"}),
             "signed_attrs": signed_attrs,
-            "signature_algorithm": a_cms.SignedDigestAlgorithm({"algorithm": "sha256_rsa"}),
+            "signature_algorithm": _signature_algo_for_ca_key(ca_key),
             "signature": b"",
         }
     )
     if ca_key:
-        sig = ca_key.sign(to_be_signed, padding.PKCS1v15(), hashes.SHA256())
+        sig = _sign_tbs_with_ca_key(ca_key, to_be_signed)
     else:
         sig = b''
 
@@ -2286,6 +2291,23 @@ def _cdp_extension_der(url: str) -> bytes:
     return cdp.dump()
 
 
+def _mldsa_ca_signature_oid(priv):
+    """Return the ML-DSA signatureAlgorithm OID for a CA private key, or None."""
+    if mldsa is None:
+        return None
+
+    if isinstance(priv, mldsa.MLDSA44PrivateKey):
+        return "2.16.840.1.101.3.4.3.17"
+
+    if isinstance(priv, mldsa.MLDSA65PrivateKey):
+        return "2.16.840.1.101.3.4.3.18"
+
+    if isinstance(priv, mldsa.MLDSA87PrivateKey):
+        return "2.16.840.1.101.3.4.3.19"
+
+    return None
+
+
 def _signature_algo_for_ca_key(priv):
     if isinstance(priv, rsa.RSAPrivateKey):
         return a_algos.SignedDigestAlgorithm({"algorithm": "sha256_rsa"})
@@ -2299,7 +2321,16 @@ def _signature_algo_for_ca_key(priv):
     if isinstance(priv, ed448.Ed448PrivateKey):
         return a_algos.SignedDigestAlgorithm({"algorithm": "ed448"})
 
+    mldsa_oid = _mldsa_ca_signature_oid(priv)
+    if mldsa_oid:
+        # ML-DSA algorithm identifiers are single-OID AlgorithmIdentifier values
+        # with absent parameters. asn1crypto preserves the dotted OID even when
+        # it does not have a friendly name for it.
+        return a_algos.SignedDigestAlgorithm({"algorithm": mldsa_oid})
+
     raise ValueError(f"Unsupported CA private key type: {type(priv).__name__}")
+
+
 def _sign_tbs_with_ca_key(priv, tbs_der: bytes) -> bytes:
     if isinstance(priv, rsa.RSAPrivateKey):
         return priv.sign(tbs_der, padding.PKCS1v15(), hashes.SHA256())
@@ -2308,6 +2339,11 @@ def _sign_tbs_with_ca_key(priv, tbs_der: bytes) -> bytes:
         return priv.sign(tbs_der, ec.ECDSA(hashes.SHA256()))
 
     if isinstance(priv, (ed25519.Ed25519PrivateKey, ed448.Ed448PrivateKey)):
+        return priv.sign(tbs_der)
+
+    if _mldsa_ca_signature_oid(priv):
+        # ML-DSA signs the message directly; do not pass a hash algorithm or
+        # RSA/ECDSA padding object.
         return priv.sign(tbs_der)
 
     raise ValueError(f"Unsupported CA private key type: {type(priv).__name__}")
