@@ -968,6 +968,16 @@ def _private_key_pem_format_for_key(key):
         return serialization.PrivateFormat.PKCS8
     return serialization.PrivateFormat.TraditionalOpenSSL
 
+def _load_csr_public_key(csr_path: str):
+    with open(csr_path, "rb") as f:
+        data = f.read()
+    try:
+        csr = cx509.load_pem_x509_csr(data)
+    except ValueError:
+        csr = cx509.load_der_x509_csr(data)
+    return csr.public_key()
+
+
 def create_ca(
     crt_path: str,
     key_path: str,
@@ -979,6 +989,7 @@ def create_ca(
     key_type: str = "rsa",
     ec_curve: str = "secp256r1",
     mldsa_variant: str = "mldsa65",
+    csr_path: Optional[str] = None,
 ):
     """Create a new CA certificate/key and initialize an empty CRL.
 
@@ -992,8 +1003,16 @@ def create_ca(
         raise ValueError('Could not determine Common Name for the new CA.')
     if int(valid_days) <= 0:
         raise ValueError('--valid-days must be a positive integer.')
+    csr_public_key = None
+    key = None
     key_type_l = (key_type or "rsa").lower()
-    if key_type_l in ("ec", "ecc", "ecdsa"):
+
+    if csr_path:
+        if parent_ca is None:
+            raise ValueError('--csr-path with --create-ca requires --ca-id/--signer-ca-id; a CSR only contains a public key, so the new CA cannot self-sign.')
+        csr_public_key = _load_csr_public_key(csr_path)
+        key_type_l = "csr"
+    elif key_type_l in ("ec", "ecc", "ecdsa"):
         curve_map = {
             "secp256r1": ec.SECP256R1(),
             "prime256v1": ec.SECP256R1(),
@@ -1040,6 +1059,8 @@ def create_ca(
         key = rsa.generate_private_key(public_exponent=65537, key_size=int(rsa_key_size))
     else:
         raise ValueError('--key-type must be one of: rsa, ec, mldsa.')
+
+    public_key = csr_public_key if csr_public_key is not None else key.public_key()
     subject = cx509.Name([
         cx509.NameAttribute(cx509.NameOID.COMMON_NAME, cn),
     ])
@@ -1059,7 +1080,7 @@ def create_ca(
         cx509.CertificateBuilder()
         .subject_name(subject)
         .issuer_name(issuer_name)
-        .public_key(key.public_key())
+        .public_key(public_key)
         .serial_number(cx509.random_serial_number())
         .not_valid_before(now - timedelta(minutes=5))
         .not_valid_after(now + timedelta(days=int(valid_days)))
@@ -1075,12 +1096,12 @@ def create_ca(
             encipher_only=False,
             decipher_only=False,
         ), critical=True)
-        .add_extension(cx509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
+        .add_extension(cx509.SubjectKeyIdentifier.from_public_key(public_key), critical=False)
     )
 
     if is_self_signed:
         builder = builder.add_extension(
-            cx509.AuthorityKeyIdentifier.from_issuer_public_key(key.public_key()), critical=False
+            cx509.AuthorityKeyIdentifier.from_issuer_public_key(public_key), critical=False
         )
     else:
         try:
@@ -1117,48 +1138,56 @@ def create_ca(
 
     cert = builder.sign(private_key=signer_key, algorithm=_x509_signature_hash_for_key(signer_key))
 
-    key_pem = key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=_private_key_pem_format_for_key(key),
-        encryption_algorithm=serialization.NoEncryption(),
-    )
     cert_pem = cert.public_bytes(serialization.Encoding.PEM)
 
-    for path in (crt_path, key_path, crl_path):
+    paths_to_create = [crt_path]
+    if key is not None:
+        paths_to_create.append(key_path)
+    if key is not None:
+        paths_to_create.append(crl_path)
+    for path in paths_to_create:
         dirn = os.path.dirname(path) or '.'
         os.makedirs(dirn, exist_ok=True)
 
-    _atomic_write(key_path, key_pem, mode=stat.S_IRUSR | stat.S_IWUSR)
     _atomic_write(crt_path, cert_pem, mode=0o644)
 
-    crl_builder = (
-        cx509.CertificateRevocationListBuilder()
-        .issuer_name(cert.subject)
-        .last_update(now)
-        .next_update(now + timedelta(days=7))
-        .add_extension(cx509.CRLNumber(1), critical=False)
-    )
-    try:
-        crl_builder = crl_builder.add_extension(
-            cx509.AuthorityKeyIdentifier.from_issuer_public_key(key.public_key()), critical=False
+    if key is not None:
+        key_pem = key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=_private_key_pem_format_for_key(key),
+            encryption_algorithm=serialization.NoEncryption(),
         )
-    except Exception:
-        pass
-    crl = crl_builder.sign(private_key=key, algorithm=_x509_signature_hash_for_key(key))
-    _write_crl_file(crl_path, crl.public_bytes(encoding=serialization.Encoding.PEM))
-    _write_sidecar_num(_crlnum_sidecar_path(crl_path), 1)
+        _atomic_write(key_path, key_pem, mode=stat.S_IRUSR | stat.S_IWUSR)
+
+        crl_builder = (
+            cx509.CertificateRevocationListBuilder()
+            .issuer_name(cert.subject)
+            .last_update(now)
+            .next_update(now + timedelta(days=7))
+            .add_extension(cx509.CRLNumber(1), critical=False)
+        )
+        try:
+            crl_builder = crl_builder.add_extension(
+                cx509.AuthorityKeyIdentifier.from_issuer_public_key(public_key), critical=False
+            )
+        except Exception:
+            pass
+        crl = crl_builder.sign(private_key=key, algorithm=_x509_signature_hash_for_key(key))
+        _write_crl_file(crl_path, crl.public_bytes(encoding=serialization.Encoding.PEM))
+        _write_sidecar_num(_crlnum_sidecar_path(crl_path), 1)
 
     return {
         'common_name': cn,
         'self_signed': is_self_signed,
         'crt_path': crt_path,
-        'key_path': key_path,
+        'key_path': key_path if key is not None else None,
         'crl_path': crl_path,
         'issuer': cn if is_self_signed else str(parent_ca.get('id') or parent_ca.get('display_name')),
         'key_type': key_type_l,
-        'ec_curve': getattr(key.curve, 'name', None) if isinstance(key, ec.EllipticCurvePrivateKey) else None,
-        'mldsa_variant': key_type_l if _is_mldsa_private_key(key) else None,
-        'rsa_key_size': getattr(key, 'key_size', None) if isinstance(key, rsa.RSAPrivateKey) else None,
+        'ec_curve': getattr(key.curve, 'name', None) if key is not None and isinstance(key, ec.EllipticCurvePrivateKey) else None,
+        'mldsa_variant': key_type_l if key is not None and _is_mldsa_private_key(key) else None,
+        'rsa_key_size': getattr(key, 'key_size', None) if key is not None and isinstance(key, rsa.RSAPrivateKey) else None,
+        'csr_path': csr_path,
     }
 
 
@@ -1173,7 +1202,8 @@ def _cmd_create_ca(
     ec_curve: str = "secp256r1",
     mldsa_variant: str = "mldsa65",
     conf=None,
-    cn=None
+    cn=None,
+    csr_path: Optional[str] = None,
 ) -> int:
     parent_ca = None
     effective_crt_path = crt_path
@@ -1207,7 +1237,8 @@ def _cmd_create_ca(
         key_type=key_type,
         ec_curve=ec_curve,
         mldsa_variant=mldsa_variant,
-        common_name=cn
+        common_name=cn,
+        csr_path=csr_path,
     )
 
     if ca_id:
@@ -1216,11 +1247,12 @@ def _cmd_create_ca(
             user_crt_path,
             mode=None,
         )
-        _copy_if_different(
-            effective_key_path,
-            user_key_path,
-            mode=stat.S_IRUSR | stat.S_IWUSR,
-        )
+        if result.get('key_path'):
+            _copy_if_different(
+                effective_key_path,
+                user_key_path,
+                mode=stat.S_IRUSR | stat.S_IWUSR,
+            )
 
 
     print("")
@@ -1238,15 +1270,26 @@ def _cmd_create_ca(
 
     print(f'    display_name: "{display_name}"')
     print("    urls:")
-    print(f'      crl_http:        "http://{fqdn}/crl/{slug}/{os.path.basename(crl_path)}"')
+    if result.get('key_path'):
+        print(f'      crl_http:        "http://{fqdn}/crl/{slug}/{os.path.basename(crl_path)}"')
+    else:
+        print("      crl_http:        null")
     print(f'      ca_issuers_http: "http://{fqdn}/certs/{slug}/{os.path.basename(crt_path)}"')
     print("    pem:")
     print(f"      certificate_path_pem: {crt_path}")
-    print(f"      key_path_pem:         {key_path}")
-    print("      key_passphrase: null")
+    if result.get('key_path'):
+        print(f"      key_path_pem:         {key_path}")
+        print("      key_passphrase: null")
+    else:
+        print("      key_path_pem:         null")
+        print("      key_passphrase: null")
     print("")
     print("    crl:")
-    print(f"      path_crl: {crl_path}")
+    if result.get('key_path'):
+        print(f"      path_crl: {crl_path}")
+    else:
+        print("      path_crl: null")
+        print("      # No CRL was created: --csr-path supplies only a public key, not the CA private key needed to sign CRLs.")
     print("")
     print("    storage_paths:")
     print(f"      cert_dir: /var/lib/adcs/pki/newcerts/{slug}/")
