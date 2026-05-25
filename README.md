@@ -116,6 +116,8 @@ cp -r /opt/adcs_python/callbacks /etc/adcs/callbacks
 Create a local CA (for testing)
 ---------------------------------------------------------
  
+By default, `./manageca.py --create-ca` generates an RSA CA:
+
 ```
 ./manageca.py --create-ca --cn "CA Root Test" >> /etc/adcs/adcs.yaml
 ./manageca.py --create-ket-cert --ca-id "CA Root Test" >> /etc/adcs/adcs.yaml
@@ -123,6 +125,14 @@ Create a local CA (for testing)
 ./manageca.py --create-ket-cert --ca-id "CA Inter Test" >> /etc/adcs/adcs.yaml
 ./manageca.py --issue-cert --signer-ca-id "CA Inter Test" --cn testadcs.mydomain.lan --san testadcs.mydomain.lan --crt-path /etc/nginx/crt.pem --key-path /etc/nginx/key.pem
 ```
+
+To generate an ECC CA instead, use `--key-type ec` and select the curve with `--ec-curve`:
+
+```
+./manageca.py --create-ca --cn "CA Root ECC Test" --key-type ec --ec-curve secp384r1 >> /etc/adcs/adcs.yaml
+```
+
+Supported ECC curves are `secp256r1`, `secp384r1`, and `secp521r1`. Aliases such as `prime256v1`, `p-256`, `p-384`, and `p-521` are also accepted.
 
 > A **KET certificate** (**Key Exchange Token**) is a special certificate used to protect the **exchange of encrypted enrollment data** between the client and the server in Microsoft ADCS workflows, for example for **TPM attestation**.
 
@@ -406,6 +416,8 @@ In practice, Windows enrollment clients (web enrollment, CertEnroll, etc.) expec
 According to CMS specifications (RFC 5652) and Microsoft ADCS behavior (MS-WCCE), this structure can be **“degenerate”** (i.e., without a signature, with `signerInfos` absent). In that case, it acts purely as a container for certificates. This format is accepted by Windows clients.
 
 https://datatracker.ietf.org/doc/html/rfc8894#name-degenerate-certificates-onl
+
+This limitation is important for **TPM attestation**: the degenerate mode only works for certificate containers. For TPM attestation, Windows expects the challenge response to be a signed CMS/CMC structure and rejects it if the challenge is not signed.
 
 However, a real Microsoft ADCS instance can return a **signed full CMC response**, especially when the client sets the `CR_IN_FULLRESPONSE` flag.
 
