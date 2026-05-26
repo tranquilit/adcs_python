@@ -23,7 +23,7 @@ The goal is to emulate an ADCS web enrollment server that:
 
 - Not audited for security
 - No guarantees of correctness or compatibility
-- Much of the code was created using AI.
+- A large portion of the code was generated with the help of AI.
 
 
 ## 🔧 Certificate Templates via Callback
