@@ -333,6 +333,31 @@ You can submit a CSR directly from the command line without using the API interf
 
 The server supports **TPM attestation** during certificate enrollment.
 
+### Supported TPM attestation flow
+
+This project intentionally supports only the EK-based Microsoft TPM attestation flow:
+
+```text
+szOID_ENROLL_EK_INFO
+```
+
+The AIK-only flow is not implemented:
+
+```text
+szOID_ENROLL_AIK_INFO
+```
+
+The reason is to keep a single attestation path. The `szOID_ENROLL_EK_INFO` flow is sufficient for the supported use cases: it allows the server to perform the TPM activation challenge and gives the callback access to EK-related material, such as EKPub and EKCert.
+
+Therefore, TPM templates should set:
+
+```python
+"attest_required": True,
+"ek_validate_key": True
+```
+
+`ek_validate_key=True` makes Windows use the EK-based attestation flow expected by this server. It does not force the final trust decision to rely only on an EKPub allowlist. The callback remains responsible for deciding whether to trust the request based on EKPub, EKCert, manufacturer certificates, inventory data, or any other business rule.
+
 During a request, it:
 
 -   Verifies that the **TPM attestation challenge is correctly
