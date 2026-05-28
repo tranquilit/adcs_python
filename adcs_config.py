@@ -352,6 +352,8 @@ def load_yaml_conf(path="adcs.yaml"):
     storage_paths_global = gbl.get("storage_paths", {}) or {}
     conf["path_list_request_id"] = gbl.get("path_list_request_id", "/var/lib/adcs/list_request_id")
     conf["next_update_hours_crl"] = gbl.get("next_update_hours_crl", 8)
+    conf["tpm_pending_dir"] = gbl.get("tpm_pending_dir", "/var/lib/adcs/tpm-pending")
+    conf["tpm_pending_challenge_max_age_seconds"] = int(gbl.get("tpm_pending_challenge_max_age_seconds",300,))
 
     conf["policyid"] = policy_provider.get("policy_id")
     conf["policyfriendlyname"] = policy_provider.get("policyfriendlyname","CEP policy")

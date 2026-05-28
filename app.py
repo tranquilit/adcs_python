@@ -256,6 +256,8 @@ def ces_service(CAID):
             template=tpl,
             request_id=request_id,
             ca=ca,
+            pending_dir=app.confadcs["tpm_pending_dir"],
+            pending_challenge_max_age_seconds=app.confadcs["tpm_pending_challenge_max_age_seconds"],
         )
     else:
         tpm_result = verify_tpm_for_template(
@@ -264,6 +266,8 @@ def ces_service(CAID):
             template=tpl,
             request_id=request_id,
             ca=ca,
+            pending_dir=app.confadcs["tpm_pending_dir"],
+            pending_challenge_max_age_seconds=app.confadcs["tpm_pending_challenge_max_age_seconds"],
         )
     
     if tpm_result.get("status") == "pending":

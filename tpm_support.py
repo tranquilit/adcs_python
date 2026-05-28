@@ -14,8 +14,6 @@ from cryptography.hazmat.primitives import serialization
 import tpm_attestation as tpm_mod
 
 logger = logging.getLogger("adcs.tpm_support")
-_PENDING_DIR = "/var/lib/adcs/tpm-pending"
-_PENDING_CHALLENGE_MAX_AGE_SECONDS = int(os.environ.get("ADCS_TPM_PENDING_TTL_SECONDS", "300"))
 
 
 
@@ -82,9 +80,9 @@ def _ca_fingerprint(ca: Optional[dict]) -> str:
     return _fingerprint_dict(ca, _CA_CONTEXT_KEYS)
 
 
-def _save_pending_challenge(request_id: str | int, payload: dict) -> None:
+def _save_pending_challenge(request_id: str | int, payload: dict , pending_dir) -> None:
     safe_request_id = _normalize_request_id(request_id)
-    pending_dir = Path(_PENDING_DIR)
+    pending_dir = Path(pending_dir)
     pending_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     pending_dir.chmod(0o700)
     path = pending_dir / f"{safe_request_id}.json"
@@ -101,17 +99,17 @@ def _save_pending_challenge(request_id: str | int, payload: dict) -> None:
         raise
 
 
-def _load_pending_challenge(request_id: str | int) -> Optional[dict]:
+def _load_pending_challenge(request_id: str | int,pending_dir) -> Optional[dict]:
     safe_request_id = _normalize_request_id(request_id)
-    path = Path(_PENDING_DIR) / f"{safe_request_id}.json"
+    path = Path(pending_dir) / f"{safe_request_id}.json"
     if not path.is_file():
         return None
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _delete_pending_challenge(request_id: str | int) -> None:
+def _delete_pending_challenge(request_id: str | int,pending_dir) -> None:
     safe_request_id = _normalize_request_id(request_id)
-    path = Path(_PENDING_DIR) / f"{safe_request_id}.json"
+    path = Path(pending_dir) / f"{safe_request_id}.json"
     try:
         path.unlink()
     except FileNotFoundError:
@@ -348,14 +346,15 @@ def _verify_pending_challenge_response(
     pending_challenge: dict,
     challenge_response_der: bytes,
     request_id: Optional[int] = None,
-    max_age_seconds: int = _PENDING_CHALLENGE_MAX_AGE_SECONDS,
+    pending_dir: str | Path,
+    max_age_seconds: int,
 ) -> dict:
     if request_id is None:
         raise ValueError("request_id is required to verify a TPM challenge response")
     safe_request_id = _normalize_request_id(request_id)
 
     if str(pending_challenge.get("request_id")) != safe_request_id:
-        _delete_pending_challenge(safe_request_id)
+        _delete_pending_challenge(safe_request_id, pending_dir)
         raise ValueError("pending_challenge request_id does not match the current request")
 
     expected_secret_b64 = pending_challenge.get("secret_b64")
@@ -364,15 +363,15 @@ def _verify_pending_challenge_response(
 
     created_at = pending_challenge.get("created_at")
     if created_at is None:
-        _delete_pending_challenge(safe_request_id)
+        _delete_pending_challenge(safe_request_id, pending_dir)
         raise ValueError("pending_challenge does not contain created_at; cannot verify expiry")
     try:
         age = int(time.time()) - int(created_at)
     except (TypeError, ValueError):
-        _delete_pending_challenge(safe_request_id)
+        _delete_pending_challenge(safe_request_id, pending_dir)
         raise ValueError("pending_challenge contains invalid created_at; cannot verify expiry")
     if age < 0 or age > max_age_seconds:
-        _delete_pending_challenge(safe_request_id)
+        _delete_pending_challenge(safe_request_id, pending_dir)
         raise ValueError(
             f"TPM challenge has expired (age={age}s, max={max_age_seconds}s)"
         )
@@ -419,7 +418,7 @@ def _verify_pending_challenge_response(
     if not hmac.compare_digest(clear, expected_secret):
         raise ValueError("TPM challenge response does not match the pending secret")
 
-    _delete_pending_challenge(safe_request_id)
+    _delete_pending_challenge(safe_request_id, pending_dir)
 
     ek_cert, ek_pub = _restore_ek_materials(pending_challenge)
     ek_cert_sha256 = _cert_sha256(ek_cert)
@@ -455,7 +454,7 @@ def _verify_pending_challenge_response(
     }
 
 
-def create_microsoft_certify_challenge_response(*, csr, bundle, template: dict, request_id: int, ca: dict) -> dict:
+def create_microsoft_certify_challenge_response(*, csr, bundle, template: dict, request_id: int, ca: dict,pending_dir) -> dict:
     materials = _resolve_ca_materials_for_tpm(template, ca)
     ket_priv = tpm_mod._load_private_key_from_pem(materials["ket_key_pem"])
     ket_cert_der = tpm_mod.pem_cert_to_der(materials["ket_cert_pem"])
@@ -545,7 +544,7 @@ def create_microsoft_certify_challenge_response(*, csr, bundle, template: dict, 
         "certified_key_name_alg": certified_binding.get("certified_key_name_alg"),
         "certified_key_alg": certified_binding.get("certified_key_alg"),
     }
-    _save_pending_challenge(safe_request_id, pending_payload)
+    _save_pending_challenge(safe_request_id, pending_payload, pending_dir)
 
     return {
         "status": "pending",
@@ -577,6 +576,8 @@ def verify_tpm_for_template(
     template: dict,
     request_id: Optional[int] = None,
     ca: Optional[dict] = None,
+    pending_dir: str | Path,
+    pending_challenge_max_age_seconds: int,
 ) -> dict:
     """Verify TPM attestation for a template.
 
@@ -598,7 +599,7 @@ def verify_tpm_for_template(
     if challenge_response_der is not None:
         if request_id is None:
             raise ValueError("request_id is required to verify a TPM challenge response")
-        pending_challenge = _load_pending_challenge(request_id)
+        pending_challenge = _load_pending_challenge(request_id, pending_dir)
         if pending_challenge is None:
             raise ValueError("No pending TPM challenge exists for this request_id")
         return _verify_pending_challenge_response(
@@ -608,9 +609,11 @@ def verify_tpm_for_template(
             pending_challenge=pending_challenge,
             challenge_response_der=challenge_response_der,
             request_id=request_id,
+            pending_dir=pending_dir,
+            max_age_seconds=pending_challenge_max_age_seconds,
         )
 
-    if request_id is not None and _load_pending_challenge(request_id) is not None:
+    if request_id is not None and _load_pending_challenge(request_id, pending_dir) is not None:
         raise ValueError(
             "A pending TPM challenge already exists for this request_id; submit the response via challenge_response_der"
         )
@@ -640,6 +643,7 @@ def verify_tpm_for_template(
             template=template,
             request_id=int(_normalize_request_id(request_id)),
             ca=ca,
+            pending_dir=pending_dir,
         )
 
     if getattr(bundle, "ms_aik_info_raw", None) is not None:
