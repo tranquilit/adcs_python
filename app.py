@@ -182,8 +182,26 @@ def ces_service(CAID):
     challenge = extract_challenge_response_and_request_id(rst_xml)
 
     req_id_elem = root.find(".//enr:RequestID", {"enr": "http://schemas.microsoft.com/windows/pki/2009/01/enrollment"})
+    enr_request_id = None
     if req_id_elem is not None and (req_id_elem.text or "").strip():
-        request_id = int(req_id_elem.text.strip())
+        enr_request_id = int(req_id_elem.text.strip())
+
+    if challenge['is_challenge_response']:
+        if challenge['request_id'] is None:
+            return Response(
+                "Missing ContextItem RequestID for TPM challenge response",
+                content_type="text/plain; charset=utf-8",
+                status=400,
+            )
+        if enr_request_id is not None and enr_request_id != challenge['request_id']:
+            return Response(
+                "Mismatched RequestID between enr:RequestID and challenge-response ContextItem",
+                content_type="text/plain; charset=utf-8",
+                status=400,
+            )
+
+    if enr_request_id is not None:
+        request_id = enr_request_id
         if not os.path.isfile(os.path.join(app.confadcs['path_list_request_id'],str(request_id))):
             app.logger.error("File not found: %s", os.path.join(app.confadcs['path_list_request_id'],str(request_id)))
             return Response(
