@@ -304,8 +304,7 @@ def ces_service(CAID):
             content_type="application/soap+xml; charset=utf-8",
             status=http_code
         )
-        response.headers["X-TPM-Request-Id"] = tpm_result["request_id"]
-        response.headers["X-TPM-Status"] = "pending"
+        
 
         with open (os.path.join(app.confadcs['path_list_request_id'],str(request_id)) ,'wb') as f:
             f.write(p7_der)
