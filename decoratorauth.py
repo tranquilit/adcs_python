@@ -3,7 +3,8 @@ from flask import request, Response, g
 from flask import current_app
 from functools import wraps
 from callback_loader import load_func
-import xml.etree.ElementTree as ET
+from defusedxml import ElementTree as ET
+
 
 def kerberos_authenticate(auth_header):
     if not auth_header or not auth_header.startswith("Negotiate "):
@@ -54,7 +55,7 @@ def _extract_username_password_from_soap(raw):
 
     try:
         root = ET.fromstring(xml_text)
-    except ET.ParseError:
+    except (ET.ParseError, ET.DefusedXmlException):
         return '', ''
 
     username_el = root.find('.//o:Username', NS)
@@ -124,5 +125,5 @@ def auth_required(f):
             resp.headers.update(headers)
             return resp
         return Response(resp, headers=headers)
-    return decorated_function
 
+    return decorated_function
