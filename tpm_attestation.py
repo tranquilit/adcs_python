@@ -142,6 +142,15 @@ class _Reader:
     def tell(self) -> int:
         return self._pos
 
+    def remaining(self) -> int:
+        return len(self._data) - self._pos
+
+    def ensure_eof(self, what: str) -> None:
+        if self.remaining() != 0:
+            raise TPMAttestationError(
+                f"Trailing bytes after {what}: {self.remaining()} byte(s) at offset {self._pos}"
+            )
+
 
 def _tpm2b(data: bytes) -> bytes:
     return struct.pack(">H", len(data)) + data
@@ -241,7 +250,7 @@ class TPMPublicKey:
         return out
 
 
-def parse_tpms_attest(raw: bytes) -> AttestationData:
+def parse_tpms_attest(raw: bytes, *, reject_trailing: bool = True) -> AttestationData:
     r = _Reader(raw)
     magic = r.u32()
     attest_type = r.u16()
@@ -276,10 +285,12 @@ def parse_tpms_attest(raw: bytes) -> AttestationData:
             selection += struct.pack(">HB", hash_alg, sel_size) + r.raw(sel_size)
         attest.pcr_selection = struct.pack(">I", count) + selection
         attest.pcr_digest = r.tpm2b()
+    if reject_trailing:
+        r.ensure_eof("TPMS_ATTEST")
     return attest
 
 
-def parse_tpmt_public(raw: bytes) -> TPMPublicKey:
+def parse_tpmt_public(raw: bytes, *, reject_trailing: bool = True) -> TPMPublicKey:
     r = _Reader(raw)
     alg_type = r.u16()
     name_alg = r.u16()
@@ -305,7 +316,10 @@ def parse_tpmt_public(raw: bytes) -> TPMPublicKey:
         out.ecc_y = r.tpm2b()
     else:
         raise TPMAttestationError(f"Unsupported TPMT_PUBLIC algorithm: {alg_type:#06x}")
-    out._raw_bytes = raw[:r.tell()]
+    parsed_end = r.tell()
+    if reject_trailing:
+        r.ensure_eof("TPMT_PUBLIC")
+    out._raw_bytes = raw[:parsed_end]
     return out
 
 
@@ -329,6 +343,7 @@ def _verify_tpm_signature(data: bytes, sig_raw: bytes, pub_key: TPMPublicKey):
                 )
         except InvalidSignature as exc:
             raise TPMAttestationError("TPM signature verification failed") from exc
+        r.ensure_eof("TPMT_SIGNATURE")
         return
     if sig_alg == TPM2_ALG_ECDSA:
         from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
@@ -339,6 +354,7 @@ def _verify_tpm_signature(data: bytes, sig_raw: bytes, pub_key: TPMPublicKey):
             crypto_key.verify(encode_dss_signature(r_int, s_int), data, ec.ECDSA(hash_obj))
         except InvalidSignature as exc:
             raise TPMAttestationError("ECDSA signature verification failed") from exc
+        r.ensure_eof("TPMT_SIGNATURE")
         return
     raise TPMAttestationError(f"Unsupported signature algorithm: {sig_alg:#06x}")
 
@@ -1382,7 +1398,7 @@ def _iter_tpmt_public_candidates(blob: bytes):
             if len(raw) < 16:
                 continue
             try:
-                pub = parse_tpmt_public(raw)
+                pub = parse_tpmt_public(raw, reject_trailing=False)
             except Exception:
                 continue
             key = (pos, pub.compute_name())
