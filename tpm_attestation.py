@@ -1284,15 +1284,24 @@ def _validate_microsoft_platform2_id_binding(id_binding: bytes) -> dict:
         id_binding_attest_type = "creation"
         id_binding_name = id_attest.creation_name
         id_binding_hash = id_attest.creation_hash
-        if id_binding_name and not hmac.compare_digest(id_binding_name, aik_name):
+        if not id_binding_name:
+            raise ValueError("Microsoft idBinding creation attestation is missing attested object name")
+        if not hmac.compare_digest(id_binding_name, aik_name):
             raise ValueError("Microsoft idBinding creation attestation does not name the AIK public area")
+        if not id_binding_hash:
+            raise ValueError("Microsoft idBinding creation attestation is missing creation hash")
+        expected_creation_hash = hashlib.new(_tpm_alg_to_hash(aik_pub.name_alg), creation_data_raw).digest()
+        if not hmac.compare_digest(id_binding_hash, expected_creation_hash):
+            raise ValueError("Microsoft idBinding creation hash does not match TPM2B_CREATION_DATA")
     elif id_attest.attest_type in (TPM2_ST_ATTEST_CERTIFY, 0x8017):
         # Some Microsoft/PCP blobs may use a CERTIFY-style attestation here. Treat it
         # as an AIK binding proof only if the certified object name is exactly the AIK
         # public area's TPM Name.
         id_binding_attest_type = "certify"
         id_binding_name = id_attest.certified_name
-        if id_binding_name and not hmac.compare_digest(id_binding_name, aik_name):
+        if not id_binding_name:
+            raise ValueError("Microsoft idBinding certify attestation is missing attested object name")
+        if not hmac.compare_digest(id_binding_name, aik_name):
             raise ValueError("Microsoft idBinding certify attestation does not name the AIK public area")
     else:
         raise ValueError(f"Microsoft idBinding has unsupported attest type: {id_attest.attest_type:#06x}")
