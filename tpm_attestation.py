@@ -1622,14 +1622,17 @@ def build_and_sign_microsoft_attestation_challenge(
         secret = os.urandom(32)
     ek_name_alg = infer_ek_name_alg_from_public_key(ek_pub)
 
+    if aik_name is None and attestation_blob_raw is not None:
+        # Prefer the validated Microsoft idBinding path. ms_aik_info_raw is CSR-controlled
+        # and must not override the AIK name certified by the structured KAST idBinding.
+        aik_name = _extract_aik_name_from_microsoft_attestation_blob(attestation_blob_raw)
     if aik_name is None and aik_pub_raw is not None:
+        # Compatibility fallback only for legacy/platform-1 style requests where no
+        # structured idBinding is available.
         try:
             aik_name = parse_tpmt_public(aik_pub_raw).compute_name()
         except Exception:
             aik_name = None
-    if aik_name is None and attestation_blob_raw is not None:
-        # Strict structured extraction only; no heuristic scanning.
-        aik_name = _extract_aik_name_from_microsoft_attestation_blob(attestation_blob_raw)
     if aik_name is None:
         raise ValueError(
             "Could not recover the structured AIK TPM name; refusing to emit an invalid TPM2_MakeCredential challenge."
