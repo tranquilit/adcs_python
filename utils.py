@@ -468,6 +468,32 @@ def _extract_message_digest_from_signed_attrs(signed_attrs):
     return None
 
 
+def _extract_attr_value(signed_attrs, attr_name: str):
+    """
+    Return the first native value for a CMS signed attribute, or None.
+
+    attr_name is the asn1crypto native name, for example:
+      - "content_type"
+      - "message_digest"
+
+    Returns None when signed_attrs is None, the attribute is absent, or it has
+    no values. Parsing errors on individual attributes are ignored so one bad
+    attribute does not prevent checking the rest.
+    """
+    if signed_attrs is None:
+        return None
+
+    for attr in signed_attrs:
+        try:
+            if attr["type"].native == attr_name:
+                vals = attr["values"]
+                if len(vals) > 0:
+                    return vals[0].native
+        except Exception:
+            continue
+    return None
+
+
 def _verify_cms_signature_with_cert(cert, signer_info, signed_bytes: bytes):
     cert_crypto = cx509.load_der_x509_certificate(cert.dump())
     pub = cert_crypto.public_key()
@@ -577,6 +603,16 @@ def _verify_signer_info(sd, signer_info):
 
     try:
         if signed_attrs is not None:
+            ct_attr = _extract_attr_value(signed_attrs, "content_type")
+            if ct_attr is None:
+                result["errors"].append("signed_attrs present but no contentType attribute")
+                return result
+
+            expected_ct = eci["content_type"].native if eci["content_type"] is not None else None
+            if ct_attr != expected_ct:
+                result["errors"].append("contentType attribute does not match encapsulated content type")
+                return result
+
             md_attr = _extract_message_digest_from_signed_attrs(signed_attrs)
             if md_attr is None:
                 result["errors"].append("signed_attrs present but no messageDigest attribute")
@@ -2347,3 +2383,4 @@ def _sign_tbs_with_ca_key(priv, tbs_der: bytes) -> bytes:
         return priv.sign(tbs_der)
 
     raise ValueError(f"Unsupported CA private key type: {type(priv).__name__}")
+
