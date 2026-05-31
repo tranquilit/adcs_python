@@ -49,6 +49,7 @@ In practice:
 - **Eligibility checks** (who is allowed to get what kind of certificate) must be implemented **inside the callback** (e.g. enforce AD group membership, adjust validity periods, or restrict EKUs).  
 - If the callback does not enforce checks, **any authenticated user could obtain any certificate** that the module returns.  
 - The Python ADCS server does not impose extra restrictions: it simply executes the callback and signs the result.
+- The callback receives CMS/CMC signature metadata in the `info` object (`cmc_signature_valid`, `cmc_signatures`, and related errors). Verifying this is not always required, but it is necessary when the callback relies on a signed request for RA-style validation or other signature-based authorization.
 
 👉 **In short: the security and enforcement of issuance rules are entirely the responsibility of the callback code.**
 
