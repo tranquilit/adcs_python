@@ -250,7 +250,7 @@ def _public_key_from_spki_der(spki_der: Optional[bytes]):
 def _public_key_to_legacy_ek_hash_der(public_key) -> Optional[bytes]:
     """Return the EK public-key DER used by the legacy public hash.
 
-    Historical callers compared ek_public_key_spki_sha256 against the SHA-256
+    Historical callers compared ek_public_key_identity_sha256 against the SHA-256
     of RSA PKCS#1 RSAPublicKey DER, despite the field name saying SPKI. Keep
     that wire value for compatibility. For non-RSA keys, PKCS#1 is not valid,
     so fall back to SubjectPublicKeyInfo DER.
@@ -422,13 +422,13 @@ def _verify_pending_challenge_response(
 
     ek_cert, ek_pub = _restore_ek_materials(pending_challenge)
     ek_cert_sha256 = _cert_sha256(ek_cert)
-    ek_public_key_spki_sha256 = _ek_pub_sha256(ek_pub) or ""
+    ek_public_key_identity_sha256 = _ek_pub_sha256(ek_pub) or ""
 
     expected_ek_cert_sha256 = pending_challenge.get("ek_cert_sha256")
     if expected_ek_cert_sha256 and expected_ek_cert_sha256 != ek_cert_sha256:
         raise ValueError("Restored EK certificate does not match the pending TPM challenge context")
     expected_ek_pub_sha256 = pending_challenge.get("ek_pub_spki_sha256")
-    if expected_ek_pub_sha256 and expected_ek_pub_sha256 != ek_public_key_spki_sha256:
+    if expected_ek_pub_sha256 and expected_ek_pub_sha256 != ek_public_key_identity_sha256:
         raise ValueError("Restored EK public key does not match the pending TPM challenge context")
 
     return {
@@ -442,7 +442,7 @@ def _verify_pending_challenge_response(
         "ek_cert": ek_cert,
         "ek_pub": ek_pub,
         "ek_cert_sha256": ek_cert_sha256,
-        "ek_public_key_spki_sha256": ek_public_key_spki_sha256,
+        "ek_public_key_identity_sha256": ek_public_key_identity_sha256,
         "aik_name_b64": pending_challenge.get("aik_name_b64"),
         "id_binding_creation_attest_type": pending_challenge.get("id_binding_creation_attest_type"),
         "id_binding_creation_name_b64": pending_challenge.get("id_binding_creation_name_b64"),

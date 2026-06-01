@@ -372,7 +372,7 @@ imply trust** in the TPM.
 The following data is then passed to the callback:
 
 -   `ek_cert`
--   `ek_public_key_spki_sha256`
+-   `ek_public_key_identity_sha256`
 
 Callback decision
 --------------------
@@ -400,7 +400,7 @@ is_directly_issued_by_cert_in_folder(
 **Validate known device (EKPub fingerprint)**
 
 ``` python
-tpm_result['ek_public_key_spki_sha256']
+tpm_result['ek_public_key_identity_sha256']
 ```
 
 This value can be matched against an internal inventory, or whitelist.

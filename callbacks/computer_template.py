@@ -296,7 +296,7 @@ def emit_certificate(
 
     #https://go.microsoft.com/fwlink/?linkid=2097925
     #print(is_directly_issued_by_cert_in_folder(tpm_result['ek_cert'], "/etc/adcs/TrustedTpm"))
-    #print(tpm_result['ek_public_key_spki_sha256'])
+    #print(tpm_result['ek_public_key_identity_sha256'])
 
     # if ssl auth
     XSslClientSha1 = request.headers.get('X-Ssl-Client-Sha1', None)
