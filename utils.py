@@ -215,6 +215,25 @@ class _MsCertTemplateInfo(a_core.Sequence):
         ("minorVersion", a_core.Integer, {"optional": True}),
     ]
 
+
+def _cert_has_template_oid(cert, oid: str) -> bool:
+    try:
+        ext_value = cert.extensions.get_extension_for_oid(
+            CObjectIdentifier(OID_MS_CERT_TEMPLATE_INFO)
+        ).value
+
+        template_id = getattr(ext_value, "template_id", None)
+        if template_id is not None:
+            return getattr(template_id, "dotted_string", str(template_id)) == oid
+
+        raw = getattr(ext_value, "value", None)
+        if raw is None:
+            return False
+
+        return a_core.Sequence.load(bytes(raw))[0].native == oid
+    except Exception:
+        return False
+
 # -----------------------------------------------------------------------------
 # Small ASN.1 helpers
 # -----------------------------------------------------------------------------

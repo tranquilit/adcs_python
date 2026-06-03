@@ -1,7 +1,7 @@
 from typing import Iterable, Optional, Dict, Any
 from cryptography import x509 as cx509
 from cryptography.hazmat.primitives import serialization as crypto_serialization
-from utils import search_user, is_directly_issued_by_cert_in_folder
+from utils import search_user, is_directly_issued_by_cert_in_folder, _cert_has_template_oid
 from utils_crt import is_certificate_revoked_by_crl
 import requests
 import json
@@ -218,12 +218,17 @@ def emit_certificate(
         username = username
     else:
         client_cert = cx509.load_pem_x509_certificate(unquote(XSslClientCert).encode("utf-8"))
-        if not is_directly_issued_by_cert_in_folder(client_cert, ca['signing_cert_pem'])[0]:
+        if not is_directly_issued_by_cert_in_folder(client_cert, ca['pem']['certificate_path_pem'])[0]:
             return {
                 "status": "denied",
                 "status_text": "denied",
             }
         if is_certificate_revoked_by_crl(client_cert, ca.get("crl", {}).get("path_crl")):
+            return {
+                "status": "denied",
+                "status_text": "denied",
+            }
+        if not _cert_has_template_oid(client_cert, template_oid):
             return {
                 "status": "denied",
                 "status_text": "denied",

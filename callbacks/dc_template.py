@@ -59,6 +59,9 @@ def define_template(*, app_conf, username=None, request=None, params=None):
     validity_seconds = 31536000       # 1 year
     renewal_seconds  = 3628800        # 42 days
 
+    if request is not None and request.headers.get('X-Ssl-Client-Sha1'):
+        return
+
     username = username
 
     if not username:
@@ -230,16 +233,22 @@ def emit_certificate(
     **kwargs
 ) -> Dict[str, Any]:
 
+    if request is not None and request.headers.get('X-Ssl-Client-Sha1'):
+        return {
+            "status": "denied",
+            "status_text": "denied",
+        }
+
     csr = cx509.load_der_x509_csr(csr_der)
     validate_csr(csr)
 
     r = search_user(username,"(userAccountControl:1.2.840.113556.1.4.803:=8192)")
-    samdbr, sam_entry = r
     if not r:
         return {
             "status": "denied",
             "status_text": "denied",
         }
+    samdbr, sam_entry = r
 
 
     csr = cx509.load_der_x509_csr(csr_der)

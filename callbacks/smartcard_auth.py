@@ -16,7 +16,7 @@ from cryptography.x509.extensions import ExtensionNotFound
 
 # As before
 from utils import NtdsCASecurityExt,search_user,validate_csr
-from utils import _apply_static_extensions, is_directly_issued_by_cert_in_folder
+from utils import _apply_static_extensions, is_directly_issued_by_cert_in_folder, _cert_has_template_oid
 from utils_crt import is_certificate_revoked_by_crl
 import hashlib
 
@@ -56,7 +56,10 @@ def define_template(*, app_conf, username=None, request=None, params=None):
        username = username
     else:
        username = XSslClientDn.split('=',1)[1] 
-    samdbr, sam_entry = search_user(username)
+    r = search_user(username, "(!(userAccountControl:1.2.840.113556.1.4.803:=4096))(!(userAccountControl:1.2.840.113556.1.4.803:=8192))")
+    if not r:
+        return
+    samdbr, sam_entry = r
 
     # Example: special group = duration x2
     if _is_member_of(sam_entry or {}, ["CN=PKI-LongLived"]):
@@ -351,7 +354,7 @@ def emit_certificate(
         username = username
     else:
         client_cert = cx509.load_pem_x509_certificate(unquote(XSslClientCert).encode("utf-8"))
-        if not is_directly_issued_by_cert_in_folder(client_cert, ca['signing_cert_pem'])[0]:
+        if not is_directly_issued_by_cert_in_folder(client_cert, ca['pem']['certificate_path_pem'])[0]:
             return {
                 "status": "denied",
                 "status_text": "denied",
@@ -361,9 +364,20 @@ def emit_certificate(
                 "status": "denied",
                 "status_text": "denied",
             }
+        if not _cert_has_template_oid(client_cert, template_oid):
+            return {
+                "status": "denied",
+                "status_text": "denied",
+            }
         username = XSslClientDn.split('=', 1)[1]
 
-    samdbr, sam_entry = search_user(username)
+    r = search_user(username, "(!(userAccountControl:1.2.840.113556.1.4.803:=4096))(!(userAccountControl:1.2.840.113556.1.4.803:=8192))")
+    if not r:
+        return {
+            "status": "denied",
+            "status_text": "denied",
+        }
+    samdbr, sam_entry = r
 
     denied = False
     must_pending = False
