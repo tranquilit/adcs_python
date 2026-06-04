@@ -1157,7 +1157,7 @@ def build_adcs_bst_pkiresponse_issued(
                 ),
                 "digest_algorithm": a_cms.DigestAlgorithm({"algorithm": "sha256"}),
                 "signed_attrs": signed_attrs,
-                "signature_algorithm": _signature_algo_for_ca_key(ca_key),
+                "signature_algorithm": _signature_algo_for_ca_key(ca_key) if ca_key else a_cms.SignedDigestAlgorithm({"algorithm": "sha256_rsa"}),
                 "signature": _sign_tbs_with_ca_key(ca_key, to_be_signed),
             }
         )]
