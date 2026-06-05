@@ -409,6 +409,8 @@ The server validates the TPM attestation proof, while the callback
 enforces the **trust policy** (manufacturer, device, business rules).
 
 
+![Demo Gif](demo/tpm_attestation_flow.png "TPM attestation Flow")
+
 
 Desired enhancements for the project.
 ==========================================
