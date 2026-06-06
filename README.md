@@ -53,6 +53,8 @@ In practice:
 
 👉 **In short: the security and enforcement of issuance rules are entirely the responsibility of the callback code.**
 
+![Simple Flow](demo/simple_flow.png "Simple Flow")
+
 
 
 ADCS Python Installation
@@ -409,7 +411,7 @@ The server validates the TPM attestation proof, while the callback
 enforces the **trust policy** (manufacturer, device, business rules).
 
 
-![Demo Gif](demo/tpm_attestation_flow.png "TPM attestation Flow")
+![TPM Attestation Flow](demo/tpm_attestation_flow.png "TPM attestation Flow")
 
 
 Desired enhancements for the project.
