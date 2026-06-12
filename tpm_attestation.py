@@ -1612,12 +1612,10 @@ def build_and_sign_microsoft_attestation_challenge(
     signer_key_obj=None,
     signer_chain_pems=None,
     secret: bytes | None = None,
-    openssl_bin: str = "openssl",
     aik_name: bytes | None = None,
     aik_pub_raw: bytes | None = None,
     attestation_blob_raw: bytes | None = None,
 ) -> dict:
-    del openssl_bin
     if secret is None:
         secret = os.urandom(32)
     ek_name_alg = infer_ek_name_alg_from_public_key(ek_pub)
