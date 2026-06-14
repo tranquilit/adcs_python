@@ -1702,11 +1702,11 @@ def build_get_policies_response(
     policies = ET.SubElement(response, ET.QName(NS_EP['ep'], 'policies'))
 
     # --- templates -> policies/policy ---
-    dict_ca_allowed = {}
+    ca_allowed_refids = set()
     for t in templates:
         if t['permissions']['enroll']:
-            for c in t['ca_references']:
-                dict_ca_allowed[c] = None
+            for refid in t.get("__ca_refids") or []:
+                ca_allowed_refids.add(refid)
         policy = ET.SubElement(policies, ET.QName(NS_EP['ep'], 'policy'))
         text(ET.SubElement(policy, ET.QName(NS_EP['ep'], 'policyOIDReference')), t["__policy_oid_reference"])
 
@@ -1936,7 +1936,7 @@ def build_get_policies_response(
             priority += 1
 
         text(ET.SubElement(ca_el, ET.QName(NS_EP['ep'], 'certificate')), ca["__certificate_b64"])
-        text(ET.SubElement(ca_el, ET.QName(NS_EP['ep'], 'enrollPermission')), tbool(bool(ca['id'] in dict_ca_allowed)))
+        text(ET.SubElement(ca_el, ET.QName(NS_EP['ep'], 'enrollPermission')), tbool(ca['__refid'] in ca_allowed_refids))
         text(ET.SubElement(ca_el, ET.QName(NS_EP['ep'], 'cAReferenceID')), ca["__refid"])
 
 
@@ -2402,4 +2402,3 @@ def _sign_tbs_with_ca_key(priv, tbs_der: bytes) -> bytes:
         return priv.sign(tbs_der)
 
     raise ValueError(f"Unsupported CA private key type: {type(priv).__name__}")
-
