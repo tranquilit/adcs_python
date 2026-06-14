@@ -1416,7 +1416,7 @@ def build_ws_trust_response(
 
 BAD_LDAP_CHARS_RE = re.compile(r'[\x00()*\\]')
 
-def search_user(userauth: str,ldap_filter='',dc_fqdn=None,basedn=None,password=None):
+def search_user(userauth: str,ldap_filter='',dc_fqdn=None,basedn=None,password=None,bind_user=None):
     """
     Resolve the SAM/LDAP entry for the Kerberos user 'user@REALM'.
     Returns (SamDB, entry) if found.
@@ -1432,11 +1432,19 @@ def search_user(userauth: str,ldap_filter='',dc_fqdn=None,basedn=None,password=N
 
     creds = Credentials()
     creds.guess(lp)
-    if not password:
+    if bind_user:
+        if not password:
+            raise ValueError("password is required when bind_user is set")
+        bind_username = bind_user.split("@", 1)[0].strip()
+        if BAD_LDAP_CHARS_RE.search(bind_username):
+            raise ValueError("invalid bind username")
+        creds.set_username(bind_username)
+        creds.set_password(password)
+    elif not password:
         creds.set_kerberos_state(True)
         creds.set_machine_account(lp)
     else:
-        creds.set_username(userauth.split('@')[0])
+        creds.set_username(username)
         creds.set_password(password)
 
     realm = lp.get("realm")
@@ -1455,7 +1463,7 @@ def search_user(userauth: str,ldap_filter='',dc_fqdn=None,basedn=None,password=N
         else:
             basedn = samdbr.get_default_basedn()
         
-    ldap_filter = "(&(samAccountName=%s)%s)" % (userauth.split("@")[0],ldap_filter)
+    ldap_filter = "(&(samAccountName=%s)%s)" % (username,ldap_filter)
 
     res = samdbr.search(
         base=basedn,
