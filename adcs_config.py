@@ -585,8 +585,12 @@ def build_templates_for_policy_response(
         # Resolve CAs into __ca_refids (read-only in conf)
         resolved = []
         raw = tpl.get("ca_references") or []
-        if isinstance(raw, (str, int)):
-            raw = [raw]
+
+        if not isinstance(raw, list):
+            raise TypeError(
+                f"Template '{tpl.get('common_name','?')}' ca_references must be a list"
+            )
+
         for item in raw:
             cand = None
             if isinstance(item, int):
