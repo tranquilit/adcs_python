@@ -509,7 +509,7 @@ def _call_callback_with_params(func, *, params=None, **kwargs):
 def build_templates_for_policy_response(
     conf: dict,
     *,
-    username = None,
+    username=None,
     request,
     **kwargs
 ) -> Tuple[list[dict], list[dict]]:
@@ -525,7 +525,7 @@ def build_templates_for_policy_response(
     oids_list: list[dict] = []
     next_oid_refid = 1
 
-    def register_oid(value: str, group: int = 6, default_name = None) -> int:
+    def register_oid(value: str, group: int = 6, default_name=None) -> int:
         nonlocal next_oid_refid
         if not value:
             raise ValueError("register_oid: empty value")
@@ -546,13 +546,21 @@ def build_templates_for_policy_response(
 
     templates_list: list[dict] = []
 
+    # Prevent silent template routing collisions.
+    # Same OID or same common_name must never map to two different callbacks.
+    seen_template_oids: dict[str, str] = {}
+    seen_template_names: dict[str, str] = {}
+
     # Build each template via its "define" callback
     for cb in conf.get("__template_decls__") or []:
 
         if cb["path"].startswith('/'):
             cb_path = cb["path"]
         else:
-            cb_path = os.path.join(os.path.dirname(os.path.realpath(__file__)),cb["path"])
+            cb_path = os.path.join(
+                os.path.dirname(os.path.realpath(__file__)),
+                cb["path"]
+            )
 
         define_template = load_func(cb_path, cb["define"])
         tpl = _call_callback_with_params(
@@ -594,6 +602,28 @@ def build_templates_for_policy_response(
         t_oid = (tpl.get("template_oid") or {}).get("value")
         if not t_oid:
             raise ValueError("define_template must set template_oid.value")
+
+        t_name = tpl.get("common_name")
+        if not t_name:
+            raise ValueError("define_template must set common_name")
+
+        src = f"{cb['path']}:{cb['define']}"
+
+        if t_oid in seen_template_oids:
+            raise ValueError(
+                f"Duplicate template OID {t_oid}: "
+                f"{seen_template_oids[t_oid]} and {src}"
+            )
+
+        if t_name in seen_template_names:
+            raise ValueError(
+                f"Duplicate template name {t_name}: "
+                f"{seen_template_names[t_name]} and {src}"
+            )
+
+        seen_template_oids[t_oid] = src
+        seen_template_names[t_name] = src
+
         policy_refid = register_oid(
             t_oid, group=9, default_name=(tpl.get("template_oid") or {}).get("name")
         )
@@ -615,4 +645,3 @@ def build_templates_for_policy_response(
         templates_list.append(tpl)
 
     return templates_list, oids_list
-
