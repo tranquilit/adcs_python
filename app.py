@@ -283,13 +283,20 @@ def ces_service(CAID):
         tpl = tmap_name.get(info.get('name'))
     if not tpl :
         return Response("The requested template is not valid", 403)
-    if not CAID in tpl['ca_references']:
-        return Response('%s not in ca_references for template %s' % (CAID, tpl['template_oid']['value']) , 403)
     if not tpl['permissions']['enroll']:
-        return Response("You do not have permission to enroll on this template", 403)        
-    dict_id_ca = {u['id'] : u for u in app.confadcs['cas_list']}
+        return Response("You do not have permission to enroll on this template", 403)
 
-    ca = dict_id_ca[CAID]
+    dict_id_ca = {u['id']: u for u in app.confadcs['cas_list']}
+    ca = dict_id_ca.get(CAID)
+    if not ca:
+        return Response("CAID not found", 403)
+
+    if ca.get("__refid") not in set(tpl.get("__ca_refids") or []):
+        return Response(
+            '%s not in ca_references for template %s' %
+            (CAID, tpl['template_oid']['value']),
+            403,
+        )
 
     cb = (tpl.get("__callback") if tpl else (app.confadcs.get("__default_callback"))) or {}
     cb_path = cb.get("path")
