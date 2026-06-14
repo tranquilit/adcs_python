@@ -279,7 +279,7 @@ def _cmd_submit_csr_cli(
             print("ERROR: The requested template is not valid", file=sys.stderr)
             return 1
 
-        if ca['id'] not in (tpl.get('ca_references') or []):
+        if ca.get('__refid') not in set(tpl.get('__ca_refids') or []):
             print(
                 f"ERROR: {ca['id']} not in ca_references for template "
                 f"{(tpl.get('template_oid') or {}).get('value')}",
