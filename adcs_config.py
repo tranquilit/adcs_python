@@ -397,8 +397,25 @@ def load_yaml_conf(path="adcs.yaml"):
     conf["cas_by_display_name"] = {}
     default_ca = None
     next_ca_refid = 0
+    seen_ca_ids = set()
+    seen_ca_display_names = set()
 
     for ca in cfg.get("cas", []) or []:
+        ca_id = ca.get("id")
+        if not ca_id:
+            raise ValueError("Each CA must define a unique id")
+
+        if ca_id in seen_ca_ids:
+            raise ValueError(f"Duplicate CA id '{ca_id}'")
+
+        seen_ca_ids.add(ca_id)
+
+        display_name = ca.get("display_name")
+        if display_name:
+            if display_name in seen_ca_display_names:
+                raise ValueError(f"Duplicate CA display_name '{display_name}'")
+            seen_ca_display_names.add(display_name)
+
         pem = ca.get("pem", {}) or {}
         if "certificate_inline_pem" in pem:
             raise ValueError("Inline PEM not allowed. Use pem.certificate_path_pem.")
