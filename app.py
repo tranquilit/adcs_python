@@ -42,6 +42,32 @@ def _https_base_url():
     return host_url.replace("http://", "https://")
 
 
+def _ca_allows_auth_method(ca: dict, auth_method: str) -> bool:
+    method_map = {
+        "kerberos": "kerberos",
+        "username_password": "username_password",
+        "tls": "x509",
+    }
+
+    requested_method = method_map.get(auth_method)
+    if not requested_method:
+        return False
+
+    auth_entries = ca.get("auth_methods")
+
+    # Backward-compatible: if no CA-specific policy is defined,
+    # keep the existing behavior.
+    if not auth_entries:
+        return True
+
+    for entry in auth_entries:
+        method = (entry.get("method") or "").strip().lower()
+        if method == requested_method:
+            return True
+
+    return False
+
+
 # ---------------- Endpoints ----------------
 
 @app.route('/CEP', methods=['POST', 'GET'])
@@ -168,6 +194,13 @@ def ces_service(CAID):
     ca_match = [u for u in app.confadcs['cas_list'] if u['id'] == CAID]
     if not ca_match:
         return Response("CAID not found", 403)
+
+    if not _ca_allows_auth_method(ca_match[0], getattr(g, "auth_method", None)):
+        return Response(
+            "Authentication method %s is not allowed for CA %s" %
+            (getattr(g, "auth_method", None), CAID),
+            403,
+        )
 
     if root.find(".//wst:RequestKET", namespaces) is not None:
         response_xml = build_ket_response(
@@ -457,11 +490,3 @@ if __name__ == "__main__":
     print("Loaded config with", len(decls), "template declaration(s).")
     #app.run(host='127.0.0.1', port=8080)
     serve(app, host="127.0.0.1", port=8080)
-
-
-
-
-
-
-
-
