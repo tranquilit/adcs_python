@@ -55,10 +55,12 @@ def _ca_allows_auth_method(ca: dict, auth_method: str) -> bool:
 
     auth_entries = ca.get("auth_methods")
 
-    # Backward-compatible: if no CA-specific policy is defined,
-    # keep the existing behavior.
+    # Keep CES aligned with CEP default: when no CA-specific policy is defined,
+    # DEFAULT_AUTH_METHODS is Kerberos-only.
     if not auth_entries:
-        return True
+        auth_entries = [
+            {"method": "kerberos", "renewal_only": False},
+        ]
 
     for entry in auth_entries:
         method = (entry.get("method") or "").strip().lower()
