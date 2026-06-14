@@ -408,12 +408,23 @@ def load_yaml_conf(path="adcs.yaml"):
         if ca_id in seen_ca_ids:
             raise ValueError(f"Duplicate CA id '{ca_id}'")
 
-        seen_ca_ids.add(ca_id)
+        if ca_id in seen_ca_display_names:
+            raise ValueError(
+                f"CA id '{ca_id}' conflicts with another CA display_name"
+            )
 
         display_name = ca.get("display_name")
         if display_name:
             if display_name in seen_ca_display_names:
                 raise ValueError(f"Duplicate CA display_name '{display_name}'")
+
+            if display_name in seen_ca_ids:
+                raise ValueError(
+                    f"CA display_name '{display_name}' conflicts with another CA id"
+                )
+
+        seen_ca_ids.add(ca_id)
+        if display_name:
             seen_ca_display_names.add(display_name)
 
         pem = ca.get("pem", {}) or {}
