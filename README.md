@@ -74,6 +74,7 @@ Install dependencies
 apt-get update
 apt-get install -y \
        samba \
+       samba-dsdb-modules \
        msktutil \
        nginx \
        python3-textual \
@@ -85,6 +86,9 @@ apt-get install -y \
        python3-defusedxml \
        python3-pyasn1 \
        python3-waitress \
+       python3-yaml \
+       python3-samba \
+       python3-cryptography \
        python3-pkcs11
 ```
 
@@ -187,6 +191,11 @@ cp -f /opt/adcs_python/nginx-conf.conf.template /etc/nginx/sites-available/defau
 openssl dhparam -out /etc/ssl/certs/dhparam.pem 4096
 ```
 
+Change the `ssl_client_certificate` and the `ssl_crl` :
+```
+vi /etc/nginx/sites-available/default
+```
+
 Restart Nginx: 
 
 ```
@@ -233,7 +242,7 @@ default_tgs_enctypes = aes256-cts-hmac-sha1-96 aes128-cts-hmac-sha1-96
 Join : 
 ```
 kinit <user>@MYDOMAIN.LAN
-net ads join
+net ads join --use-kerberos=required
 ```
 
 Manage SPN 
