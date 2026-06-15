@@ -38,12 +38,12 @@ app = Flask(__name__)
 
 def init_app(confadcs="/etc/adcs/adcs.yaml"):
     """
-    Initialise l'application Flask.
+    Initialize the Flask application.
 
-    Utilisé par :
-      - python3 app.py                  -> lancement direct avec Waitress par défaut
-      - Gunicorn via wsgi.py             -> application = init_app(...)
-      - uWSGI via wsgi.py                -> application = init_app(...)
+    Used by:
+      - python3 app.py          -> direct launch with Waitress by default
+      - Gunicorn via wsgi.py    -> application = init_app(...)
+      - uWSGI via wsgi.py       -> application = init_app(...)
     """
     app.confadcs = load_yaml_conf(confadcs)
     os.makedirs(app.confadcs['path_list_request_id'], exist_ok=True)
@@ -121,23 +121,23 @@ def cep_service():
             message_id_elem = root.find('.//a:MessageID', namespaces)
             uuid_request = message_id_elem.text.replace("urn:uuid:", "") if message_id_elem is not None else ''
         except Exception:
-            # Continue: CEP can generate a response without correlation if parsing fails
+            # Continue: CEP can generate a response without correlation if parsing fails.
             uuid_request = ''
 
     uuid_random = str(uuid.uuid4())
     relates_to = uuid_request or uuid_random
 
-    # User resolution for CEP, same as for CES
+    # User resolution for CEP, same as for CES.
     username = g.username
 
-    # Build templates + OIDs for THIS CEP response, user-dependent
+    # Build templates + OIDs for THIS CEP response, user-dependent.
     templates_for_user, oids_for_user = build_templates_for_policy_response(
         app.confadcs,
         username=username,
         request=request
     )
 
-    # Keep an in-memory index, optional, no longer required by CES
+    # Keep an in-memory index, optional, no longer required by CES.
     app.confadcs['templates_by_template_oid_value'] = {
         (t.get("template_oid") or {}).get("value"): t for t in templates_for_user
     }
@@ -204,7 +204,7 @@ def ces_service(CAID):
     except Exception:
         return Response("Invalid encoding", status=400, content_type="text/plain; charset=utf-8")
 
-    # --- Get request UUID, optional
+    # Get request UUID, optional.
     try:
         root = ET.fromstring(rst_xml)
     except Exception:
@@ -308,7 +308,7 @@ def ces_service(CAID):
 
     username = g.username
 
-    # --- IMPORTANT: rebuild templates FOR THIS CES request
+    # Rebuild templates for this CES request.
     templates_for_user, _ = build_templates_for_policy_response(
         app.confadcs,
         username=username,
@@ -380,7 +380,7 @@ def ces_service(CAID):
         )
 
     if tpm_result.get("status") == "pending":
-        status_text = "En attente de traitement"
+        status_text = "Waiting for processing"
 
         xml_body, http_code = build_ws_trust_response(
             pkcs7_der=tpm_result["challenge_pkcs7_der"],
@@ -389,7 +389,7 @@ def ces_service(CAID):
             ces_uri=ces_uri,
             status="pending",
             disposition_message=status_text,
-            lang="fr-FR",
+            lang="en-US",
         )
 
         response = Response(
@@ -474,7 +474,7 @@ def ces_service(CAID):
             reason_text=status_text if status == "denied" else None,
             error_code=result.get("error_code", -2146877420),
             invalid_request=True,
-            lang="fr-FR",
+            lang="en-US",
         )
 
         return Response(
