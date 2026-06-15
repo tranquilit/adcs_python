@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 
 from flask import Flask, request, Response, g
-from waitress import serve
 import os
 import argparse
 import uuid
@@ -36,8 +35,26 @@ MAX_SOAP_BYTES = 2 * 1024 * 1024  # 2 MiB: hard limit to avoid OOM
 
 app = Flask(__name__)
 
-def _https_base_url():
 
+def init_app(confadcs="/etc/adcs/adcs.yaml"):
+    """
+    Initialise l'application Flask.
+
+    Utilisé par :
+      - python3 app.py                  -> lancement direct avec Waitress par défaut
+      - Gunicorn via wsgi.py             -> application = init_app(...)
+      - uWSGI via wsgi.py                -> application = init_app(...)
+    """
+    app.confadcs = load_yaml_conf(confadcs)
+    os.makedirs(app.confadcs['path_list_request_id'], exist_ok=True)
+
+    decls = app.confadcs.get("__template_decls__") or []
+    print("Loaded config with", len(decls), "template declaration(s).")
+
+    return app
+
+
+def _https_base_url():
     host_url = request.host_url.rsplit('/', 1)[0]
     return host_url.replace("http://", "https://")
 
@@ -80,16 +97,20 @@ def _ca_allows_auth_method(ca: dict, auth_method: str) -> bool:
 def cep_service():
     host_url = request.host_url.rsplit('/', 1)[0]
     raw = request.data or b""
+
     if len(raw) > MAX_SOAP_BYTES:
         return Response("Request too large", status=413, content_type="text/plain; charset=utf-8")
+
     try:
         xml_data = raw.decode('utf-8', errors='replace')
     except Exception:
         return Response("Invalid encoding", status=400, content_type="text/plain; charset=utf-8")
+
     print(f"[CEP] Request from {g.username} (len={len(raw)} bytes)")
 
     rst_xml = xml_data
     uuid_request = ''
+
     if rst_xml:
         try:
             root = ET.fromstring(rst_xml)
@@ -106,17 +127,17 @@ def cep_service():
     uuid_random = str(uuid.uuid4())
     relates_to = uuid_request or uuid_random
 
-    # User resolution for CEP (same as for CES)
+    # User resolution for CEP, same as for CES
     username = g.username
 
-    # Build templates + OIDs for THIS CEP response (user-dependent)
+    # Build templates + OIDs for THIS CEP response, user-dependent
     templates_for_user, oids_for_user = build_templates_for_policy_response(
         app.confadcs,
         username=username,
         request=request
     )
 
-    # Keep an in-memory index (optional, no longer required by CES)
+    # Keep an in-memory index, optional, no longer required by CES
     app.confadcs['templates_by_template_oid_value'] = {
         (t.get("template_oid") or {}).get("value"): t for t in templates_for_user
     }
@@ -124,15 +145,17 @@ def cep_service():
     response_xml = build_get_policies_response(
         uuid_request=relates_to,
         uuid_random=uuid_random,
-        hosturl= host_url.replace('http://', 'https://') + ':' + request.headers.get('X-Forwarded-Port','443') ,
+        hosturl=host_url.replace('http://', 'https://') + ':' + request.headers.get('X-Forwarded-Port', '443'),
         policyid=app.confadcs['policyid'],
         policyfriendlyname=app.confadcs['policyfriendlyname'],
         next_update_hours=app.confadcs['next_update_hours'],
         cas=app.confadcs['cas_list'],
-        templates=templates_for_user,   # static extensions already materialized
-        oids=oids_for_user,             # OIDs registry for policyOIDReference / oIDReference
+        templates=templates_for_user,
+        oids=oids_for_user,
     )
+
     return Response(response_xml, content_type='application/soap+xml')
+
 
 CHALLENGE_RESPONSE = "http://schemas.microsoft.com/windows/pki/2009/01/enrollment#CHALLENGERESPONSE"
 
@@ -149,6 +172,7 @@ def extract_challenge_response_and_request_id(xml_data: str):
 
     challenge_response = ""
     token = root.find(".//wsse:BinarySecurityToken", ns)
+
     if token is not None and token.get("ValueType") == CHALLENGE_RESPONSE:
         challenge_response = "".join((token.text or "").split())
 
@@ -159,27 +183,28 @@ def extract_challenge_response_and_request_id(xml_data: str):
 
     if request_id:
         request_id = int(request_id)
-    
+
     return {
         "is_challenge_response": challenge_response != "",
-        "challenge_response": challenge_response.replace('&#xD;','').replace('\n',''),
+        "challenge_response": challenge_response.replace('&#xD;', '').replace('\n', ''),
         "request_id": request_id,
     }
-
 
 
 @app.route('/CES/<CAID>', methods=['POST'])
 @auth_required
 def ces_service(CAID):
     raw = request.data or b""
+
     if len(raw) > MAX_SOAP_BYTES:
         return Response("Request too large", status=413, content_type="text/plain; charset=utf-8")
+
     try:
         rst_xml = raw.decode('utf-8', errors='replace')
     except Exception:
         return Response("Invalid encoding", status=400, content_type="text/plain; charset=utf-8")
 
-    # --- Get request UUID (optional)
+    # --- Get request UUID, optional
     try:
         root = ET.fromstring(rst_xml)
     except Exception:
@@ -190,6 +215,7 @@ def ces_service(CAID):
         'a': 'http://www.w3.org/2005/08/addressing',
         "wst": "http://docs.oasis-open.org/ws-sx/ws-trust/200512"
     }
+
     message_id_elem = root.find('.//a:MessageID', namespaces)
     uuid_request = message_id_elem.text.replace("urn:uuid:", "")
 
@@ -210,13 +236,16 @@ def ces_service(CAID):
             uuid_random=str(uuid.uuid4()),
             ket_cert_der=ca_match[0]['__ket_certificate_b64']
         )
-    
+
         return Response(response_xml, content_type='application/soap+xml')
- 
 
     challenge = extract_challenge_response_and_request_id(rst_xml)
 
-    req_id_elem = root.find(".//enr:RequestID", {"enr": "http://schemas.microsoft.com/windows/pki/2009/01/enrollment"})
+    req_id_elem = root.find(
+        ".//enr:RequestID",
+        {"enr": "http://schemas.microsoft.com/windows/pki/2009/01/enrollment"}
+    )
+
     enr_request_id = None
     if req_id_elem is not None and (req_id_elem.text or "").strip():
         enr_request_id = int(req_id_elem.text.strip())
@@ -228,6 +257,7 @@ def ces_service(CAID):
                 content_type="text/plain; charset=utf-8",
                 status=400,
             )
+
         if enr_request_id is not None and enr_request_id != challenge['request_id']:
             return Response(
                 "Mismatched RequestID between enr:RequestID and challenge-response ContextItem",
@@ -237,28 +267,39 @@ def ces_service(CAID):
 
     if enr_request_id is not None:
         request_id = enr_request_id
-        if not os.path.isfile(os.path.join(app.confadcs['path_list_request_id'],str(request_id))):
-            app.logger.error("File not found: %s", os.path.join(app.confadcs['path_list_request_id'],str(request_id)))
+        p7_path = os.path.join(app.confadcs['path_list_request_id'], str(request_id))
+
+        if not os.path.isfile(p7_path):
+            app.logger.error("File not found: %s", p7_path)
             return Response(
                 'File %s not foud in path_list_request_id' % str(request_id),
                 content_type="application/soap+xml; charset=utf-8",
                 status=500
             )
-        with open (os.path.join(app.confadcs['path_list_request_id'],str(request_id)) ,'rb') as f:
+
+        with open(p7_path, 'rb') as f:
             p7_der = f.read()
-    elif challenge['is_challenge_response'] :
+
+    elif challenge['is_challenge_response']:
         request_id = challenge['request_id']
-        if not os.path.isfile(os.path.join(app.confadcs['path_list_request_id'],str(request_id))):
-            app.logger.error("File not found: %s", os.path.join(app.confadcs['path_list_request_id'],str(request_id)))
+        p7_path = os.path.join(app.confadcs['path_list_request_id'], str(request_id))
+
+        if not os.path.isfile(p7_path):
+            app.logger.error("File not found: %s", p7_path)
             return Response(
                 'File %s not foud in path_list_request_id' % str(request_id),
                 content_type="application/soap+xml; charset=utf-8",
                 status=500
             )
-        with open (os.path.join(app.confadcs['path_list_request_id'],str(request_id)) ,'rb') as f:
+
+        with open(p7_path, 'rb') as f:
             p7_der = f.read()
+
     else:
-        ns_wsse = {'wsse': "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"}
+        ns_wsse = {
+            'wsse': "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"
+        }
+
         bst_node = root.find('.//wsse:BinarySecurityToken', ns_wsse)
         p7_der = base64.b64decode(bst_node.text)
         request_id = uuid.uuid4().int
@@ -267,27 +308,35 @@ def ces_service(CAID):
 
     username = g.username
 
-    # --- IMPORTANT: (re)build templates FOR THIS CES request
+    # --- IMPORTANT: rebuild templates FOR THIS CES request
     templates_for_user, _ = build_templates_for_policy_response(
         app.confadcs,
         username=username,
         request=request
     )
 
-    tmap = { (t.get("template_oid") or {}).get("value"): t for t in templates_for_user }
-    tmap_name = { t.get("common_name") : t for t in templates_for_user }
+    tmap = {
+        (t.get("template_oid") or {}).get("value"): t for t in templates_for_user
+    }
+
+    tmap_name = {
+        t.get("common_name"): t for t in templates_for_user
+    }
 
     if info.get('oid'):
         tpl = tmap.get(info.get('oid'))
     else:
         tpl = tmap_name.get(info.get('name'))
-    if not tpl :
+
+    if not tpl:
         return Response("The requested template is not valid", 403)
+
     if not tpl['permissions']['enroll']:
         return Response("You do not have permission to enroll on this template", 403)
 
     dict_id_ca = {u['id']: u for u in app.confadcs['cas_list']}
     ca = dict_id_ca.get(CAID)
+
     if not ca:
         return Response("CAID not found", 403)
 
@@ -305,7 +354,7 @@ def ces_service(CAID):
     emit_certificate = load_func(cb_path, cb_issue)
 
     ces_uri = f"{_https_base_url()}/CES/{CAID}"
-    result_tpm = {}
+
     if challenge['is_challenge_response']:
         tpm_result = verify_tpm_for_template(
             csr_der=csr_der,
@@ -329,9 +378,10 @@ def ces_service(CAID):
             pending_dir=app.confadcs["tpm_pending_dir"],
             pending_challenge_max_age_seconds=app.confadcs["tpm_pending_challenge_max_age_seconds"],
         )
-    
+
     if tpm_result.get("status") == "pending":
         status_text = "En attente de traitement"
+
         xml_body, http_code = build_ws_trust_response(
             pkcs7_der=tpm_result["challenge_pkcs7_der"],
             relates_to=f"urn:uuid:{uuid_request}",
@@ -341,14 +391,14 @@ def ces_service(CAID):
             disposition_message=status_text,
             lang="fr-FR",
         )
+
         response = Response(
             xml_body.decode("utf-8"),
             content_type="application/soap+xml; charset=utf-8",
             status=http_code
         )
-        
 
-        with open (os.path.join(app.confadcs['path_list_request_id'],str(request_id)) ,'wb') as f:
+        with open(os.path.join(app.confadcs['path_list_request_id'], str(request_id)), 'wb') as f:
             f.write(p7_der)
 
         return response
@@ -371,8 +421,10 @@ def ces_service(CAID):
     )
 
     csr_path = os.path.join(ca['__path_csr'], f"{request_id}.pem")
-    if not os.path.isfile(csr_path) :
+
+    if not os.path.isfile(csr_path):
         os.makedirs(ca['__path_csr'], exist_ok=True)
+
         pem_csr = (
             "-----BEGIN CERTIFICATE REQUEST-----\n" +
             "\n".join(textwrap.wrap(format_b64_for_soap(csr_der), 64)) +
@@ -384,7 +436,6 @@ def ces_service(CAID):
 
     status = str(result["status"]).lower()
 
-
     ces_uri = f"{_https_base_url()}/CES/{CAID}"
 
     pkcs7_der = result.get("pkcs7_der")
@@ -394,25 +445,24 @@ def ces_service(CAID):
         if os.path.exists(p7_path):
             os.remove(p7_path)
     else:
-        with open (os.path.join(app.confadcs['path_list_request_id'],str(request_id)) ,'wb') as f:
+        with open(os.path.join(app.confadcs['path_list_request_id'], str(request_id)), 'wb') as f:
             f.write(p7_der)
 
     if status in ("pending", "denied"):
-
-        status_text = (result.get("status_text") or
-                       ("Waiting for processing" if status == "pending" else "Denied"))
-
+        status_text = (
+            result.get("status_text") or
+            ("Waiting for processing" if status == "pending" else "Denied")
+        )
 
         if not pkcs7_der:
             pkcs7_der = build_adcs_bst_pkiresponse(
                 ca_der=ca["__certificate_der"],
                 ca_key=ca["__key_obj"],
                 request_id=request_id,
-                status=status,              # "pending" ou "denied"
+                status=status,
                 status_text=status_text,
                 body_part_id=body_part_id
             )
-
 
         xml_body, http_code = build_ws_trust_response(
             pkcs7_der=pkcs7_der,
@@ -435,18 +485,23 @@ def ces_service(CAID):
 
     elif status == "issued":
         cert_val = result.get("cert")
+
         if isinstance(cert_val, cx509.Certificate):
-            cert_obj = cert_val
             cert_der = cert_val.public_bytes(serialization.Encoding.DER)
+
         elif isinstance(cert_val, (bytes, bytearray, memoryview)):
             cert_der = bytes(cert_val)
-            cert_obj = cx509.load_der_x509_certificate(cert_der)
+            cx509.load_der_x509_certificate(cert_der)
+
         else:
-            return Response("Callback(issued) must return 'cert' (x509 or DER bytes)", status=500, content_type="text/plain; charset=utf-8")
+            return Response(
+                "Callback(issued) must return 'cert' (x509 or DER bytes)",
+                status=500,
+                content_type="text/plain; charset=utf-8"
+            )
 
-        ##https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wcce/2524682a-9587-4ac1-8adf-7e8094baa321
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wcce/2524682a-9587-4ac1-8adf-7e8094baa321
         if not pkcs7_der:
-
             pkcs7_der = build_adcs_bst_pkiresponse_issued(
                 cert_der,
                 ca["__certificate_der"],
@@ -457,8 +512,8 @@ def ces_service(CAID):
         b64_p7 = format_b64_for_soap(pkcs7_der)
         b64_leaf = format_b64_for_soap(cert_der)
 
-
         os.makedirs(ca['__path_cert'], exist_ok=True)
+
         with open(os.path.join(ca['__path_cert'], f"{request_id}.pem"), 'w') as f:
             f.write(
                 "-----BEGIN CERTIFICATE-----\n" +
@@ -473,10 +528,15 @@ def ces_service(CAID):
             leaf_der=b64_leaf,
             body_part_id=body_part_id,
         )
+
         return Response(response_xml, content_type='application/soap+xml')
 
     else:
-        return Response(f"Unknown callback status '{status}'", status=500, content_type="text/plain; charset=utf-8")
+        return Response(
+            f"Unknown callback status '{status}'",
+            status=500,
+            content_type="text/plain; charset=utf-8"
+        )
 
 
 # ---------------- Main ----------------
@@ -484,18 +544,55 @@ def ces_service(CAID):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
-    default_confadcs = "/etc/adcs/adcs.yaml"
-
     parser.add_argument(
         "--confadcs",
-        default=default_confadcs,
-        help="Path to the adcs.yaml file (default: adcs.yaml next to this script)"
+        default="/etc/adcs/adcs.yaml",
+        help="Path to the adcs.yaml file"
     )
+
+    parser.add_argument(
+        "--server",
+        choices=["waitress", "flask"],
+        default="waitress",
+        help="Server to use when launching app.py directly. Default: waitress"
+    )
+
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Host to bind. Default: 127.0.0.1"
+    )
+
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8080,
+        help="Port to bind. Default: 8080"
+    )
+
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=8,
+        help="Number of Waitress threads. Default: 8"
+    )
+
     args = parser.parse_args()
 
-    app.confadcs = load_yaml_conf(args.confadcs)    
-    os.makedirs(app.confadcs['path_list_request_id'], exist_ok=True)
-    decls = app.confadcs.get("__template_decls__") or []
-    print("Loaded config with", len(decls), "template declaration(s).")
-    #app.run(host='127.0.0.1', port=8080)
-    serve(app, host="127.0.0.1", port=8080)
+    init_app(args.confadcs)
+
+    if args.server == "waitress":
+        from waitress import serve
+
+        serve(
+            app,
+            host=args.host,
+            port=args.port,
+            threads=args.threads
+        )
+
+    else:
+        app.run(
+            host=args.host,
+            port=args.port
+        )
