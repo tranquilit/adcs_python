@@ -126,9 +126,9 @@ Create a local CA (for testing)
 By default, `./manageca.py --create-ca` generates an RSA CA:
 
 ```
-./manageca.py --create-ca --cn "CA Root Test" >> /etc/adcs/adcs.yaml
+./manageca.py --create-ca --cn "CA Root Test" --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
 ./manageca.py --create-ket-cert --ca-id "CA Root Test" >> /etc/adcs/adcs.yaml
-./manageca.py --create-ca --signer-ca-id "CA Root Test" --cn "CA Inter Test" >> /etc/adcs/adcs.yaml
+./manageca.py --create-ca --signer-ca-id "CA Root Test" --cn "CA Inter Test" --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
 ./manageca.py --create-ket-cert --ca-id "CA Inter Test" >> /etc/adcs/adcs.yaml
 ./manageca.py --issue-cert --signer-ca-id "CA Inter Test" --cn testadcs.mydomain.lan --san testadcs.mydomain.lan --crt-path /etc/nginx/crt.pem --key-path /etc/nginx/key.pem
 ```
@@ -136,7 +136,7 @@ By default, `./manageca.py --create-ca` generates an RSA CA:
 To generate an ECC CA instead, use `--key-type ec` and select the curve with `--ec-curve`:
 
 ```
-./manageca.py --create-ca --cn "CA Root ECC Test" --key-type ec --ec-curve secp384r1 >> /etc/adcs/adcs.yaml
+./manageca.py --create-ca --cn "CA Root ECC Test" --key-type ec --ec-curve secp384r1 --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
 ```
 
 Supported ECC curves are `secp256r1`, `secp384r1`, and `secp521r1`. Aliases such as `prime256v1`, `p-256`, `p-384`, and `p-521` are also accepted.
@@ -166,7 +166,8 @@ openssl req -new \
 ./manageca.py --create-ca \
   --signer-ca-id "CA Root Test" \
   --cn "CA Inter HSM Test" \
-  --csr-path subca.csr.pem >> /etc/adcs/adcs.yaml
+  --csr-path subca.csr.pem \
+  --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
 ```
 
 When `--csr-path` is used, `--signer-ca-id` is required because the CA certificate is signed by an existing parent CA.

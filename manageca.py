@@ -1764,6 +1764,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="Private key path (PEM). With --create-ca, path where the new CA key will be written.")
     p.add_argument("--crl-path", "--crl-path", dest="crl_path", type=str,
                    help="CRL path (PEM). With --create-ca, path where the initial CRL will be written.")
+    p.add_argument("--aia-crl-base-url", type=str,
+                   help="Public base URL used by --create-ca to write ca_issuers_http and crl_http in the generated adcs.yaml block, for example http://testadcs.mydomain.lan.")
     p.add_argument("--threshold-days", type=int, default=30,
                    help="Rotate when the certificate expires in ≤ this many days (default: 30).")
     p.add_argument("--no-write-fullchain-to-crt", action="store_true",
@@ -1790,6 +1792,12 @@ if __name__ == "__main__":
     if args.create_ca:
         if not args.cn:
             print("ERROR: --cn is required", file=sys.stderr)
+            sys.exit(1)
+        if not args.aia_crl_base_url:
+            print("ERROR: --aia-crl-base-url is required with --create-ca", file=sys.stderr)
+            sys.exit(1)
+        if args.aia_crl_base_url.lower().startswith("https://"):
+            print("ERROR: --aia-crl-base-url must not start with https://", file=sys.stderr)
             sys.exit(1)
 
         cnstrip = args.cn.lower().replace(' ','_')
@@ -1820,6 +1828,7 @@ if __name__ == "__main__":
             crt_path=crt_path,
             key_path=key_path,
             crl_path=crl_path,
+            aia_crl_base_url=args.aia_crl_base_url,
             valid_days=args.valid_days if args.valid_days else 3650,
             rsa_key_size=rsa_bits,
             key_type=args.key_type,

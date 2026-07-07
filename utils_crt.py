@@ -10,7 +10,6 @@ import sys
 import stat
 import uuid
 import shutil
-import socket
 from typing import Tuple, Iterable, List, Optional, Dict, Any, Set
 from datetime import datetime, timezone, timedelta
 
@@ -1196,6 +1195,7 @@ def _cmd_create_ca(
     crt_path: str,
     key_path: str,
     crl_path: str,
+    aia_crl_base_url: str,
     valid_days: int = 3650,
     rsa_key_size: int = 4096,
     key_type: str = "rsa",
@@ -1259,7 +1259,7 @@ def _cmd_create_ca(
 
     slug = cn.lower().replace(' ','_')
     display_name = cn.strip()
-    fqdn = socket.getfqdn()
+    aia_crl_base_url = aia_crl_base_url.rstrip('/')
 
     print(f'  - id: "{slug}"')
     print("")
@@ -1271,10 +1271,10 @@ def _cmd_create_ca(
     print(f'    display_name: "{display_name}"')
     print("    urls:")
     if result.get('key_path'):
-        print(f'      crl_http:        "http://{fqdn}/crl/{slug}/{os.path.basename(crl_path)}"')
+        print(f'      crl_http:        "{aia_crl_base_url}/crl/{slug}/{os.path.basename(crl_path)}"')
     else:
         print("      crl_http:        null")
-    print(f'      ca_issuers_http: "http://{fqdn}/certs/{slug}/{os.path.basename(crt_path)}"')
+    print(f'      ca_issuers_http: "{aia_crl_base_url}/certs/{slug}/{os.path.basename(crt_path)}"')
     print("    pem:")
     print(f"      certificate_path_pem: {crt_path}")
     if result.get('key_path'):
