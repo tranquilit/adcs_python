@@ -34,6 +34,12 @@ FLAG_CATALOG: Dict[str, Dict[str, int]] = {
         "ek_validate_cert":  0x00000400,  # EKCert chain
         "ek_validate_key":   0x00000800,  # EKPub allowlist
 
+        # July 2026 key-attestation hardening.  Microsoft has not yet
+        # published a symbolic CT_FLAG_* name for this bit, but Event 147
+        # documents its server-side meaning: reject the relay-prone V1
+        # MakeCredential/ActivateCredential protocol on this template.
+        "block_v1_attestation": 0x00008000,
+
         # Windows Hello
         "hello_logon_key":   0x00200000,
     },
