@@ -38,7 +38,7 @@ FLAG_CATALOG: Dict[str, Dict[str, int]] = {
         # published a symbolic CT_FLAG_* name for this bit, but Event 147
         # documents its server-side meaning: reject the relay-prone V1
         # MakeCredential/ActivateCredential protocol on this template.
-        "block_v1_attestation": 0x00008000,
+        "require_v2_attestation": 0x00008000,
 
         # Windows Hello
         "hello_logon_key":   0x00200000,
