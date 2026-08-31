@@ -900,28 +900,53 @@ def extract_microsoft_key_attestation_attributes_from_csr_der(csr_der: bytes) ->
     }
 
     def _extract_single_attribute_value(values_field, *, oid: str):
-        """Return the only attribute value and reject parser ambiguities.
+        """Return the sole value from a PKCS#10 ``Attribute.values`` SET.
 
-        Every Microsoft key-attestation request attribute used here has a
-        singular value in MS-WCCE.  Silently selecting the first member of a
-        multi-valued SET would let two protocol parsers make different choices.
+        ``asn1crypto.csr.CRIAttribute`` knows the schema of a few standard
+        attributes only.  Microsoft key-attestation OIDs are therefore exposed
+        as a generic :class:`asn1crypto.core.Any` containing the complete DER
+        ``SET OF AttributeValue``.  Asking ``Any.parsed`` to decode that SET
+        produces an untyped ``core.Set`` which cannot be iterated reliably and
+        caused valid Windows V1 requests to be rejected.
+
+        Parse the outer SET explicitly as ``SET OF ANY`` and retain the strict
+        one-value rule required by MS-WCCE.  Known attributes that are already
+        represented as a typed SET continue to use their native container.
         """
-        for candidate in (values_field, getattr(values_field, "parsed", None)):
-            if candidate is None:
-                continue
+
+        class _AnyAttributeValueSet(a_core.SetOf):
+            _child_spec = a_core.Any
+
+        if isinstance(values_field, a_core.Any):
+            encoded_values = values_field.dump()
             try:
-                items = list(candidate)
-            except Exception:
-                continue
-            if len(items) != 1:
+                values = _AnyAttributeValueSet.load(encoded_values)
+            except Exception as exc:
                 raise ValueError(
-                    f"Microsoft key-attestation attribute {oid} must contain "
-                    "exactly one value"
+                    f"Microsoft key-attestation attribute {oid} has an invalid "
+                    "SET OF values encoding"
+                ) from exc
+            if values.dump() != encoded_values:
+                raise ValueError(
+                    f"Microsoft key-attestation attribute {oid} has a "
+                    "non-canonical values encoding"
                 )
-            return items[0]
-        raise ValueError(
-            f"Microsoft key-attestation attribute {oid} has no decodable value"
-        )
+            items = list(values)
+        else:
+            try:
+                items = list(values_field)
+            except Exception as exc:
+                raise ValueError(
+                    f"Microsoft key-attestation attribute {oid} has no "
+                    "decodable values SET"
+                ) from exc
+
+        if len(items) != 1:
+            raise ValueError(
+                f"Microsoft key-attestation attribute {oid} must contain "
+                "exactly one value"
+            )
+        return items[0]
 
     def _raw_bytes(value_obj):
         try:

@@ -1472,14 +1472,29 @@ def verify_tpm_for_template(
             "A pending TPM challenge already exists for this request_id; submit the response via challenge_response_der"
         )
 
-    bundle = None
+    # ``app.py`` has already extracted ``csr_der`` from the CMC envelope.  The
+    # TPM attributes live in that inner PKCS#10, so parse them from the supplied
+    # CSR instead of re-running the complete CMC parser and then hiding every
+    # downstream attribute error behind a misleading "Invalid CMC" message.
+    # When a CMC envelope is supplied, still bind both inputs explicitly so a
+    # caller cannot provide one CSR for template selection and another for TPM
+    # verification.
     if cmc_der is not None:
+        from utils import exct_csr_from_cmc
+
         try:
-            bundle = tpm_mod.extract_tpm_bundle_from_cmc(cmc_der)
-        except Exception:
-            raise ValueError("Invalid CMC request; refusing to treat it as a TPM challenge response") from None
-    else:
+            embedded_csr_der, _body_part_id, _info = exct_csr_from_cmc(cmc_der)
+        except Exception as exc:
+            raise ValueError(f"Invalid CMC request: {exc}") from exc
+        if not hmac.compare_digest(bytes(embedded_csr_der), bytes(csr_der)):
+            raise ValueError("The CSR embedded in the CMC request does not match csr_der")
+
+    try:
         bundle = tpm_mod.extract_tpm_bundle_from_pkcs10_der(csr_der)
+    except Exception as exc:
+        raise ValueError(
+            f"Invalid Microsoft TPM key-attestation attributes in the PKCS#10 request: {exc}"
+        ) from exc
 
     if bundle is None:
         if policy["required"]:

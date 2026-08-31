@@ -179,10 +179,15 @@ def extract_challenge_response_and_request_id(xml_data: str):
     root = ET.fromstring(xml_data)
 
     challenge_response = ""
-    token = root.find(".//wsse:BinarySecurityToken", ns)
-
-    if token is not None and token.get("ValueType") == CHALLENGE_RESPONSE:
+    # A WSTEP message may contain more than one BinarySecurityToken.  Do not
+    # assume that the enrollment CHALLENGERESPONSE is the first one in document
+    # order (a security token or another enrollment token may precede it).
+    for token in root.findall(".//wsse:BinarySecurityToken", ns):
+        if (token.get("ValueType") or "").strip() != CHALLENGE_RESPONSE:
+            continue
         challenge_response = "".join((token.text or "").split())
+        if challenge_response:
+            break
 
     request_id = root.findtext(
         './/auth:ContextItem[@Name="RequestID"]/auth:Value',
