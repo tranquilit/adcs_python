@@ -278,41 +278,9 @@ def define_template(*, app_conf, username=None, request=None, params=None):
     }
 
 
-# ======================
-# 2) TPM policy
-# ======================
-def validate_tpm(
-    *,
-    tpm_result,
-    username=None,
-    request=None,
-    params=None,
-    app_conf=None,
-    ca=None,
-    template=None,
-):
-    """Apply the template's local TPM trust and firmware policy.
-
-    The ADCS core has already validated the TPM protocol, signatures, HMAC,
-    nonce, AIK/CSR binding and EK public-key consistency.  Extend this function
-    to validate EK and legacy AIK certificate trust, EKU/revocation policy,
-    manufacturer identity and the firmware version required by this template.
-
-    The contract is strict: return the boolean ``True`` to accept.  Any other
-    value, or an exception, rejects the enrollment.
-    """
-    if not isinstance(tpm_result, dict):
-        return False
-    if tpm_result.get("status") != "ok":
-        return False
-    if tpm_result.get("used"):
-        return tpm_result.get("attestation_valid") is True
-    return True
-
-
-# ======================
-# 3) Certificate issuance
-# ======================
+# =======================================
+# 2) Certificate issuance and TPM policy
+# =======================================
 def emit_certificate(
     *,
     csr_der: Optional[bytes],

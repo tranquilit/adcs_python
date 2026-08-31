@@ -433,7 +433,7 @@ def _configure_ca_exchange_materials(ca: dict) -> None:
     if "restricted_hmac_attestation" in ca:
         raise ValueError(
             "restricted_hmac_attestation has been removed. Configure TPM trust "
-            "and firmware policy in the template callback validate_tpm()."
+            "and firmware policy inside the template emit_certificate() callback."
         )
 
     deprecated_ra_keys = (
@@ -650,7 +650,6 @@ def load_yaml_conf(path="adcs.yaml"):
         conf["__template_decls__"].append({
             "path": cb_path,
             "define": cb_define,
-            "validate_tpm": "validate_tpm",
             "issue": cb_issue,
             "params": cb.get("params"),
         })
@@ -681,14 +680,6 @@ def _call_callback_with_params(func, *, params=None, **kwargs):
     return func(**kwargs)
 
 
-def _call_validate_tpm_strict(func, *, params=None, **kwargs) -> bool:
-    """Run the mandatory TPM policy callback with a strict boolean contract.
-
-    Only the singleton boolean ``True`` accepts the enrollment.  Exceptions
-    are deliberately not swallowed here so the caller can log the callback
-    failure before rejecting the request.
-    """
-    return _call_callback_with_params(func, params=params, **kwargs) is True
 
 # ---------------- Per-request build (CEP/CES): templates + OIDs (stateless) -----
 
@@ -749,10 +740,6 @@ def build_templates_for_policy_response(
             )
 
         define_template = load_func(cb_path, cb["define"])
-        # All template callbacks implement the same mandatory TPM policy hook.
-        # Loading it here makes a missing callback a configuration error before
-        # any certificate request can reach issuance.
-        load_func(cb_path, cb["validate_tpm"])
         tpl = _call_callback_with_params(
             define_template,
             params=cb.get("params"),
@@ -836,7 +823,6 @@ def build_templates_for_policy_response(
         # Remember emission callback (for CES)
         tpl["__callback"] = {
             "path": cb_path,
-            "validate_tpm": cb["validate_tpm"],
             "issue": cb["issue"],
             "params": cb.get("params"),
         }

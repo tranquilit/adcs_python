@@ -50,7 +50,6 @@ from callback_loader import load_func
 from adcs_config import (
     build_templates_for_policy_response,
     _call_callback_with_params,
-    _call_validate_tpm_strict,
 )
 from utils import exct_csr_from_cmc
 from tpm_support import _finalize_tpm_result, _template_tpm_policy
@@ -298,13 +297,11 @@ def _cmd_submit_csr_cli(
 
         cb = (tpl.get("__callback") if tpl else (conf.get("__default_callback"))) or {}
         cb_path = cb.get("path")
-        cb_validate_tpm = cb.get("validate_tpm", "validate_tpm")
         cb_issue = cb.get("issue")
         if not cb_path or not cb_issue:
             print("ERROR: no issue callback configured for this template", file=sys.stderr)
             return 1
 
-        validate_tpm = load_func(cb_path, cb_validate_tpm)
         emit_certificate = load_func(cb_path, cb_issue)
 
         tpm_policy = _template_tpm_policy(tpl)
@@ -325,24 +322,6 @@ def _cmd_submit_csr_cli(
             },
             tpm_policy,
         )
-        try:
-            tpm_accepted = _call_validate_tpm_strict(
-                validate_tpm,
-                params=cb.get("params"),
-                tpm_result=tpm_result,
-                username=username.strip(),
-                request=fake_request,
-                app_conf=conf,
-                ca=ca,
-                template=tpl,
-            )
-        except Exception as exc:
-            print(f"ERROR: validate_tpm callback failed: {exc}", file=sys.stderr)
-            return 1
-        if tpm_accepted is not True:
-            print("ERROR: TPM policy rejected the request", file=sys.stderr)
-            return 1
-
         request_id = uuid.uuid4().int
         result = _call_callback_with_params(
             emit_certificate,

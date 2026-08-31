@@ -30,6 +30,11 @@ OID_MS_ENROLL_EK_INFO = "1.3.6.1.4.1.311.21.23"
 OID_MS_ENROLL_AIK_INFO = "1.3.6.1.4.1.311.21.39"
 OID_MS_ENROLL_KSP_NAME = "1.3.6.1.4.1.311.21.25"
 OID_MS_ENROLL_ATTESTATION_STATEMENT = "1.3.6.1.4.1.311.21.33"
+# Windows CertEnroll requests observed in the field can carry the base KAST
+# under .21.24, including requests that also contain the MS-WCCE 55 V2
+# attributes.  Keep the historical constant name for API compatibility, but
+# treat .21.24 and the documented .21.33 as alternative encodings of the same
+# base key-attestation statement at the protocol-selection boundary.
 OID_MS_ENROLL_ATTESTATION_STATEMENT_LEGACY = "1.3.6.1.4.1.311.21.24"
 OID_MS_ENROLL_V2_CONTAINER_NAME = "1.3.6.1.4.1.311.21.44"
 OID_MS_ENROLL_V2_EK_ALGORITHM = "1.3.6.1.4.1.311.21.45"
@@ -124,6 +129,45 @@ class TPMAttestationBundle:
 
 class TPMAttestationError(Exception):
     pass
+
+
+def select_microsoft_key_attestation_statement(
+    bundle: TPMAttestationBundle | None,
+) -> Optional[bytes]:
+    """Return the unambiguous base Microsoft KeyAttestationStatement.
+
+    MS-WCCE documents ``szOID_ENROLL_ATTESTATION_STATEMENT`` as .21.33, while
+    current Windows CertEnroll traffic has also been observed using .21.24 for
+    the base KAST.  Both are accepted for V1/V2 interoperability.  If a request
+    supplies both OIDs, their decoded OCTET STRING payloads must be identical;
+    otherwise the request is ambiguous and is rejected instead of silently
+    preferring one value.
+    """
+    if bundle is None:
+        return None
+
+    documented = getattr(bundle, "ms_attestation_statement_raw", None)
+    compat = getattr(bundle, "ms_attestation_blob_raw", None)
+
+    def _coerce(value, label: str) -> Optional[bytes]:
+        if value in (None, b"", ""):
+            return None
+        if not isinstance(value, (bytes, bytearray, memoryview)):
+            raise ValueError(f"{label} must contain a byte string")
+        raw = bytes(value)
+        return raw or None
+
+    documented_raw = _coerce(documented, "The .21.33 attestation statement")
+    compat_raw = _coerce(compat, "The .21.24 attestation statement")
+
+    if documented_raw is not None and compat_raw is not None:
+        if not hmac.compare_digest(documented_raw, compat_raw):
+            raise ValueError(
+                "The request contains conflicting Microsoft key-attestation "
+                "statements in OIDs .21.33 and .21.24"
+            )
+        return documented_raw
+    return documented_raw or compat_raw
 
 
 class _Reader:
@@ -1061,9 +1105,11 @@ def classify_microsoft_v2_key_attestation_bundle(bundle: TPMAttestationBundle | 
         return "absent"
     values = {
         "ek_info": getattr(bundle, "ms_ek_info_raw", None),
-        "attestation_statement": getattr(
-            bundle, "ms_attestation_statement_raw", None
-        ),
+        # Accept the documented .21.33 KAST and the .21.24 KAST emitted by
+        # Windows CertEnroll.  This prevents a fully populated optional V2
+        # request from being mislabeled as a partial V2 request merely because
+        # the template does not require V2.
+        "attestation_statement": select_microsoft_key_attestation_statement(bundle),
         "v2_aik_info": getattr(bundle, "ms_v2_aik_info_raw", None),
         "v2_attestation_statement": getattr(bundle, "ms_v2_attestation_statement_raw", None),
         "ksp_name": getattr(bundle, "ms_ksp_name", None),
@@ -1873,7 +1919,7 @@ def validate_microsoft_key_attestation_binding(
       area and its creation proof.
     * AIK_INFO (subject-only): ``idBinding`` and ``aikOpaque`` are empty and
       the caller supplies the AIK public key extracted from AIK_INFO. Local
-      certificate trust and EKU policy are evaluated later by validate_tpm().
+      certificate trust and EKU policy are evaluated later by the template emit_certificate() callback.
 
     In both cases the AIK signature over ``keyAttest`` is verified and the
     certified TPM object is required to be the public key in the CSR.

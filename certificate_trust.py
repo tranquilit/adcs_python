@@ -1,7 +1,7 @@
-"""Small, strict X.509 trust helpers for template policy callbacks.
+"""Small, strict X.509 trust helpers for template issuance callbacks.
 
 The TPM core intentionally performs no local EK/AIK chain-trust decision.
-Template ``validate_tpm()`` callbacks can use this module to build paths to
+Template ``emit_certificate()`` callbacks can use this module to build paths to
 explicit trust anchors without consulting the host OS trust store.
 """
 

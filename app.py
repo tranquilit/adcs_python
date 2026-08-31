@@ -29,7 +29,6 @@ from adcs_config import (
     load_yaml_conf,
     build_templates_for_policy_response,
     _call_callback_with_params,
-    _call_validate_tpm_strict,
 )
 from callback_loader import load_func
 from tpm_support import verify_tpm_for_template
@@ -39,7 +38,6 @@ from tpm_certificate_extensions import validate_tpm_attestation_certificate_exte
 
 # ------------- SOAP parsing security -------------
 MAX_SOAP_BYTES = 2 * 1024 * 1024  # 2 MiB: hard limit to avoid OOM
-CERTSRV_E_KEY_ATTESTATION = -2146875366  # 0x8009481A
 
 app = Flask(__name__)
 
@@ -399,10 +397,8 @@ def ces_service(CAID):
 
     cb = (tpl.get("__callback") if tpl else (app.confadcs.get("__default_callback"))) or {}
     cb_path = cb.get("path")
-    cb_validate_tpm = cb.get("validate_tpm", "validate_tpm")
     cb_issue = cb.get("issue")
 
-    validate_tpm = load_func(cb_path, cb_validate_tpm)
     emit_certificate = load_func(cb_path, cb_issue)
 
     ces_uri = f"{_https_base_url()}/CES/{CAID}"
@@ -467,47 +463,26 @@ def ces_service(CAID):
 
         return response
 
-    try:
-        tpm_policy_decision = _call_validate_tpm_strict(
-            validate_tpm,
-            params=cb.get("params"),
-            tpm_result=tpm_result,
-            username=username,
-            request=request,
-            app_conf=app.confadcs,
-            ca=ca,
-            template=tpl,
-        )
-    except Exception:
-        app.logger.exception(
-            "Template TPM validation callback failed for template %s",
-            tpl.get("common_name"),
-        )
-        tpm_policy_decision = False
-
-    if tpm_policy_decision is not True:
-        result = {
-            "status": "denied",
-            "status_text": "TPM validation rejected by template callback",
-            "error_code": CERTSRV_E_KEY_ATTESTATION,
-        }
-    else:
-        result = _call_callback_with_params(
-            emit_certificate,
-            params=cb.get("params"),
-            csr_der=csr_der,
-            request_id=request_id,
-            username=username,
-            ca=ca,
-            template=tpl,
-            info=info,
-            app_conf=app.confadcs,
-            CAID=CAID,
-            request=request,
-            body_part_id=body_part_id,
-            p7_der=p7_der,
-            tpm_result=tpm_result,
-        )
+    # The core has completed the TPM protocol and exposes all attestation
+    # evidence through tpm_result.  Local EK/AIK trust, revocation,
+    # manufacturer and firmware policy are intentionally enforced by the
+    # template's existing emit_certificate() callback before it emits a cert.
+    result = _call_callback_with_params(
+        emit_certificate,
+        params=cb.get("params"),
+        csr_der=csr_der,
+        request_id=request_id,
+        username=username,
+        ca=ca,
+        template=tpl,
+        info=info,
+        app_conf=app.confadcs,
+        CAID=CAID,
+        request=request,
+        body_part_id=body_part_id,
+        p7_der=p7_der,
+        tpm_result=tpm_result,
+    )
 
     csr_path = os.path.join(ca['__path_csr'], f"{request_id}.pem")
 

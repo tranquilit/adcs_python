@@ -290,10 +290,7 @@ def _current_microsoft_binding_from_csr(csr: x509.CertificateSigningRequest) -> 
     bundle = tpm_mod.extract_tpm_bundle_from_pkcs10_der(csr_der)
     if bundle is None:
         return None
-    attestation_blob_raw = (
-        getattr(bundle, "ms_attestation_statement_raw", None)
-        or getattr(bundle, "ms_attestation_blob_raw", None)
-    )
+    attestation_blob_raw = tpm_mod.select_microsoft_key_attestation_statement(bundle)
     if not attestation_blob_raw:
         return None
     return tpm_mod.validate_microsoft_key_attestation_binding(
@@ -369,8 +366,7 @@ def verify_microsoft_aik_info_subject_only(
     AIK certificate carried in AIK_INFO supplies the public key used to verify
     the KAST signature, which in turn certifies the public key contained in the
     CSR.  Certificate-chain trust, EKU policy, revocation and all other local
-    acceptance decisions are intentionally deferred to the template callback
-    ``validate_tpm()`` through the returned ``tpm_result``.
+    acceptance decisions are intentionally deferred to the template ``emit_certificate()`` callback through the returned ``tpm_result``.
     """
     if ca is None:
         raise ValueError("ca is required to validate an AIK_INFO request")
@@ -405,10 +401,7 @@ def verify_microsoft_aik_info_subject_only(
 
     aik_certificates = _normalize_certificate_list(embedded_der, leaf=aik_cert)
 
-    attestation_blob_raw = (
-        getattr(bundle, "ms_attestation_statement_raw", None)
-        or getattr(bundle, "ms_attestation_blob_raw", None)
-    )
+    attestation_blob_raw = tpm_mod.select_microsoft_key_attestation_statement(bundle)
     if not attestation_blob_raw:
         raise ValueError("Microsoft AIK_INFO request is missing the key-attestation statement")
 
@@ -453,9 +446,9 @@ def _select_ek_public_key_for_challenge(
     must match the EK certificate, and a template that advertises
     ``ek_validate_cert`` must receive an EK certificate.  Chain trust,
     manufacturer allowlists, revocation and firmware decisions are made by the
-    mandatory template callback ``validate_tpm()``.
+    template ``emit_certificate()`` callback.
     """
-    del template, ca  # Policy is evaluated by the template callback.
+    del template, ca  # Local trust policy is evaluated by emit_certificate().
     ek_cert = _ek_cert_from_der(bundle.ek_cert_der) if getattr(bundle, "ek_cert_der", None) else None
     if ek_cert is not None:
         ek_pub_from_cert = ek_cert.public_key()
@@ -526,7 +519,7 @@ def _load_x509_certificates(data: bytes) -> list[x509.Certificate]:
     """Parse one DER certificate or one/more PEM certificates.
 
     This is intentionally a parsing helper only. Certificate-chain trust and
-    revocation policy belong to the template callback ``validate_tpm()``.
+    revocation policy belong to the template ``emit_certificate()`` callback.
     """
     blob = bytes(data)
     if b"-----BEGIN CERTIFICATE-----" not in blob:
@@ -1296,10 +1289,7 @@ def create_microsoft_certify_challenge_response(*, csr, bundle, template: dict, 
         leaf=ek_cert,
     )
 
-    attestation_blob_raw = (
-        getattr(bundle, "ms_attestation_statement_raw", None)
-        or getattr(bundle, "ms_attestation_blob_raw", None)
-    )
+    attestation_blob_raw = tpm_mod.select_microsoft_key_attestation_statement(bundle)
     if not attestation_blob_raw:
         raise ValueError("Microsoft key-attestation statement is required")
     certified_binding = tpm_mod.validate_microsoft_key_attestation_binding(
