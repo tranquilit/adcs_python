@@ -13,6 +13,7 @@ from asn1crypto import algos as a_algos
 from asn1crypto import cms as a_cms
 from asn1crypto import core as a_core
 from asn1crypto import csr as a_csr
+from asn1crypto import keys as a_keys
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, padding as sym_padding, serialization
@@ -884,12 +885,18 @@ def decrypt_microsoft_v2_aik_info(
     ket_cert_der: Optional[bytes],
     ket_private_key,
 ) -> dict:
-    """Decrypt ``szOID_ENROLL_V2_AIK_INFO`` and return its exact AIK SPKI.
+    """Decrypt ``szOID_ENROLL_V2_AIK_INFO`` and return the V2 AIK SPKI.
 
-    MS-WCCE 55.0 defines the encrypted content as a DER
-    ``SubjectPublicKeyInfo``. The parser accepts the CryptoAPI SET wrapper used
-    for PKCS#10 attributes, but requires the decrypted payload itself to be a
-    canonical public-key object and not a certificate fallback.
+    MS-WCCE 55.0 requires the encrypted content to be a DER-encoded
+    ``SubjectPublicKeyInfo``.  Validate the original bytes as a complete DER
+    PublicKeyInfo object, then normalize the public key for stable internal
+    comparison and hashing.
+
+    Do not require a byte-for-byte match with ``cryptography``'s serializer:
+    Windows can emit a valid RSA AlgorithmIdentifier with omitted parameters,
+    while ``cryptography`` re-encodes the same key with an explicit NULL.  Both
+    encodings identify the same public key and the original value can still be
+    strict, canonical DER at the ASN.1 level.
     """
     decrypted = decrypt_microsoft_hardware_key_info(
         v2_aik_info_raw, ket_cert_der, ket_private_key
@@ -898,35 +905,56 @@ def decrypt_microsoft_v2_aik_info(
     if not clear:
         raise ValueError("V2_AIK_INFO decrypted to an empty payload")
 
+    class _AnySequence(a_core.SequenceOf):
+        _child_spec = a_core.Any
+
+    class _AnySet(a_core.SetOf):
+        _child_spec = a_core.Any
+
     candidates = [clear]
-    try:
-        class _AnySequence(a_core.SequenceOf):
-            _child_spec = a_core.Any
-
-        sequence = _AnySequence.load(clear)
-        if sequence.dump() == clear and len(sequence) == 1:
-            candidates.insert(0, sequence[0].dump())
-    except Exception:
-        pass
-
-    for candidate in candidates:
+    for wrapper_type in (_AnySequence, _AnySet):
         try:
+            wrapped = wrapper_type.load(clear, strict=True)
+            if wrapped.dump() == clear and len(wrapped) == 1:
+                candidates.insert(0, wrapped[0].dump())
+        except Exception:
+            pass
+
+    seen = set()
+    for candidate in candidates:
+        candidate = bytes(candidate)
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            # PublicKeyInfo.load(strict=True) validates complete DER framing and
+            # rejects trailing bytes.  dump() equality additionally ensures the
+            # ASN.1 value itself was encoded canonically.
+            public_key_info = a_keys.PublicKeyInfo.load(candidate, strict=True)
+            if public_key_info.dump() != candidate:
+                continue
             public_key = serialization.load_der_public_key(candidate)
-            canonical = public_key.public_bytes(
+            normalized = public_key.public_bytes(
                 serialization.Encoding.DER,
                 serialization.PublicFormat.SubjectPublicKeyInfo,
             )
-            if canonical != candidate:
-                continue
+            was_normalized = not hmac.compare_digest(normalized, candidate)
+            if was_normalized:
+                logger.info(
+                    "Normalized a valid V2_AIK_INFO SubjectPublicKeyInfo for "
+                    "stable internal comparison"
+                )
             return {
                 "decrypted_raw": clear,
-                "aik_spki_der": canonical,
+                "aik_spki_der": normalized,
+                "aik_spki_source_der": candidate,
+                "aik_spki_was_normalized": was_normalized,
                 "aik_public_key": public_key,
             }
         except Exception:
             continue
     raise ValueError(
-        "V2_AIK_INFO does not contain a canonical DER SubjectPublicKeyInfo"
+        "V2_AIK_INFO decrypted content is not a complete DER SubjectPublicKeyInfo"
     )
 
 
