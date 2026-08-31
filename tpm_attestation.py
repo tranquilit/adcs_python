@@ -911,17 +911,34 @@ def decrypt_microsoft_v2_aik_info(
     class _AnySet(a_core.SetOf):
         _child_spec = a_core.Any
 
-    candidates = [clear]
+    # MS-WCCE 55.0 documents a direct SubjectPublicKeyInfo.  Patched Windows
+    # clients have also been observed emitting the strict DER compatibility
+    # wrapper below:
+    #
+    #     SEQUENCE { SubjectPublicKeyInfo, NULL }
+    #
+    # Accept only that exact two-element SEQUENCE, plus the historical
+    # one-element SEQUENCE/SET wrappers already accepted by this parser.  An
+    # arbitrary second value, certificate, or trailing element remains invalid.
+    candidates = [("direct", clear)]
     for wrapper_type in (_AnySequence, _AnySet):
         try:
             wrapped = wrapper_type.load(clear, strict=True)
-            if wrapped.dump() == clear and len(wrapped) == 1:
-                candidates.insert(0, wrapped[0].dump())
+            if wrapped.dump() != clear:
+                continue
+            if len(wrapped) == 1:
+                candidates.insert(0, ("single_element_wrapper", wrapped[0].dump()))
+            elif (
+                wrapper_type is _AnySequence
+                and len(wrapped) == 2
+                and wrapped[1].dump() == b"\x05\x00"
+            ):
+                candidates.insert(0, ("windows_spki_null_sequence", wrapped[0].dump()))
         except Exception:
             pass
 
     seen = set()
-    for candidate in candidates:
+    for wrapper_name, candidate in candidates:
         candidate = bytes(candidate)
         if candidate in seen:
             continue
@@ -949,6 +966,7 @@ def decrypt_microsoft_v2_aik_info(
                 "aik_spki_der": normalized,
                 "aik_spki_source_der": candidate,
                 "aik_spki_was_normalized": was_normalized,
+                "aik_spki_wrapper": wrapper_name,
                 "aik_public_key": public_key,
             }
         except Exception:
