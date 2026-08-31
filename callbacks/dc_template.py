@@ -1,17 +1,12 @@
-import sys
-import argparse
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List, Set
 
-import os
-import re
 import uuid
 
 from asn1crypto import core as a_core
 from cryptography import x509 as cx509
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ed25519, ed448
-from cryptography.hazmat.primitives import serialization
 from cryptography.x509.oid import (
     NameOID,
     AuthorityInformationAccessOID,
@@ -20,10 +15,8 @@ from cryptography.x509.oid import (
 )
 
 from utils import search_user
-from utils import _apply_static_extensions,validate_csr
-import base64
-import json
-import textwrap
+from tpm_certificate_extensions import apply_tpm_attestation_extensions
+from utils import _apply_static_extensions, validate_csr
 
 
 
@@ -105,6 +98,13 @@ def define_template(*, app_conf, username=None, request=None, params=None):
         "flags": {
             "private_key_flags": {
                 "exportable_key": False,
+                "attest_preferred": False,
+                "attest_required": False,
+                "require_v2_attestation": False,
+                "attestation_without_policy": False,
+                "ek_trust_on_use": False,
+                "ek_validate_cert": False,
+                "ek_validate_key": False,
             },
 
             "subject_name_flags": {
@@ -214,6 +214,35 @@ def define_template(*, app_conf, username=None, request=None, params=None):
 # ============================================================
 # 2) Certificate issuance (DC)
 # ============================================================
+
+
+def validate_tpm(
+    *,
+    tpm_result,
+    username=None,
+    request=None,
+    params=None,
+    app_conf=None,
+    ca=None,
+    template=None,
+):
+    """Apply the template's local TPM trust and firmware policy.
+
+    The ADCS core has already validated the TPM protocol, signatures, HMAC,
+    nonce, AIK/CSR binding and EK public-key consistency.  Extend this function
+    to validate EK and legacy AIK certificate trust, EKU/revocation policy,
+    manufacturer identity and the firmware version required by this template.
+
+    The contract is strict: return the boolean ``True`` to accept.  Any other
+    value, or an exception, rejects the enrollment.
+    """
+    if not isinstance(tpm_result, dict):
+        return False
+    if tpm_result.get("status") != "ok":
+        return False
+    if tpm_result.get("used"):
+        return tpm_result.get("attestation_valid") is True
+    return True
 
 
 def emit_certificate(
@@ -342,6 +371,8 @@ def emit_certificate(
         seen.add(kk)
 
     builder = builder.add_extension(cx509.SubjectAlternativeName(san_items), critical=False)
+
+    builder = apply_tpm_attestation_extensions(builder, tpm_result)
 
     priv = ca["__key_obj"]
     if isinstance(priv, (ed25519.Ed25519PrivateKey, ed448.Ed448PrivateKey)):

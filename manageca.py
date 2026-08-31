@@ -47,8 +47,13 @@ from typing import List, Optional, Dict, Any, Set
 import base64
 
 from callback_loader import load_func
-from adcs_config import build_templates_for_policy_response, _call_callback_with_params
+from adcs_config import (
+    build_templates_for_policy_response,
+    _call_callback_with_params,
+    _call_validate_tpm_strict,
+)
 from utils import exct_csr_from_cmc
+from tpm_support import _finalize_tpm_result, _template_tpm_policy
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -293,12 +298,50 @@ def _cmd_submit_csr_cli(
 
         cb = (tpl.get("__callback") if tpl else (conf.get("__default_callback"))) or {}
         cb_path = cb.get("path")
+        cb_validate_tpm = cb.get("validate_tpm", "validate_tpm")
         cb_issue = cb.get("issue")
         if not cb_path or not cb_issue:
             print("ERROR: no issue callback configured for this template", file=sys.stderr)
             return 1
 
+        validate_tpm = load_func(cb_path, cb_validate_tpm)
         emit_certificate = load_func(cb_path, cb_issue)
+
+        tpm_policy = _template_tpm_policy(tpl)
+        if tpm_policy and tpm_policy.get("required"):
+            print(
+                "ERROR: this template requires TPM key attestation; use the CES "
+                "enrollment flow so the challenge can be completed",
+                file=sys.stderr,
+            )
+            return 1
+
+        tpm_result = _finalize_tpm_result(
+            {
+                "status": "ok",
+                "used": False,
+                "attestation_valid": False,
+                "challenge_verified": False,
+            },
+            tpm_policy,
+        )
+        try:
+            tpm_accepted = _call_validate_tpm_strict(
+                validate_tpm,
+                params=cb.get("params"),
+                tpm_result=tpm_result,
+                username=username.strip(),
+                request=fake_request,
+                app_conf=conf,
+                ca=ca,
+                template=tpl,
+            )
+        except Exception as exc:
+            print(f"ERROR: validate_tpm callback failed: {exc}", file=sys.stderr)
+            return 1
+        if tpm_accepted is not True:
+            print("ERROR: TPM policy rejected the request", file=sys.stderr)
+            return 1
 
         request_id = uuid.uuid4().int
         result = _call_callback_with_params(
@@ -315,6 +358,7 @@ def _cmd_submit_csr_cli(
             request=fake_request,
             body_part_id=body_part_id,
             p7_der=request_blob,
+            tpm_result=tpm_result,
         )
 
         os.makedirs(ca['__path_csr'], exist_ok=True)

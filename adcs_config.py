@@ -5,9 +5,14 @@ import base64
 import yaml
 import os
 import inspect
+from datetime import datetime, timezone
 from typing import Tuple
 
 from asn1crypto import x509 as a_x509, core as a_core
+from cryptography import x509 as cx509
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import ObjectIdentifier
 
 from callback_loader import load_func
 from flags_catalog import FLAG_CATALOG  # canonical table alias -> bitmask
@@ -333,6 +338,146 @@ def _load_ca_key(ca: dict):
     )
 
 
+
+def _assert_key_matches_certificate(private_key, certificate_der: bytes, *, label: str) -> None:
+    cert = cx509.load_der_x509_certificate(certificate_der)
+    cert_spki = cert.public_key().public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    key_spki = private_key.public_key().public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    if cert_spki != key_spki:
+        raise ValueError(f"{label} private key does not match its certificate")
+
+
+def _assert_ca_exchange_certificate_role(certificate_der: bytes) -> None:
+    """Validate the CA exchange certificate required by MS-WCCE key attestation."""
+    cert = cx509.load_der_x509_certificate(certificate_der)
+    now = datetime.now(timezone.utc)
+    not_before = (
+        cert.not_valid_before_utc
+        if hasattr(cert, "not_valid_before_utc")
+        else cert.not_valid_before.replace(tzinfo=timezone.utc)
+    )
+    not_after = (
+        cert.not_valid_after_utc
+        if hasattr(cert, "not_valid_after_utc")
+        else cert.not_valid_after.replace(tzinfo=timezone.utc)
+    )
+    if now < not_before or now > not_after:
+        raise ValueError("CA exchange certificate is not currently valid")
+    if not isinstance(cert.public_key(), rsa.RSAPublicKey):
+        raise ValueError("CA exchange certificate must contain an RSA public key")
+    try:
+        basic = cert.extensions.get_extension_for_class(cx509.BasicConstraints).value
+        if basic.ca:
+            raise ValueError("CA exchange certificate must not be a CA certificate")
+    except cx509.ExtensionNotFound:
+        pass
+    try:
+        usage = cert.extensions.get_extension_for_class(cx509.KeyUsage).value
+    except cx509.ExtensionNotFound as exc:
+        raise ValueError(
+            "CA exchange certificate must contain KeyUsage keyEncipherment"
+        ) from exc
+    if not usage.key_encipherment:
+        raise ValueError(
+            "CA exchange certificate KeyUsage must permit keyEncipherment"
+        )
+    try:
+        eku = cert.extensions.get_extension_for_class(cx509.ExtendedKeyUsage).value
+    except cx509.ExtensionNotFound as exc:
+        raise ValueError(
+            "CA exchange certificate must contain the CA Exchange EKU"
+        ) from exc
+    allowed = {
+        "1.3.6.1.4.1.311.21.5",  # szOID_KP_CA_EXCHANGE
+    }
+    if not any(oid.dotted_string in allowed for oid in eku):
+        raise ValueError(
+            "CA exchange certificate must contain the CA Exchange EKU"
+        )
+    try:
+        app_policy_ext = cert.extensions.get_extension_for_oid(
+            ObjectIdentifier("1.3.6.1.4.1.311.21.10")
+        ).value
+    except cx509.ExtensionNotFound as exc:
+        raise ValueError(
+            "CA exchange certificate must contain the CA Exchange Application Policy"
+        ) from exc
+    if not isinstance(app_policy_ext, cx509.UnrecognizedExtension):
+        raise ValueError("CA exchange Application Policies extension has an unexpected type")
+    try:
+        policies = PolicyInfos.load(app_policy_ext.value)
+        policy_oids = {
+            item["policyIdentifier"].dotted for item in policies
+        }
+    except Exception as exc:
+        raise ValueError("CA exchange Application Policies extension is malformed") from exc
+    if "1.3.6.1.4.1.311.21.5" not in policy_oids:
+        raise ValueError(
+            "CA exchange certificate must contain the CA Exchange Application Policy"
+        )
+
+
+
+def _configure_ca_exchange_materials(ca: dict) -> None:
+    """Validate the optional CA Exchange/KET certificate and private key.
+
+    MS-WCCE key attestation uses the CA Exchange certificate for both the
+    legacy V1 flow and the CMC Restricted-HMAC V2 flow.  The retired SCEP
+    198/41 bootstrap and its RA signing/encryption material are deliberately
+    not supported.
+    """
+    if "restricted_hmac_attestation" in ca:
+        raise ValueError(
+            "restricted_hmac_attestation has been removed. Configure TPM trust "
+            "and firmware policy in the template callback validate_tpm()."
+        )
+
+    deprecated_ra_keys = (
+        "ra_signing_cert_pem",
+        "ra_signing_key_pem",
+        "ra_encryption_cert_pem",
+        "ra_encryption_key_pem",
+        "allow_ca_as_ra_signing",
+        "allow_ket_as_ra_encryption",
+    )
+    configured_ra_keys = [name for name in deprecated_ra_keys if ca.get(name) is not None]
+    if configured_ra_keys:
+        raise ValueError(
+            "The SCEP 198/41 RA configuration has been removed: "
+            + ", ".join(configured_ra_keys)
+        )
+
+    ket_cert_pem = ca.get("__ket_certificate_pem")
+    ket_key_pem = ca.get("__ket_key_pem")
+    if not ket_cert_pem and not ket_key_pem:
+        return
+    if not ket_cert_pem or not ket_key_pem:
+        raise ValueError(
+            f"CA {ca.get('id')} must configure both ket_cert_pem and ket_key_pem"
+        )
+
+    try:
+        ket_cert = cx509.load_pem_x509_certificate(ket_cert_pem.encode("utf-8"))
+        ket_cert_der = ket_cert.public_bytes(serialization.Encoding.DER)
+        ket_private_key = serialization.load_pem_private_key(
+            ket_key_pem.encode("utf-8"), password=None
+        )
+    except Exception as exc:
+        raise ValueError("Invalid CA exchange certificate or private key") from exc
+
+    _assert_key_matches_certificate(
+        ket_private_key,
+        ket_cert_der,
+        label="CA exchange",
+    )
+    _assert_ca_exchange_certificate_role(ket_cert_der)
+    ca["__ket_certificate_der"] = ket_cert_der
+    ca["__ket_key_obj"] = ket_private_key
+
 def load_yaml_conf(path="adcs.yaml"):
     """
     Load adcs.yaml, read global config and CAs, and record
@@ -486,6 +631,8 @@ def load_yaml_conf(path="adcs.yaml"):
             with open(ket_key_path, "r", encoding="utf-8") as f:
                 ket_key_pem = f.read()
             ca["__ket_key_pem"] = ket_key_pem
+
+        _configure_ca_exchange_materials(ca)
     
     if conf["cas_list"]:
         conf["default_ca"] = default_ca or conf["cas_list"][0]
@@ -495,14 +642,15 @@ def load_yaml_conf(path="adcs.yaml"):
     for tdecl in cfg.get("templates", []) or []:
         cb = (tdecl.get("callback") or {})
         cb_path   = cb.get("path")
-        cb_define = cb.get("define",'define_template')
-        cb_issue  = cb.get("issue",'emit_certificate')
+        cb_define = cb.get("define", "define_template")
+        cb_issue = cb.get("issue", "emit_certificate")
         if not (cb_path and cb_define and cb_issue):
             raise ValueError("Each template must define callback.path / callback.define / callback.issue")
 
         conf["__template_decls__"].append({
             "path": cb_path,
             "define": cb_define,
+            "validate_tpm": "validate_tpm",
             "issue": cb_issue,
             "params": cb.get("params"),
         })
@@ -531,6 +679,16 @@ def _call_callback_with_params(func, *, params=None, **kwargs):
     if _callback_accepts_params(func):
         kwargs["params"] = params
     return func(**kwargs)
+
+
+def _call_validate_tpm_strict(func, *, params=None, **kwargs) -> bool:
+    """Run the mandatory TPM policy callback with a strict boolean contract.
+
+    Only the singleton boolean ``True`` accepts the enrollment.  Exceptions
+    are deliberately not swallowed here so the caller can log the callback
+    failure before rejecting the request.
+    """
+    return _call_callback_with_params(func, params=params, **kwargs) is True
 
 # ---------------- Per-request build (CEP/CES): templates + OIDs (stateless) -----
 
@@ -591,6 +749,10 @@ def build_templates_for_policy_response(
             )
 
         define_template = load_func(cb_path, cb["define"])
+        # All template callbacks implement the same mandatory TPM policy hook.
+        # Loading it here makes a missing callback a configuration error before
+        # any certificate request can reach issuance.
+        load_func(cb_path, cb["validate_tpm"])
         tpl = _call_callback_with_params(
             define_template,
             params=cb.get("params"),
@@ -672,7 +834,12 @@ def build_templates_for_policy_response(
         _materialize_required_extensions_static_in_place(tpl)
 
         # Remember emission callback (for CES)
-        tpl["__callback"] = {"path": cb["path"], "issue": cb["issue"], "params": cb.get("params")}
+        tpl["__callback"] = {
+            "path": cb_path,
+            "validate_tpm": cb["validate_tpm"],
+            "issue": cb["issue"],
+            "params": cb.get("params"),
+        }
 
         templates_list.append(tpl)
 

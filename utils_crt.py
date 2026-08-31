@@ -1524,19 +1524,6 @@ def _cmd_create_ket_cert(
         print(f"ERROR: create KET certificate failed: {e}", file=sys.stderr)
         return 1
 
-def _read_all_bytes(paths: list[str]) -> bytes:
-    out = b""
-    for p in paths:
-        if not p:
-            continue
-        if not os.path.isfile(p):
-            raise FileNotFoundError(f"chain file not found: {p}")
-        with open(p, "rb") as f:
-            out += f.read()
-            if not out.endswith(b"\n"):
-                out += b"\n"
-    return out
-
 def _build_ca_chain_pem(conf: Dict[str, Any], ca: Dict[str, Any]) -> bytes:
     """
     Return CA certificates as PEM bytes, starting with the current CA certificate,

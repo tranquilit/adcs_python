@@ -34,10 +34,8 @@ FLAG_CATALOG: Dict[str, Dict[str, int]] = {
         "ek_validate_cert":  0x00000400,  # EKCert chain
         "ek_validate_key":   0x00000800,  # EKPub allowlist
 
-        # July 2026 key-attestation hardening.  Microsoft has not yet
-        # published a symbolic CT_FLAG_* name for this bit, but Event 147
-        # documents its server-side meaning: reject the relay-prone V1
-        # MakeCredential/ActivateCredential protocol on this template.
+        # MS-WCCE 55.0: require the Restricted-HMAC V2 attestation flow.
+        # This bit is valid only together with attest_required (0x2000).
         "require_v2_attestation": 0x00008000,
 
         # Windows Hello

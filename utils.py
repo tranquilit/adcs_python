@@ -32,12 +32,17 @@ except ImportError:  # cryptography versions without ML-DSA support
     mldsa = None
 from cryptography.x509.oid import ObjectIdentifier as CObjectIdentifier
 
-# Samba / AD lookup (used by search_user)
-from samba.credentials import Credentials
-from samba.param import LoadParm
-from samba.samdb import SamDB
-from samba.net import Net
-from samba.dcerpc import nbt
+# Samba / AD lookup (used only by search_user).  Keep it optional so the
+# protocol codecs and unit tests can run on hosts where python3-samba is not
+# installed; search_user still fails explicitly when invoked.
+try:
+    from samba.credentials import Credentials
+    from samba.param import LoadParm
+    from samba.samdb import SamDB
+    from samba.net import Net
+    from samba.dcerpc import nbt
+except ImportError:  # pragma: no cover - depends on deployment packages
+    Credentials = LoadParm = SamDB = Net = nbt = None
 
 # pyasn1 for minimal CMC/PKIResponse structures
 from pyasn1.type import univ, namedtype, namedval, char, useful, constraint
@@ -1269,18 +1274,6 @@ def format_b64_for_soap(data: bytes) -> str:
     return base64.b64encode(data).decode("ascii")
 
 
-def _wrap_b64(data: bytes, line_len: int = 64, with_crlf: bool = True) -> str:
-    """
-    Base64-encode bytes and optionally wrap lines to a fixed length.
-    If with_crlf is True, lines are joined using CRLF (\r\n).
-    """
-    s = base64.b64encode(data).decode("ascii")
-    if not line_len:
-        return s
-    lines = [s[i:i + line_len] for i in range(0, len(s), line_len)]
-    sep = "\r\n" if with_crlf else "\n"
-    return sep.join(lines)
-
 
 # -----------------------------------------------------------------------------
 # WS-Trust (Enrollment) response builder
@@ -1421,6 +1414,9 @@ def search_user(userauth: str,ldap_filter='',dc_fqdn=None,basedn=None,password=N
     Resolve the SAM/LDAP entry for the Kerberos user 'user@REALM'.
     Returns (SamDB, entry) if found.
     """
+
+    if Credentials is None:
+        raise RuntimeError("search_user requires the optional python3-samba package")
 
     username = userauth.split("@", 1)[0].strip()
 
@@ -1986,7 +1982,22 @@ def _txt(elem, value):
 def _prettify(xml_bytes: bytes) -> str:
     return minidom.parseString(xml_bytes).toprettyxml(indent="  ", encoding="utf-8").decode("utf-8")
 
-def build_ces_response(uuid_request: str, uuid_random: str, p7b_der: str, leaf_der: str, body_part_id: str) -> str:
+def build_ces_response(
+    uuid_request: str,
+    uuid_random: str,
+    p7b_der: str,
+    leaf_der: str,
+    body_part_id: str,
+    *,
+    leaf_value_type: str = "x509",
+) -> str:
+    normalized_leaf_type = (leaf_value_type or "x509").strip().lower()
+    if normalized_leaf_type == "x509":
+        bst_value_type = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#X509v3"
+    elif normalized_leaf_type == "pkcs7":
+        bst_value_type = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd#PKCS7"
+    else:
+        raise ValueError(f"Unsupported CES leaf_value_type: {leaf_value_type!r}")
     env = ET.Element(ET.QName(NS_CES['s'], 'Envelope'))
 
     hdr = ET.SubElement(env, ET.QName(NS_CES['s'], 'Header'))
@@ -2025,7 +2036,7 @@ def build_ces_response(uuid_request: str, uuid_random: str, p7b_der: str, leaf_d
     bst_leaf = ET.SubElement(
         req_tok, ET.QName(NS_CES['wsse'], 'BinarySecurityToken'),
         {
-            "ValueType":    "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#X509v3",
+            "ValueType":    bst_value_type,
             "EncodingType": "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd#base64binary",
         }
     )
@@ -2038,14 +2049,30 @@ def build_ces_response(uuid_request: str, uuid_random: str, p7b_der: str, leaf_d
     return _prettify(raw)
 
 
-def build_ket_response(uuid_request: str, uuid_random: str, ket_cert_der: str) -> str:
+def build_ket_response(
+    uuid_request: str,
+    uuid_random: str,
+    ket_cert_der: str,
+    *,
+    value_type: str = "x509",
+) -> str:
     """
     Build CES/WSTEP WS-Trust RSTR/KETFinal response.
 
     - uuid_request: the UUID from the request MessageID (without "urn:uuid:" prefix is fine; we add it)
     - uuid_random: correlation id for diag:ActivityId
-    - ket_cert_der: base64 of the DER-encoded X.509 certificate to return as the KeyExchangeToken (BinarySecurityToken)
+    - ket_cert_der: base64 of the DER certificate or certificates-only PKCS#7
+    - value_type: ``x509`` for the legacy KET, ``pkcs7`` for the V2 RA bundle
     """
+    normalized_type = (value_type or "x509").strip().lower()
+    if normalized_type == "pkcs7":
+        token_type_uri = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#PKCS7"
+        bst_value_type = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd#PKCS7"
+    elif normalized_type == "x509":
+        token_type_uri = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#X509v3"
+        bst_value_type = token_type_uri
+    else:
+        raise ValueError(f"Unsupported KET value_type: {value_type!r}")
     env = ET.Element(ET.QName(NS_CES['s'], 'Envelope'))
 
     hdr = ET.SubElement(env, ET.QName(NS_CES['s'], 'Header'))
@@ -2065,7 +2092,7 @@ def build_ket_response(uuid_request: str, uuid_random: str, ket_cert_der: str) -
     rstr = ET.SubElement(rstrc, ET.QName(NS_CES['wst'], 'RequestSecurityTokenResponse'))
 
     tok_type = ET.SubElement(rstr, ET.QName(NS_CES['wst'], 'TokenType'))
-    _txt(tok_type, "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#X509v3")
+    _txt(tok_type, token_type_uri)
 
     req_tok = ET.SubElement(rstr, ET.QName(NS_CES['wst'], 'RequestedSecurityToken'))
     ket = ET.SubElement(req_tok, ET.QName(NS_CES['wst'], 'KeyExchangeToken'))
@@ -2073,7 +2100,7 @@ def build_ket_response(uuid_request: str, uuid_random: str, ket_cert_der: str) -
     bst_ket = ET.SubElement(
         ket, ET.QName(NS_CES['wsse'], 'BinarySecurityToken'),
         {
-            "ValueType":    "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#X509v3",
+            "ValueType":    bst_value_type,
             "EncodingType": "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd#base64binary",
         }
     )

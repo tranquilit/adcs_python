@@ -22,16 +22,24 @@ from utils import (
     build_ws_trust_response,
     build_get_policies_response,
     build_ces_response,
-    build_ket_response
+    build_ket_response,
 )
 
-from adcs_config import load_yaml_conf, build_templates_for_policy_response, _call_callback_with_params
+from adcs_config import (
+    load_yaml_conf,
+    build_templates_for_policy_response,
+    _call_callback_with_params,
+    _call_validate_tpm_strict,
+)
 from callback_loader import load_func
 from tpm_support import verify_tpm_for_template
+from tpm_certificate_extensions import validate_tpm_attestation_certificate_extensions
+
 
 
 # ------------- SOAP parsing security -------------
 MAX_SOAP_BYTES = 2 * 1024 * 1024  # 2 MiB: hard limit to avoid OOM
+CERTSRV_E_KEY_ATTESTATION = -2146875366  # 0x8009481A
 
 app = Flask(__name__)
 
@@ -191,6 +199,7 @@ def extract_challenge_response_and_request_id(xml_data: str):
     }
 
 
+
 @app.route('/CES/<CAID>', methods=['POST'])
 @auth_required
 def ces_service(CAID):
@@ -217,13 +226,15 @@ def ces_service(CAID):
     }
 
     message_id_elem = root.find('.//a:MessageID', namespaces)
-    uuid_request = message_id_elem.text.replace("urn:uuid:", "")
+    message_id_text = (message_id_elem.text or "").strip() if message_id_elem is not None else ""
+    uuid_request = message_id_text.removeprefix("urn:uuid:") or str(uuid.uuid4())
 
     ca_match = [u for u in app.confadcs['cas_list'] if u['id'] == CAID]
     if not ca_match:
         return Response("CAID not found", 403)
+    ca = ca_match[0]
 
-    if not _ca_allows_auth_method(ca_match[0], getattr(g, "auth_method", None)):
+    if not _ca_allows_auth_method(ca, getattr(g, "auth_method", None)):
         return Response(
             "Authentication method %s is not allowed for CA %s" %
             (getattr(g, "auth_method", None), CAID),
@@ -231,13 +242,18 @@ def ces_service(CAID):
         )
 
     if root.find(".//wst:RequestKET", namespaces) is not None:
+        # CEP/CES template enrollment uses the normal CA Exchange certificate.
+        # The retired SCEP 198/41 bootstrap and its PKCS#7 RA bundle are not
+        # part of the supported protocol surface.
+        if not ca.get("__ket_certificate_b64"):
+            return Response("CA Exchange/KET certificate is not configured", 500)
         response_xml = build_ket_response(
             uuid_request=uuid_request,
             uuid_random=str(uuid.uuid4()),
-            ket_cert_der=ca_match[0]['__ket_certificate_b64']
+            ket_cert_der=ca["__ket_certificate_b64"],
+            value_type="x509",
         )
-
-        return Response(response_xml, content_type='application/soap+xml')
+        return Response(response_xml, content_type="application/soap+xml")
 
     challenge = extract_challenge_response_and_request_id(rst_xml)
 
@@ -265,48 +281,83 @@ def ces_service(CAID):
                 status=400,
             )
 
-    if enr_request_id is not None:
-        request_id = enr_request_id
-        p7_path = os.path.join(app.confadcs['path_list_request_id'], str(request_id))
+    ns_wsse = {
+        'wsse': "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"
+    }
+    bst_node = root.find('.//wsse:BinarySecurityToken', ns_wsse)
+    bst_text = "" if bst_node is None else "".join((bst_node.text or "").split())
 
-        if not os.path.isfile(p7_path):
-            app.logger.error("File not found: %s", p7_path)
-            return Response(
-                'File %s not foud in path_list_request_id' % str(request_id),
-                content_type="application/soap+xml; charset=utf-8",
-                status=500
-            )
+    def _load_saved_request(saved_request_id):
+        saved_path = os.path.join(
+            app.confadcs['path_list_request_id'], str(saved_request_id)
+        )
+        if not os.path.isfile(saved_path):
+            raise FileNotFoundError(saved_path)
+        with open(saved_path, 'rb') as saved_file:
+            return saved_file.read()
 
-        with open(p7_path, 'rb') as f:
-            p7_der = f.read()
-
-    elif challenge['is_challenge_response']:
+    if challenge['is_challenge_response']:
+        # The historical CHALLENGERESPONSE token contains only the decrypted
+        # V1 secret.  Re-open the original CSR/CMC request for binding checks.
         request_id = challenge['request_id']
-        p7_path = os.path.join(app.confadcs['path_list_request_id'], str(request_id))
-
-        if not os.path.isfile(p7_path):
-            app.logger.error("File not found: %s", p7_path)
+        try:
+            p7_der = _load_saved_request(request_id)
+        except FileNotFoundError as exc:
+            app.logger.error("File not found: %s", exc.filename)
             return Response(
-                'File %s not foud in path_list_request_id' % str(request_id),
+                'File %s not found in path_list_request_id' % str(request_id),
                 content_type="application/soap+xml; charset=utf-8",
-                status=500
+                status=404,
             )
-
-        with open(p7_path, 'rb') as f:
-            p7_der = f.read()
-
+    elif bst_text:
+        # Prefer a newly supplied token even when the SOAP request also carries
+        # an enrollment RequestID.  Restricted-HMAC stage 2 is a new signed
+        # PKCS#7 message, not a request to replay the stage-1 token.
+        try:
+            p7_der = base64.b64decode(bst_text, validate=True)
+        except Exception:
+            return Response(
+                "BinarySecurityToken is not valid base64",
+                status=400,
+                content_type="text/plain; charset=utf-8",
+            )
+        if not p7_der or len(p7_der) > 8 * 1024 * 1024:
+            return Response(
+                "BinarySecurityToken size is invalid",
+                status=413 if len(p7_der) > 8 * 1024 * 1024 else 400,
+                content_type="text/plain; charset=utf-8",
+            )
+        request_id = enr_request_id if enr_request_id is not None else uuid.uuid4().int
+    elif enr_request_id is not None:
+        # Legacy pending polling may carry only the RequestID and no new token.
+        request_id = enr_request_id
+        try:
+            p7_der = _load_saved_request(request_id)
+        except FileNotFoundError as exc:
+            app.logger.error("File not found: %s", exc.filename)
+            return Response(
+                'File %s not found in path_list_request_id' % str(request_id),
+                content_type="application/soap+xml; charset=utf-8",
+                status=404,
+            )
     else:
-        ns_wsse = {
-            'wsse': "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"
-        }
-
-        bst_node = root.find('.//wsse:BinarySecurityToken', ns_wsse)
-        p7_der = base64.b64decode(bst_node.text)
-        request_id = uuid.uuid4().int
-
-    csr_der, body_part_id, info = exct_csr_from_cmc(p7_der)
+        return Response(
+            "Missing BinarySecurityToken",
+            status=400,
+            content_type="text/plain; charset=utf-8",
+        )
 
     username = g.username
+
+    try:
+        csr_der, body_part_id, info = exct_csr_from_cmc(p7_der)
+    except Exception as exc:
+        app.logger.warning("Legacy CMC/PKCS#10 request rejected: %s", exc)
+        return Response(
+            "Invalid CMC/PKCS#10 enrollment request",
+            status=400,
+            content_type="text/plain; charset=utf-8",
+        )
 
     # Rebuild templates for this CES request.
     templates_for_user, _ = build_templates_for_policy_response(
@@ -334,12 +385,6 @@ def ces_service(CAID):
     if not tpl['permissions']['enroll']:
         return Response("You do not have permission to enroll on this template", 403)
 
-    dict_id_ca = {u['id']: u for u in app.confadcs['cas_list']}
-    ca = dict_id_ca.get(CAID)
-
-    if not ca:
-        return Response("CAID not found", 403)
-
     if ca.get("__refid") not in set(tpl.get("__ca_refids") or []):
         return Response(
             '%s not in ca_references for template %s' %
@@ -349,35 +394,49 @@ def ces_service(CAID):
 
     cb = (tpl.get("__callback") if tpl else (app.confadcs.get("__default_callback"))) or {}
     cb_path = cb.get("path")
+    cb_validate_tpm = cb.get("validate_tpm", "validate_tpm")
     cb_issue = cb.get("issue")
 
+    validate_tpm = load_func(cb_path, cb_validate_tpm)
     emit_certificate = load_func(cb_path, cb_issue)
 
     ces_uri = f"{_https_base_url()}/CES/{CAID}"
 
-    if challenge['is_challenge_response']:
-        tpm_result = verify_tpm_for_template(
-            csr_der=csr_der,
-            challenge_response_der=base64.b64decode(
-                challenge["challenge_response"],
-                validate=True,
-            ),
-            template=tpl,
-            request_id=request_id,
-            ca=ca,
-            pending_dir=app.confadcs["tpm_pending_dir"],
-            pending_challenge_max_age_seconds=app.confadcs["tpm_pending_challenge_max_age_seconds"],
-        )
-    else:
-        tpm_result = verify_tpm_for_template(
-            csr_der=csr_der,
-            cmc_der=p7_der,
-            template=tpl,
-            request_id=request_id,
-            ca=ca,
-            pending_dir=app.confadcs["tpm_pending_dir"],
-            pending_challenge_max_age_seconds=app.confadcs["tpm_pending_challenge_max_age_seconds"],
-        )
+    try:
+        if challenge['is_challenge_response']:
+            try:
+                challenge_response_der = base64.b64decode(
+                    challenge["challenge_response"],
+                    validate=True,
+                )
+            except Exception as exc:
+                raise ValueError("TPM challenge response is not valid base64") from exc
+            tpm_result = verify_tpm_for_template(
+                csr_der=csr_der,
+                challenge_response_der=challenge_response_der,
+                template=tpl,
+                request_id=request_id,
+                ca=ca,
+                pending_dir=app.confadcs["tpm_pending_dir"],
+                pending_challenge_max_age_seconds=app.confadcs["tpm_pending_challenge_max_age_seconds"],
+                username=username,
+                ca_id=CAID,
+            )
+        else:
+            tpm_result = verify_tpm_for_template(
+                csr_der=csr_der,
+                cmc_der=p7_der,
+                template=tpl,
+                request_id=request_id,
+                ca=ca,
+                pending_dir=app.confadcs["tpm_pending_dir"],
+                pending_challenge_max_age_seconds=app.confadcs["tpm_pending_challenge_max_age_seconds"],
+                username=username,
+                ca_id=CAID,
+            )
+    except (TypeError, ValueError) as exc:
+        app.logger.warning("TPM key-attestation request rejected: %s", exc)
+        return Response(str(exc), status=400, content_type="text/plain; charset=utf-8")
 
     if tpm_result.get("status") == "pending":
         status_text = "Waiting for processing"
@@ -403,22 +462,47 @@ def ces_service(CAID):
 
         return response
 
-    result = _call_callback_with_params(
-        emit_certificate,
-        params=cb.get("params"),
-        csr_der=csr_der,
-        request_id=request_id,
-        username=username,
-        ca=ca,
-        template=tpl,
-        info=info,
-        app_conf=app.confadcs,
-        CAID=CAID,
-        request=request,
-        body_part_id=body_part_id,
-        p7_der=p7_der,
-        tpm_result=tpm_result
-    )
+    try:
+        tpm_policy_decision = _call_validate_tpm_strict(
+            validate_tpm,
+            params=cb.get("params"),
+            tpm_result=tpm_result,
+            username=username,
+            request=request,
+            app_conf=app.confadcs,
+            ca=ca,
+            template=tpl,
+        )
+    except Exception:
+        app.logger.exception(
+            "Template TPM validation callback failed for template %s",
+            tpl.get("common_name"),
+        )
+        tpm_policy_decision = False
+
+    if tpm_policy_decision is not True:
+        result = {
+            "status": "denied",
+            "status_text": "TPM validation rejected by template callback",
+            "error_code": CERTSRV_E_KEY_ATTESTATION,
+        }
+    else:
+        result = _call_callback_with_params(
+            emit_certificate,
+            params=cb.get("params"),
+            csr_der=csr_der,
+            request_id=request_id,
+            username=username,
+            ca=ca,
+            template=tpl,
+            info=info,
+            app_conf=app.confadcs,
+            CAID=CAID,
+            request=request,
+            body_part_id=body_part_id,
+            p7_der=p7_der,
+            tpm_result=tpm_result,
+        )
 
     csr_path = os.path.join(ca['__path_csr'], f"{request_id}.pem")
 
@@ -487,17 +571,31 @@ def ces_service(CAID):
         cert_val = result.get("cert")
 
         if isinstance(cert_val, cx509.Certificate):
+            cert_obj = cert_val
             cert_der = cert_val.public_bytes(serialization.Encoding.DER)
 
         elif isinstance(cert_val, (bytes, bytearray, memoryview)):
             cert_der = bytes(cert_val)
-            cx509.load_der_x509_certificate(cert_der)
+            cert_obj = cx509.load_der_x509_certificate(cert_der)
 
         else:
             return Response(
                 "Callback(issued) must return 'cert' (x509 or DER bytes)",
                 status=500,
                 content_type="text/plain; charset=utf-8"
+            )
+
+        try:
+            validate_tpm_attestation_certificate_extensions(cert_obj, tpm_result)
+        except ValueError as exc:
+            app.logger.error(
+                "Issuance callback returned a certificate inconsistent with TPM result: %s",
+                exc,
+            )
+            return Response(
+                str(exc),
+                status=500,
+                content_type="text/plain; charset=utf-8",
             )
 
         # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wcce/2524682a-9587-4ac1-8adf-7e8094baa321
