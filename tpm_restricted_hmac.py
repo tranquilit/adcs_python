@@ -6,10 +6,12 @@ normal AD CS CMC/PKCS#10 V2 enrollment flow.  The retired SCEP messageType
 part of the supported surface.
 
 The value of ``szOID_ENROLL_ATTESTATION_CHALLENGE`` is the Microsoft ``BKWT``
-carrier: a 28-byte little-endian header followed by the buffer contents of
-``TPM2B_ENCRYPTED_SECRET``, ``TPM2B_PRIVATE`` and ``TPM2B_PUBLIC``.  The header
-already carries the three lengths; the two-byte TPM2B size fields are rebuilt
-by the client before calling ``TPM2_Import``.
+carrier: a 28-byte little-endian header followed by the three byte buffers that
+are supplied to ``TPM2_Import`` as ``TPM2B_ENCRYPTED_SECRET``,
+``TPM2B_PRIVATE`` and ``TPM2B_PUBLIC`` *contents*.  The BKWT header already
+contains the length of each area, so the areas do not contain an additional
+outer two-byte TPM2B length prefix.  Structures nested inside those buffers
+remain canonically marshalled in TPM big-endian form.
 """
 
 from __future__ import annotations
@@ -55,7 +57,6 @@ WINDOWS_WRAPPED_KEY_MAGIC = b"BKWT"
 WINDOWS_WRAPPED_KEY_VERSION = 1
 WINDOWS_WRAPPED_KEY_PLATFORM_TPM20 = 2
 WINDOWS_WRAPPED_KEY_HEADER_SIZE = 28
-WINDOWS_WRAPPED_KEY_AREA_FORMAT = "tpm2b_contents"
 
 
 class RestrictedHMACError(ValueError):
@@ -332,20 +333,85 @@ def _tpm2b(data: bytes) -> bytes:
         raise RestrictedHMACError("TPM2B payload exceeds the UINT16 size limit")
     return struct.pack(">H", len(data)) + data
 
-def _decode_tpm2b_area(raw: bytes, *, label: str) -> bytes:
-    """Validate one complete canonical TPM2B structure and return its buffer."""
+def _as_tpm2b_contents(raw: bytes, *, label: str) -> bytes:
+    """Validate one TPM2B buffer value whose size is carried by BKWT.
+
+    ``TPM2_Import`` APIs normally expose a TPM2B as a host structure containing
+    ``size`` plus ``buffer``.  BKWT provides the host-side size in its own fixed
+    header and carries only the corresponding ``buffer`` bytes.
+    """
     if not isinstance(raw, (bytes, bytearray, memoryview)):
         raise TypeError(f"{label} must be bytes-like")
     raw = bytes(raw)
-    if len(raw) < 2:
-        raise RestrictedHMACError(f"{label} is shorter than a TPM2B size field")
-    declared = struct.unpack_from(">H", raw, 0)[0]
-    if declared != len(raw) - 2:
+    if not raw:
+        raise RestrictedHMACError(f"{label} must not be empty")
+    if len(raw) > 0xFFFF:
+        raise RestrictedHMACError(f"{label} exceeds the TPM2B UINT16 size limit")
+    return raw
+
+
+def _has_redundant_tpm2b_prefix(raw: bytes) -> bool:
+    """Return whether an area is itself encoded as a complete TPM2B.
+
+    This is used to reject the previous implementation's redundant framing.
+    It is deliberately only applied to the public area, whose first bytes are
+    the TPM public type and can therefore not legitimately equal its size.
+    """
+    return len(raw) >= 2 and struct.unpack_from(">H", raw, 0)[0] == len(raw) - 2
+
+
+def _read_tpm2b_contents(raw: bytes, pos: int, *, label: str) -> tuple[bytes, int]:
+    if pos + 2 > len(raw):
+        raise RestrictedHMACError(f"{label} is truncated before a TPM2B length")
+    size = struct.unpack_from(">H", raw, pos)[0]
+    pos += 2
+    end = pos + size
+    if end > len(raw):
+        raise RestrictedHMACError(f"{label} contains a truncated TPM2B value")
+    return raw[pos:end], end
+
+
+def _validate_restricted_hmac_public_area(public: bytes) -> None:
+    """Validate the exact TPMT_PUBLIC template imported by the client."""
+    if len(public) < 14:
+        raise RestrictedHMACError("BKWT public area is truncated")
+    object_type, name_alg, attributes = struct.unpack_from(">HHI", public, 0)
+    if object_type != TPM2_ALG_KEYEDHASH:
         raise RestrictedHMACError(
-            f"{label} length is inconsistent: header declares {declared} bytes, "
-            f"area contains {len(raw) - 2}"
+            f"BKWT public object is not TPM_ALG_KEYEDHASH: {object_type:#06x}"
         )
-    return raw[2:]
+    if name_alg != TPM2_ALG_SHA256:
+        raise RestrictedHMACError(
+            f"BKWT public object nameAlg is not SHA256: {name_alg:#06x}"
+        )
+    expected_attributes = (
+        TPMA_OBJECT_USERWITHAUTH
+        | TPMA_OBJECT_NODA
+        | TPMA_OBJECT_RESTRICTED
+        | TPMA_OBJECT_SIGN_ENCRYPT
+    )
+    if attributes != expected_attributes:
+        raise RestrictedHMACError(
+            "BKWT public object attributes do not match the restricted-HMAC template"
+        )
+    auth_policy, pos = _read_tpm2b_contents(
+        public, 8, label="BKWT public authPolicy"
+    )
+    if auth_policy:
+        raise RestrictedHMACError("BKWT restricted-HMAC authPolicy must be empty")
+    if pos + 4 > len(public):
+        raise RestrictedHMACError("BKWT keyed-hash scheme is truncated")
+    scheme, hash_alg = struct.unpack_from(">HH", public, pos)
+    pos += 4
+    if scheme != TPM2_ALG_HMAC or hash_alg != TPM2_ALG_SHA256:
+        raise RestrictedHMACError(
+            "BKWT public object must use TPM_ALG_HMAC with SHA256"
+        )
+    unique, pos = _read_tpm2b_contents(public, pos, label="BKWT public unique")
+    if len(unique) != hashlib.sha256().digest_size:
+        raise RestrictedHMACError("BKWT public unique value must be 32 bytes")
+    if pos != len(public):
+        raise RestrictedHMACError("BKWT public area contains trailing bytes")
 
 def _oaep_params_sha256() -> a_algos.RSAESOAEPParams:
     return a_algos.RSAESOAEPParams(
@@ -476,93 +542,8 @@ def _marshal_restricted_hmac_sensitive(hmac_key: bytes, obfuscate: bytes) -> byt
         + _tpm2b(hmac_key)
     )
 
-@dataclass(frozen=True)
-class EKImportParameters:
-    """TPM parent parameters needed by the duplication outer wrapper.
-
-    EK_INFO carries a SubjectPublicKeyInfo rather than the complete TPMT_PUBLIC,
-    so the verifier reconstructs the standard TCG EK import parameters from the
-    public-key algorithm and size.  Keeping this object explicit avoids silently
-    hard-coding AES-128/SHA-256 for every EK profile.
-    """
-
-    name_alg: int
-    oaep_hash_alg: int
-    symmetric_algorithm: int
-    symmetric_key_bits: int
-    symmetric_mode: int
-    profile: str
-
-    def as_dict(self) -> dict[str, int | str]:
-        return {
-            "name_alg": self.name_alg,
-            "oaep_hash_alg": self.oaep_hash_alg,
-            "symmetric_algorithm": self.symmetric_algorithm,
-            "symmetric_key_bits": self.symmetric_key_bits,
-            "symmetric_mode": self.symmetric_mode,
-            "profile": self.profile,
-        }
-
-
-def resolve_ek_import_parameters(ek_public) -> EKImportParameters:
-    """Reconstruct supported standard EK import parameters from an SPKI key."""
-    if isinstance(ek_public, rsa.RSAPublicKey):
-        if ek_public.key_size == 2048:
-            return EKImportParameters(
-                name_alg=tpm_mod.TPM2_ALG_SHA256,
-                oaep_hash_alg=tpm_mod.TPM2_ALG_SHA256,
-                symmetric_algorithm=TPM2_ALG_AES,
-                symmetric_key_bits=128,
-                symmetric_mode=TPM2_ALG_CFB,
-                profile="tcg-rsa2048-sha256-aes128cfb",
-            )
-        if ek_public.key_size in {3072, 4096}:
-            return EKImportParameters(
-                name_alg=tpm_mod.TPM2_ALG_SHA384,
-                oaep_hash_alg=tpm_mod.TPM2_ALG_SHA384,
-                symmetric_algorithm=TPM2_ALG_AES,
-                symmetric_key_bits=256,
-                symmetric_mode=TPM2_ALG_CFB,
-                profile=f"tcg-rsa{ek_public.key_size}-sha384-aes256cfb",
-            )
-        raise RestrictedHMACError(
-            f"Unsupported RSA EK size for TPM2_Import: {ek_public.key_size}"
-        )
-
-    if isinstance(ek_public, ec.EllipticCurvePublicKey):
-        if isinstance(ek_public.curve, ec.SECP256R1):
-            return EKImportParameters(
-                name_alg=tpm_mod.TPM2_ALG_SHA256,
-                oaep_hash_alg=tpm_mod.TPM2_ALG_SHA256,
-                symmetric_algorithm=TPM2_ALG_AES,
-                symmetric_key_bits=128,
-                symmetric_mode=TPM2_ALG_CFB,
-                profile="tcg-ecc-p256-sha256-aes128cfb",
-            )
-        if isinstance(ek_public.curve, ec.SECP384R1):
-            return EKImportParameters(
-                name_alg=tpm_mod.TPM2_ALG_SHA384,
-                oaep_hash_alg=tpm_mod.TPM2_ALG_SHA384,
-                symmetric_algorithm=TPM2_ALG_AES,
-                symmetric_key_bits=256,
-                symmetric_mode=TPM2_ALG_CFB,
-                profile="tcg-ecc-p384-sha384-aes256cfb",
-            )
-        raise RestrictedHMACError(
-            f"Unsupported ECC EK curve for TPM2_Import: {type(ek_public.curve).__name__}"
-        )
-
-    raise RestrictedHMACError(
-        f"Unsupported EK public key type: {type(ek_public).__name__}"
-    )
-
-
-def _wrap_duplicate_seed(
-    ek_public,
-    seed: bytes,
-    import_parameters: EKImportParameters,
-) -> tuple[bytes, bytes]:
-    hash_obj = tpm_mod._tpm_alg_to_hash_obj(import_parameters.oaep_hash_alg)
+def _wrap_duplicate_seed(ek_public, seed: bytes, ek_name_alg: int) -> tuple[bytes, bytes]:
+    hash_obj = tpm_mod._tpm_alg_to_hash_obj(ek_name_alg)
     if isinstance(ek_public, rsa.RSAPublicKey):
         encrypted_secret = ek_public.encrypt(
             seed,
@@ -587,7 +568,7 @@ def _wrap_duplicate_seed(
         )
         coordinate_size = (ek_public.key_size + 7) // 8
         derived_seed = tpm_mod._kdfe(
-            import_parameters.name_alg,
+            ek_name_alg,
             shared,
             "DUPLICATE",
             eph[1 : 1 + coordinate_size],
@@ -601,69 +582,74 @@ def _wrap_duplicate_seed(
         return encrypted_secret, derived_seed
     raise RestrictedHMACError(f"Unsupported EK public key type: {type(ek_public).__name__}")
 
+def _ek_outer_wrap_parameters(ek_public) -> tuple[int, int]:
+    """Return the standard EK name algorithm and AES key size.
 
-def create_restricted_hmac_duplicate(
-    ek_public,
-    hmac_key: bytes,
-    *,
-    import_parameters: EKImportParameters | None = None,
-) -> dict[str, object]:
+    EK_INFO exposes the certified asymmetric public key but not the complete
+    TPMT_PUBLIC parent template.  Reconstruct the outer-wrap parameters from
+    the algorithm profile used by the standard storage EK templates.
+    """
+    name_alg = tpm_mod.infer_ek_name_alg_from_public_key(ek_public)
+    if isinstance(ek_public, rsa.RSAPublicKey):
+        if ek_public.key_size == 2048:
+            return name_alg, 128
+        if ek_public.key_size in {3072, 4096}:
+            return name_alg, 256
+        raise RestrictedHMACError(
+            f"Unsupported RSA EK size for restricted-HMAC import: {ek_public.key_size}"
+        )
+    if isinstance(ek_public, ec.EllipticCurvePublicKey):
+        if isinstance(ek_public.curve, ec.SECP256R1):
+            return name_alg, 128
+        if isinstance(ek_public.curve, (ec.SECP384R1, ec.SECP521R1)):
+            return name_alg, 256
+        raise RestrictedHMACError(
+            "Unsupported ECC EK curve for restricted-HMAC import: "
+            f"{type(ek_public.curve).__name__}"
+        )
+    raise RestrictedHMACError(
+        f"Unsupported EK public key type: {type(ek_public).__name__}"
+    )
+
+
+def create_restricted_hmac_duplicate(ek_public, hmac_key: bytes) -> dict[str, bytes | int]:
     if len(hmac_key) != HMAC_KEY_BYTES:
         raise RestrictedHMACError("Restricted HMAC key must be exactly 32 bytes")
-    import_parameters = import_parameters or resolve_ek_import_parameters(ek_public)
-    if import_parameters.symmetric_algorithm != TPM2_ALG_AES:
-        raise RestrictedHMACError("Only an AES EK parent symmetric algorithm is supported")
-    if import_parameters.symmetric_mode != TPM2_ALG_CFB:
-        raise RestrictedHMACError("Only the TPM CFB parent mode is supported")
-    if import_parameters.symmetric_key_bits not in {128, 192, 256}:
-        raise RestrictedHMACError("Unsupported EK parent AES key length")
-
     obfuscate = os.urandom(32)
     public_area = _marshal_restricted_hmac_public(hmac_key, obfuscate)
     sensitive = _marshal_restricted_hmac_sensitive(hmac_key, obfuscate)
     object_name = struct.pack(">H", TPM2_ALG_SHA256) + hashlib.sha256(public_area).digest()
-    seed_size = hashlib.new(
-        tpm_mod._tpm_alg_to_hash(import_parameters.oaep_hash_alg)
-    ).digest_size
-    seed = os.urandom(seed_size)
-    encrypted_secret, seed = _wrap_duplicate_seed(
-        ek_public, seed, import_parameters
-    )
+    ek_name_alg, symmetric_key_bits = _ek_outer_wrap_parameters(ek_public)
+    seed = os.urandom(hashlib.new(tpm_mod._tpm_alg_to_hash(ek_name_alg)).digest_size)
+    encrypted_secret, seed = _wrap_duplicate_seed(ek_public, seed, ek_name_alg)
 
     sym_key = tpm_mod._kdfa(
-        import_parameters.name_alg,
+        ek_name_alg,
         seed,
         "STORAGE",
         object_name,
         b"",
-        import_parameters.symmetric_key_bits,
+        symmetric_key_bits,
     )
     encryptor = Cipher(algorithms.AES(sym_key), modes.CFB(b"\x00" * 16)).encryptor()
     encrypted_sensitive = encryptor.update(_tpm2b(sensitive)) + encryptor.finalize()
-    digest_bits = hashlib.new(
-        tpm_mod._tpm_alg_to_hash(import_parameters.name_alg)
-    ).digest_size * 8
+    digest_bits = hashlib.new(tpm_mod._tpm_alg_to_hash(ek_name_alg)).digest_size * 8
     integrity_key = tpm_mod._kdfa(
-        import_parameters.name_alg, seed, "INTEGRITY", b"", b"", digest_bits
+        ek_name_alg, seed, "INTEGRITY", b"", b"", digest_bits
     )
     integrity = hmac.new(
         integrity_key,
         encrypted_sensitive + object_name,
-        tpm_mod._tpm_alg_to_hash(import_parameters.name_alg),
+        tpm_mod._tpm_alg_to_hash(ek_name_alg),
     ).digest()
     private_buffer = _tpm2b(integrity) + encrypted_sensitive
-    encrypted_secret_tpm2b = _tpm2b(encrypted_secret)
-    private_tpm2b = _tpm2b(private_buffer)
-    public_tpm2b = _tpm2b(public_area)
     return {
-        "encrypted_secret_tpm2b": encrypted_secret_tpm2b,
-        "private_tpm2b": private_tpm2b,
-        "public_tpm2b": public_tpm2b,
         "encrypted_secret_buffer": encrypted_secret,
         "private_buffer": private_buffer,
         "public_area": public_area,
         "object_name": object_name,
-        "ek_import_parameters": import_parameters.as_dict(),
+        "ek_name_alg": ek_name_alg,
+        "symmetric_key_bits": symmetric_key_bits,
     }
 
 def build_kast(*, id_binding: bytes = b"", key_attestation: bytes = b"", aik_opaque: bytes = b"") -> bytes:
@@ -699,61 +685,36 @@ def build_key_attestation(*, key_attest: bytes, signature: bytes, key_blob: byte
         + key_blob
     )
 
-def _coerce_tpm2b_contents(
-    *,
-    label: str,
-    contents: bytes | None,
-    tpm2b: bytes | None,
-) -> bytes:
-    if contents is not None and tpm2b is not None:
-        raise RestrictedHMACError(
-            f"Specify either {label} contents or the compatibility TPM2B value, not both"
-        )
-    if tpm2b is not None:
-        contents = _decode_tpm2b_area(bytes(tpm2b), label=label)
-    if contents is None:
-        raise RestrictedHMACError(f"Missing {label} contents")
-    contents = bytes(contents)
-    if not contents:
-        raise RestrictedHMACError(f"{label} contents must be non-empty")
-    return contents
-
-
 def encode_windows_wrapped_key(
     *,
-    encrypted_secret: bytes | None = None,
-    private: bytes | None = None,
-    public: bytes | None = None,
-    encrypted_secret_tpm2b: bytes | None = None,
-    private_tpm2b: bytes | None = None,
-    public_tpm2b: bytes | None = None,
+    encrypted_secret: bytes,
+    private: bytes,
+    public: bytes,
 ) -> bytes:
     """Encode the Microsoft ``BKWT`` value carried by OID ``.21.28``.
 
-    The fixed header contains the lengths of the three TPM import buffers.  The
-    emitted areas are therefore the *contents* of TPM2B_ENCRYPTED_SECRET,
-    TPM2B_PRIVATE and TPM2B_PUBLIC, in the same form consumed by TPM2_Import.
-
-    The ``*_tpm2b`` keyword arguments remain accepted for source compatibility;
-    their canonical two-byte length prefixes are validated and removed before
-    encoding.  New callers should pass ``encrypted_secret``, ``private`` and
-    ``public`` directly.
+    The 28-byte header is a Windows host structure whose integer fields are
+    little-endian.  The three following areas are the TPM2B buffers consumed by
+    ``TPM2_Import``.  They do not repeat the outer TPM2B UINT16 size because the
+    BKWT header already carries each area length.
     """
-    encrypted_secret = _coerce_tpm2b_contents(
-        label="TPM2B_ENCRYPTED_SECRET",
-        contents=encrypted_secret,
-        tpm2b=encrypted_secret_tpm2b,
+    encrypted_secret = _as_tpm2b_contents(
+        encrypted_secret, label="TPM2B_ENCRYPTED_SECRET buffer"
     )
-    private = _coerce_tpm2b_contents(
-        label="TPM2B_PRIVATE",
-        contents=private,
-        tpm2b=private_tpm2b,
-    )
-    public = _coerce_tpm2b_contents(
-        label="TPM2B_PUBLIC",
-        contents=public,
-        tpm2b=public_tpm2b,
-    )
+    private = _as_tpm2b_contents(private, label="TPM2B_PRIVATE buffer")
+    public = _as_tpm2b_contents(public, label="TPM2B_PUBLIC buffer")
+    if _has_redundant_tpm2b_prefix(public):
+        raise RestrictedHMACError(
+            "BKWT public area contains a redundant TPM2B_PUBLIC size prefix"
+        )
+    _validate_restricted_hmac_public_area(public)
+    if len(private) < 3:
+        raise RestrictedHMACError("BKWT private area is truncated")
+    integrity_size = struct.unpack_from(">H", private, 0)[0]
+    if integrity_size <= 0 or 2 + integrity_size >= len(private):
+        raise RestrictedHMACError(
+            "BKWT private area does not contain a valid outer integrity digest"
+        )
     header = struct.pack(
         "<4s6I",
         WINDOWS_WRAPPED_KEY_MAGIC,
@@ -768,25 +729,8 @@ def encode_windows_wrapped_key(
         raise AssertionError("BKWT header size constant is inconsistent")
     return header + encrypted_secret + private + public
 
-
-def _all_areas_are_full_tpm2b(*areas: bytes) -> bool:
-    if not areas:
-        return False
-    for area in areas:
-        if len(area) < 3:
-            return False
-        if struct.unpack_from(">H", area, 0)[0] != len(area) - 2:
-            return False
-    return True
-
-
 def decode_windows_wrapped_key(raw: bytes) -> dict[str, bytes | int | str]:
-    """Strictly decode one Microsoft ``BKWT`` wrapped-key value.
-
-    New values use TPM2B buffer contents.  For diagnostics this parser also
-    recognizes the earlier project encoding where every area redundantly
-    included its TPM2B length prefix; callers can inspect ``area_format``.
-    """
+    """Strictly decode one Microsoft ``BKWT`` wrapped-key value."""
     if not isinstance(raw, (bytes, bytearray, memoryview)):
         raise TypeError("wrapped key must be bytes-like")
     raw = bytes(raw)
@@ -815,39 +759,34 @@ def decode_windows_wrapped_key(raw: bytes) -> dict[str, bytes | int | str]:
         raise RestrictedHMACError(
             f"Unsupported Microsoft wrapped-key header size: {header_size}"
         )
-    if not encrypted_secret_size or not private_size or not public_size:
-        raise RestrictedHMACError("Microsoft wrapped-key areas must all be non-empty")
     total = header_size + encrypted_secret_size + private_size + public_size
     if total != len(raw):
         raise RestrictedHMACError(
             "Microsoft wrapped-key area lengths are inconsistent with the payload"
         )
     pos = header_size
-    encrypted_secret_area = raw[pos : pos + encrypted_secret_size]
+    encrypted_secret = raw[pos : pos + encrypted_secret_size]
     pos += encrypted_secret_size
-    private_area = raw[pos : pos + private_size]
+    private = raw[pos : pos + private_size]
     pos += private_size
-    public_area = raw[pos : pos + public_size]
-
-    if _all_areas_are_full_tpm2b(
-        encrypted_secret_area, private_area, public_area
-    ):
-        area_format = "legacy_full_tpm2b"
-        encrypted_secret = _decode_tpm2b_area(
-            encrypted_secret_area, label="TPM2B_ENCRYPTED_SECRET"
+    public = raw[pos : pos + public_size]
+    encrypted_secret = _as_tpm2b_contents(
+        encrypted_secret, label="TPM2B_ENCRYPTED_SECRET buffer"
+    )
+    private = _as_tpm2b_contents(private, label="TPM2B_PRIVATE buffer")
+    public = _as_tpm2b_contents(public, label="TPM2B_PUBLIC buffer")
+    if _has_redundant_tpm2b_prefix(public):
+        raise RestrictedHMACError(
+            "BKWT public area contains a redundant TPM2B_PUBLIC size prefix"
         )
-        private_buffer = _decode_tpm2b_area(
-            private_area, label="TPM2B_PRIVATE"
+    _validate_restricted_hmac_public_area(public)
+    if len(private) < 3:
+        raise RestrictedHMACError("BKWT private area is truncated")
+    integrity_size = struct.unpack_from(">H", private, 0)[0]
+    if integrity_size <= 0 or 2 + integrity_size >= len(private):
+        raise RestrictedHMACError(
+            "BKWT private area does not contain a valid outer integrity digest"
         )
-        public_buffer = _decode_tpm2b_area(
-            public_area, label="TPM2B_PUBLIC"
-        )
-    else:
-        area_format = WINDOWS_WRAPPED_KEY_AREA_FORMAT
-        encrypted_secret = encrypted_secret_area
-        private_buffer = private_area
-        public_buffer = public_area
-
     return {
         "magic": magic,
         "version": version,
@@ -856,13 +795,10 @@ def decode_windows_wrapped_key(raw: bytes) -> dict[str, bytes | int | str]:
         "encrypted_secret_size": encrypted_secret_size,
         "private_size": private_size,
         "public_size": public_size,
-        "area_format": area_format,
         "encrypted_secret": encrypted_secret,
-        "private": private_buffer,
-        "public": public_buffer,
-        "encrypted_secret_tpm2b": _tpm2b(encrypted_secret),
-        "private_tpm2b": _tpm2b(private_buffer),
-        "public_tpm2b": _tpm2b(public_buffer),
+        "private": private,
+        "public": public,
+        "area_encoding": "tpm2b_contents",
     }
 
 # Protocol names retained as explicit aliases for callers; there is no runtime

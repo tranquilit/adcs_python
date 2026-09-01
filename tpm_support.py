@@ -868,9 +868,9 @@ def create_microsoft_v2_restricted_hmac_challenge_response(
     secrets = rh.generate_restricted_hmac_secrets()
     duplicate = rh.create_restricted_hmac_duplicate(ek_pub, secrets.hmac_key)
     wrapped_hmac_key = rh.encode_windows_wrapped_key(
-        encrypted_secret_tpm2b=duplicate["encrypted_secret_tpm2b"],
-        private_tpm2b=duplicate["private_tpm2b"],
-        public_tpm2b=duplicate["public_tpm2b"],
+        encrypted_secret=duplicate["encrypted_secret_buffer"],
+        private=duplicate["private_buffer"],
+        public=duplicate["public_area"],
     )
     ek_algorithm, ek_parameter = _v2_ek_cng_parameters(ek_pub)
     encryption_algorithm_oid = tpm_mod.extract_encryption_algorithm_for_challenge_response(
@@ -925,6 +925,9 @@ def create_microsoft_v2_restricted_hmac_challenge_response(
         "v2_container_name": container_name,
         "ek_algorithm": ek_algorithm,
         "ek_parameter": ek_parameter,
+        "bkwt_area_encoding": "tpm2b_contents",
+        "ek_name_alg": int(duplicate["ek_name_alg"]),
+        "ek_symmetric_key_bits": int(duplicate["symmetric_key_bits"]),
         "ek_cert_der_b64": base64.b64encode(ek_cert_der).decode("ascii") if ek_cert_der else None,
         "ek_certificates_der_b64": _pending_certificate_list(ek_certificates),
         "ek_cert_sha256": hashlib.sha256(ek_cert_der).hexdigest() if ek_cert_der else None,
@@ -953,6 +956,7 @@ def create_microsoft_v2_restricted_hmac_challenge_response(
         "ek_pub_spki_sha256": hashlib.sha256(ek_pub_der).hexdigest() if ek_pub_der else None,
         "v2_aik_spki_sha256": hashlib.sha256(v2_aik_spki_der).hexdigest(),
         "v2_container_name": container_name,
+        "bkwt_area_encoding": "tpm2b_contents",
     }
     _save_pending_challenge(safe_request_id, pending_payload, pending_dir)
     return {
@@ -974,6 +978,7 @@ def create_microsoft_v2_restricted_hmac_challenge_response(
         "aik_public_key": v2_aik_public_key,
         "aik_spki_der": v2_aik_spki_der,
         "v2_aik_spki_sha256": hashlib.sha256(v2_aik_spki_der).hexdigest(),
+        "bkwt_area_encoding": "tpm2b_contents",
         "firmware_version": certified_binding.get("firmware_version"),
         "certified_key_obj": certified_binding.get("certified_key_obj"),
         "certified_key_attributes": certified_binding.get("certified_key_attributes"),
