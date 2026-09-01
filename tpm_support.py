@@ -868,9 +868,9 @@ def create_microsoft_v2_restricted_hmac_challenge_response(
     secrets = rh.generate_restricted_hmac_secrets()
     duplicate = rh.create_restricted_hmac_duplicate(ek_pub, secrets.hmac_key)
     wrapped_hmac_key = rh.encode_windows_wrapped_key(
-        encrypted_secret=duplicate["encrypted_secret_buffer"],
-        private=duplicate["private_buffer"],
-        public=duplicate["public_area"],
+        encrypted_secret_tpm2b=duplicate["encrypted_secret_tpm2b"],
+        private_tpm2b=duplicate["private_tpm2b"],
+        public_tpm2b=duplicate["public_tpm2b"],
     )
     ek_algorithm, ek_parameter = _v2_ek_cng_parameters(ek_pub)
     encryption_algorithm_oid = tpm_mod.extract_encryption_algorithm_for_challenge_response(
@@ -907,7 +907,7 @@ def create_microsoft_v2_restricted_hmac_challenge_response(
     )
     ek_pub_der = _public_key_to_spki_der(ek_pub)
     state_payload = {
-        "state_version": 3,
+        "state_version": 4,
         "protocol": "v2_restricted_hmac_cmc",
         "request_id": safe_request_id,
         "created_at": now,
@@ -925,7 +925,7 @@ def create_microsoft_v2_restricted_hmac_challenge_response(
         "v2_container_name": container_name,
         "ek_algorithm": ek_algorithm,
         "ek_parameter": ek_parameter,
-        "bkwt_area_encoding": "tpm2b_contents",
+        "bkwt_area_encoding": "canonical_tpm2b",
         "ek_name_alg": int(duplicate["ek_name_alg"]),
         "ek_symmetric_key_bits": int(duplicate["symmetric_key_bits"]),
         "ek_cert_der_b64": base64.b64encode(ek_cert_der).decode("ascii") if ek_cert_der else None,
@@ -938,7 +938,7 @@ def create_microsoft_v2_restricted_hmac_challenge_response(
         state_payload, ket_cert_der=ket_cert_der
     )
     pending_payload = {
-        "state_version": 3,
+        "state_version": 4,
         "protocol": "v2_restricted_hmac_cmc",
         "request_id": safe_request_id,
         "created_at": now,
@@ -956,7 +956,7 @@ def create_microsoft_v2_restricted_hmac_challenge_response(
         "ek_pub_spki_sha256": hashlib.sha256(ek_pub_der).hexdigest() if ek_pub_der else None,
         "v2_aik_spki_sha256": hashlib.sha256(v2_aik_spki_der).hexdigest(),
         "v2_container_name": container_name,
-        "bkwt_area_encoding": "tpm2b_contents",
+        "bkwt_area_encoding": "canonical_tpm2b",
     }
     _save_pending_challenge(safe_request_id, pending_payload, pending_dir)
     return {
@@ -978,7 +978,7 @@ def create_microsoft_v2_restricted_hmac_challenge_response(
         "aik_public_key": v2_aik_public_key,
         "aik_spki_der": v2_aik_spki_der,
         "v2_aik_spki_sha256": hashlib.sha256(v2_aik_spki_der).hexdigest(),
-        "bkwt_area_encoding": "tpm2b_contents",
+        "bkwt_area_encoding": "canonical_tpm2b",
         "firmware_version": certified_binding.get("firmware_version"),
         "certified_key_obj": certified_binding.get("certified_key_obj"),
         "certified_key_attributes": certified_binding.get("certified_key_attributes"),
@@ -1036,7 +1036,7 @@ def _verify_pending_v2_challenge_response(
         )
         if state.get("protocol") != "v2_restricted_hmac_cmc" or int(
             state.get("state_version", -1)
-        ) != 3:
+        ) != 4:
             raise ValueError("Stored V2 attestation server state has an invalid version")
         for key in (
             "request_id",

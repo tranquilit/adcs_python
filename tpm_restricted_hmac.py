@@ -6,12 +6,11 @@ normal AD CS CMC/PKCS#10 V2 enrollment flow.  The retired SCEP messageType
 part of the supported surface.
 
 The value of ``szOID_ENROLL_ATTESTATION_CHALLENGE`` is the Microsoft ``BKWT``
-carrier: a 28-byte little-endian header followed by the three byte buffers that
-are supplied to ``TPM2_Import`` as ``TPM2B_ENCRYPTED_SECRET``,
-``TPM2B_PRIVATE`` and ``TPM2B_PUBLIC`` *contents*.  The BKWT header already
-contains the length of each area, so the areas do not contain an additional
-outer two-byte TPM2B length prefix.  Structures nested inside those buffers
-remain canonically marshalled in TPM big-endian form.
+carrier: a 28-byte little-endian Windows header followed by three complete,
+canonical TPM2B structures: ``TPM2B_ENCRYPTED_SECRET``, ``TPM2B_PRIVATE`` and
+``TPM2B_PUBLIC``.  Each TPM2B therefore includes its own two-byte big-endian
+size field; the BKWT header length fields describe the complete TPM2B byte
+strings, including those two bytes.
 """
 
 from __future__ import annotations
@@ -333,31 +332,26 @@ def _tpm2b(data: bytes) -> bytes:
         raise RestrictedHMACError("TPM2B payload exceeds the UINT16 size limit")
     return struct.pack(">H", len(data)) + data
 
-def _as_tpm2b_contents(raw: bytes, *, label: str) -> bytes:
-    """Validate one TPM2B buffer value whose size is carried by BKWT.
+def _decode_complete_tpm2b(raw: bytes, *, label: str) -> bytes:
+    """Validate and unwrap exactly one canonical TPM2B structure.
 
-    ``TPM2_Import`` APIs normally expose a TPM2B as a host structure containing
-    ``size`` plus ``buffer``.  BKWT provides the host-side size in its own fixed
-    header and carries only the corresponding ``buffer`` bytes.
+    BKWT carries the complete TPM2B encoding.  The embedded UINT16 size is TPM
+    wire order (big-endian) and MUST account for every remaining byte in the
+    area; prefixes, suffixes, truncation and buffer-only encodings are rejected.
     """
     if not isinstance(raw, (bytes, bytearray, memoryview)):
         raise TypeError(f"{label} must be bytes-like")
     raw = bytes(raw)
-    if not raw:
+    if len(raw) < 3:
+        raise RestrictedHMACError(f"{label} is truncated")
+    size = struct.unpack_from(">H", raw, 0)[0]
+    if size == 0:
         raise RestrictedHMACError(f"{label} must not be empty")
-    if len(raw) > 0xFFFF:
-        raise RestrictedHMACError(f"{label} exceeds the TPM2B UINT16 size limit")
-    return raw
-
-
-def _has_redundant_tpm2b_prefix(raw: bytes) -> bool:
-    """Return whether an area is itself encoded as a complete TPM2B.
-
-    This is used to reject the previous implementation's redundant framing.
-    It is deliberately only applied to the public area, whose first bytes are
-    the TPM public type and can therefore not legitimately equal its size.
-    """
-    return len(raw) >= 2 and struct.unpack_from(">H", raw, 0)[0] == len(raw) - 2
+    if size != len(raw) - 2:
+        raise RestrictedHMACError(
+            f"{label} is not one complete canonical TPM2B structure"
+        )
+    return raw[2:]
 
 
 def _read_tpm2b_contents(raw: bytes, pos: int, *, label: str) -> tuple[bytes, int]:
@@ -643,7 +637,15 @@ def create_restricted_hmac_duplicate(ek_public, hmac_key: bytes) -> dict[str, by
         tpm_mod._tpm_alg_to_hash(ek_name_alg),
     ).digest()
     private_buffer = _tpm2b(integrity) + encrypted_sensitive
+    encrypted_secret_tpm2b = _tpm2b(encrypted_secret)
+    private_tpm2b = _tpm2b(private_buffer)
+    public_tpm2b = _tpm2b(public_area)
     return {
+        # Exact Microsoft BKWT carrier areas: complete canonical TPM2B values.
+        "encrypted_secret_tpm2b": encrypted_secret_tpm2b,
+        "private_tpm2b": private_tpm2b,
+        "public_tpm2b": public_tpm2b,
+        # Inner buffers retained for TPM primitive tests and diagnostics.
         "encrypted_secret_buffer": encrypted_secret,
         "private_buffer": private_buffer,
         "public_area": public_area,
@@ -687,50 +689,63 @@ def build_key_attestation(*, key_attest: bytes, signature: bytes, key_blob: byte
 
 def encode_windows_wrapped_key(
     *,
-    encrypted_secret: bytes,
-    private: bytes,
-    public: bytes,
+    encrypted_secret_tpm2b: bytes,
+    private_tpm2b: bytes,
+    public_tpm2b: bytes,
 ) -> bytes:
-    """Encode the Microsoft ``BKWT`` value carried by OID ``.21.28``.
+    """Encode the exact Microsoft ``BKWT`` value carried by OID ``.21.28``.
 
-    The 28-byte header is a Windows host structure whose integer fields are
-    little-endian.  The three following areas are the TPM2B buffers consumed by
-    ``TPM2_Import``.  They do not repeat the outer TPM2B UINT16 size because the
-    BKWT header already carries each area length.
+    Layout::
+
+        28-byte Windows header (little-endian UINT32 fields)
+        TPM2B_ENCRYPTED_SECRET (complete canonical TPM2B)
+        TPM2B_PRIVATE          (complete canonical TPM2B)
+        TPM2B_PUBLIC           (complete canonical TPM2B)
+
+    The three BKWT area lengths include each TPM2B's two-byte big-endian size
+    prefix.  No implicit wrapping or buffer-only compatibility mode exists.
     """
-    encrypted_secret = _as_tpm2b_contents(
-        encrypted_secret, label="TPM2B_ENCRYPTED_SECRET buffer"
+    encrypted_secret_tpm2b = bytes(encrypted_secret_tpm2b)
+    private_tpm2b = bytes(private_tpm2b)
+    public_tpm2b = bytes(public_tpm2b)
+
+    encrypted_secret = _decode_complete_tpm2b(
+        encrypted_secret_tpm2b, label="TPM2B_ENCRYPTED_SECRET"
     )
-    private = _as_tpm2b_contents(private, label="TPM2B_PRIVATE buffer")
-    public = _as_tpm2b_contents(public, label="TPM2B_PUBLIC buffer")
-    if _has_redundant_tpm2b_prefix(public):
+    private_buffer = _decode_complete_tpm2b(
+        private_tpm2b, label="TPM2B_PRIVATE"
+    )
+    public_area = _decode_complete_tpm2b(
+        public_tpm2b, label="TPM2B_PUBLIC"
+    )
+    _validate_restricted_hmac_public_area(public_area)
+    if len(private_buffer) < 3:
+        raise RestrictedHMACError("BKWT TPM2B_PRIVATE buffer is truncated")
+    integrity_size = struct.unpack_from(">H", private_buffer, 0)[0]
+    if integrity_size <= 0 or 2 + integrity_size >= len(private_buffer):
         raise RestrictedHMACError(
-            "BKWT public area contains a redundant TPM2B_PUBLIC size prefix"
+            "BKWT TPM2B_PRIVATE does not contain a valid outer integrity digest"
         )
-    _validate_restricted_hmac_public_area(public)
-    if len(private) < 3:
-        raise RestrictedHMACError("BKWT private area is truncated")
-    integrity_size = struct.unpack_from(">H", private, 0)[0]
-    if integrity_size <= 0 or 2 + integrity_size >= len(private):
-        raise RestrictedHMACError(
-            "BKWT private area does not contain a valid outer integrity digest"
-        )
+    if not encrypted_secret:
+        raise RestrictedHMACError("BKWT TPM2B_ENCRYPTED_SECRET must not be empty")
+
     header = struct.pack(
         "<4s6I",
         WINDOWS_WRAPPED_KEY_MAGIC,
         WINDOWS_WRAPPED_KEY_VERSION,
         WINDOWS_WRAPPED_KEY_PLATFORM_TPM20,
         WINDOWS_WRAPPED_KEY_HEADER_SIZE,
-        len(encrypted_secret),
-        len(private),
-        len(public),
+        len(encrypted_secret_tpm2b),
+        len(private_tpm2b),
+        len(public_tpm2b),
     )
     if len(header) != WINDOWS_WRAPPED_KEY_HEADER_SIZE:
         raise AssertionError("BKWT header size constant is inconsistent")
-    return header + encrypted_secret + private + public
+    return header + encrypted_secret_tpm2b + private_tpm2b + public_tpm2b
+
 
 def decode_windows_wrapped_key(raw: bytes) -> dict[str, bytes | int | str]:
-    """Strictly decode one Microsoft ``BKWT`` wrapped-key value."""
+    """Strictly decode one exact Microsoft ``BKWT`` wrapped-key value."""
     if not isinstance(raw, (bytes, bytearray, memoryview)):
         raise TypeError("wrapped key must be bytes-like")
     raw = bytes(raw)
@@ -764,29 +779,32 @@ def decode_windows_wrapped_key(raw: bytes) -> dict[str, bytes | int | str]:
         raise RestrictedHMACError(
             "Microsoft wrapped-key area lengths are inconsistent with the payload"
         )
+
     pos = header_size
-    encrypted_secret = raw[pos : pos + encrypted_secret_size]
+    encrypted_secret_tpm2b = raw[pos : pos + encrypted_secret_size]
     pos += encrypted_secret_size
-    private = raw[pos : pos + private_size]
+    private_tpm2b = raw[pos : pos + private_size]
     pos += private_size
-    public = raw[pos : pos + public_size]
-    encrypted_secret = _as_tpm2b_contents(
-        encrypted_secret, label="TPM2B_ENCRYPTED_SECRET buffer"
+    public_tpm2b = raw[pos : pos + public_size]
+
+    encrypted_secret = _decode_complete_tpm2b(
+        encrypted_secret_tpm2b, label="TPM2B_ENCRYPTED_SECRET"
     )
-    private = _as_tpm2b_contents(private, label="TPM2B_PRIVATE buffer")
-    public = _as_tpm2b_contents(public, label="TPM2B_PUBLIC buffer")
-    if _has_redundant_tpm2b_prefix(public):
+    private_buffer = _decode_complete_tpm2b(
+        private_tpm2b, label="TPM2B_PRIVATE"
+    )
+    public_area = _decode_complete_tpm2b(
+        public_tpm2b, label="TPM2B_PUBLIC"
+    )
+    _validate_restricted_hmac_public_area(public_area)
+    if len(private_buffer) < 3:
+        raise RestrictedHMACError("BKWT TPM2B_PRIVATE buffer is truncated")
+    integrity_size = struct.unpack_from(">H", private_buffer, 0)[0]
+    if integrity_size <= 0 or 2 + integrity_size >= len(private_buffer):
         raise RestrictedHMACError(
-            "BKWT public area contains a redundant TPM2B_PUBLIC size prefix"
+            "BKWT TPM2B_PRIVATE does not contain a valid outer integrity digest"
         )
-    _validate_restricted_hmac_public_area(public)
-    if len(private) < 3:
-        raise RestrictedHMACError("BKWT private area is truncated")
-    integrity_size = struct.unpack_from(">H", private, 0)[0]
-    if integrity_size <= 0 or 2 + integrity_size >= len(private):
-        raise RestrictedHMACError(
-            "BKWT private area does not contain a valid outer integrity digest"
-        )
+
     return {
         "magic": magic,
         "version": version,
@@ -795,10 +813,13 @@ def decode_windows_wrapped_key(raw: bytes) -> dict[str, bytes | int | str]:
         "encrypted_secret_size": encrypted_secret_size,
         "private_size": private_size,
         "public_size": public_size,
+        "encrypted_secret_tpm2b": encrypted_secret_tpm2b,
+        "private_tpm2b": private_tpm2b,
+        "public_tpm2b": public_tpm2b,
         "encrypted_secret": encrypted_secret,
-        "private": private,
-        "public": public,
-        "area_encoding": "tpm2b_contents",
+        "private": private_buffer,
+        "public": public_area,
+        "area_encoding": "canonical_tpm2b",
     }
 
 # Protocol names retained as explicit aliases for callers; there is no runtime
