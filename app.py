@@ -420,6 +420,13 @@ def ces_service(CAID):
         tpm_result=tpm_result
     )
 
+    if str(result.get("status", "")).lower() == "unsupported_auth":
+        return Response(
+            result.get("status_text") or "Unsupported authentication method",
+            status=401,
+            headers={"WWW-Authenticate": result.get("www_authenticate", "Negotiate")},
+        )
+
     csr_path = os.path.join(ca['__path_csr'], f"{request_id}.pem")
 
     if not os.path.isfile(csr_path):
