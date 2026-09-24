@@ -1270,10 +1270,7 @@ def _cmd_create_ca(
 
     print(f'    display_name: "{display_name}"')
     print("    urls:")
-    if result.get('key_path'):
-        print(f'      crl_http:        "{aia_crl_base_url}/crl/{slug}/{os.path.basename(crl_path)}"')
-    else:
-        print("      crl_http:        null")
+    print(f'      crl_http:        "{aia_crl_base_url}/crl/{slug}/{os.path.basename(crl_path)}"')
     print(f'      ca_issuers_http: "{aia_crl_base_url}/certs/{slug}/{os.path.basename(crt_path)}"')
     print("    pem:")
     print(f"      certificate_path_pem: {crt_path}")
@@ -1285,11 +1282,7 @@ def _cmd_create_ca(
         print("      key_passphrase: null")
     print("")
     print("    crl:")
-    if result.get('key_path'):
-        print(f"      path_crl: {crl_path}")
-    else:
-        print("      path_crl: null")
-        print("      # No CRL was created: --csr-path supplies only a public key, not the CA private key needed to sign CRLs.")
+    print(f"      path_crl: {crl_path}")
     print("")
     print("    storage_paths:")
     print(f"      cert_dir: /var/lib/adcs/pki/newcerts/{slug}/")
