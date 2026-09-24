@@ -1278,7 +1278,8 @@ def _cmd_create_ca(
         print(f"      key_path_pem:         {key_path}")
         print("      key_passphrase: null")
     else:
-        print("      key_path_pem:         null")
+        guessed_key_path = f"/var/lib/adcs/pki/private/{slug}/{slug}.key.pem"
+        print(f"      key_path_pem:         {guessed_key_path}")
         print("      key_passphrase: null")
     print("")
     print("    crl:")
