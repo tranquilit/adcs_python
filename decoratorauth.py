@@ -1,4 +1,8 @@
-import kerberos
+import base64
+import binascii
+
+import gssapi
+
 from flask import request, Response, g
 from flask import current_app
 from functools import wraps
@@ -14,41 +18,92 @@ def kerberos_authenticate(auth_header):
     if not auth_header or not auth_header.startswith("Negotiate "):
         return None, None
 
-    token = auth_header[len("Negotiate "):]
-    context = None
-    try:
-        service = "HTTP@" + request.host.split(":")[0].lower()
-        try:
-            rc, context = kerberos.authGSSServerInit(service)
-        except kerberos.GSSError:
-            rc, context = kerberos.authGSSServerInit(service.lower())
-        if rc != kerberos.AUTH_GSS_COMPLETE:
-            return None, None
+    token_b64 = auth_header[len("Negotiate "):].strip()
 
-        rc = kerberos.authGSSServerStep(context, token)
-        if rc == kerberos.AUTH_GSS_COMPLETE:
-            user = kerberos.authGSSServerUserName(context)
-            response_token = kerberos.authGSSServerResponse(context)
-            return user, response_token
+    if not token_b64:
         return None, None
-    except kerberos.GSSError as exc:
+
+    try:
+        # HTTP Negotiate transports GSSAPI tokens encoded in Base64.
+        token = base64.b64decode(token_b64, validate=True)
+
+        conf = current_app.confadcs
+
+        # Prefer a fixed Kerberos hostname from the configuration.
+        # Fall back to the HTTP Host header for compatibility.
+        hostname = conf.get("kerberos_hostname")
+
+        if not hostname:
+            hostname = request.host.split(":", 1)[0]
+
+        hostname = hostname.lower()
+
+        # hostbased_service "HTTP@hostname" maps to:
+        # HTTP/hostname@REALM
+        service_name = gssapi.Name(
+            f"HTTP@{hostname}",
+            name_type=gssapi.NameType.hostbased_service,
+        )
+
+        server_creds = gssapi.Credentials(
+            name=service_name,
+            usage="accept",
+        )
+
+        context = gssapi.SecurityContext(
+            creds=server_creds,
+            usage="accept",
+        )
+
+        response_token_raw = context.step(token)
+
+        response_token = None
+        if response_token_raw:
+            response_token = base64.b64encode(
+                response_token_raw
+            ).decode("ascii")
+
+        # SPNEGO/GSSAPI can require more than one exchange.
+        # Return the server token even if the context is not complete yet.
+        if not context.complete:
+            return None, response_token
+
+        initiator_name = context.initiator_name
+
+        if initiator_name is None:
+            return None, response_token
+
+        user = str(initiator_name)
+
+        return user, response_token
+
+    except (
+        gssapi.exceptions.GSSError,
+        binascii.Error,
+        UnicodeEncodeError,
+        ValueError,
+    ) as exc:
         logger.debug(
             "event=kerberos_auth_error host=%s error=%s",
             safe_log_value(request.host),
             safe_log_value(exc),
         )
         return None, None
-    finally:
-        if context is not None:
-            try:
-                kerberos.authGSSServerClean(context)
-            except Exception:
-                pass
 
 
-def _unauthorized():
-    return Response("Unauthorized", 401, {'WWW-Authenticate': 'Negotiate'})
+def _unauthorized(response_token=None):
+    if response_token:
+        authenticate_header = "Negotiate " + response_token
+    else:
+        authenticate_header = "Negotiate"
 
+    return Response(
+        "Unauthorized",
+        401,
+        {
+            "WWW-Authenticate": authenticate_header
+        },
+    )
 
 def _extract_username_password_from_soap(raw):
     if not raw:
@@ -121,6 +176,10 @@ def auth_required(f):
             user, response_token = kerberos_authenticate(auth_header)
             if user:
                 auth_method = 'kerberos'
+            elif response_token:
+                # GSSAPI/SPNEGO may require an intermediate token to be sent
+                # back to the client before authentication can complete.
+                return _unauthorized(response_token)
 
         # Username/password authentication is tried only when enabled. The
         # callback path still lives under auth.callback in adcs.yaml.

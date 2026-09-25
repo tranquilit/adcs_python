@@ -5,7 +5,7 @@ cryptography
 defusedxml
 pyasn1
 PyYAML
-pykerberos
+gssapi
 requests
 textual
 python-pkcs11

@@ -80,7 +80,7 @@ apt-get install -y \
        python3-textual \
        python3-flask \
        python3-asn1crypto \
-       python3-kerberos \
+       python3-gssapi \
        krb5-user \
        git \
        python3-defusedxml \
