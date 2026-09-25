@@ -732,7 +732,7 @@ class ADCSApp(App):
     ]
 
     confadcs: Dict[str, Any] = {}
-    current_ca: reactive[Dict[str, Any] | None] = reactive(None)
+    current_ca: reactive[Optional[Dict[str, Any]]] = reactive(None)
     cert_rows: List[CertRow] = []
     revoked_serials: Set[int] = set()
 

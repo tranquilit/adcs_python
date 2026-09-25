@@ -1614,7 +1614,7 @@ def build_get_policies_response(
                 return oo.get("__refid")
         return None
 
-    def _ensure_oid(oids_list: list, value: str, group: int, default_name: str, refid: int | None = None) -> int:
+    def _ensure_oid(oids_list: list, value: str, group: int, default_name: str, refid: Optional[int] = None) -> int:
         existing = _find_oid_refid(oids_list, value, group, default_name)
         if existing is not None:
             return int(existing)

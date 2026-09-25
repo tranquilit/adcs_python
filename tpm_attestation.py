@@ -211,7 +211,7 @@ class TPMPublicKey:
     ecc_curve: int = 0
     ecc_x: bytes = b""
     ecc_y: bytes = b""
-    _raw_bytes: bytes | None = None
+    _raw_bytes: Optional[bytes] = None
 
     def to_cryptography_public_key(self):
         if self.alg_type == TPM2_ALG_RSA:
@@ -981,7 +981,7 @@ def build_encryption_algorithm_attr_value(algorithm_oid: str) -> bytes:
 def build_ms_challenge_wrapper_value(
     *,
     encryption_algorithm_oid: str,
-    aik_info_hash: bytes | None,
+    aik_info_hash: Optional[bytes],
     ksp_name: str,
     tach_blob: bytes,
     inner_body_part_id: int = 1,
@@ -1032,7 +1032,7 @@ def build_adcs_like_control_sequence(
     *,
     request_id: int,
     encryption_algorithm_oid: str,
-    aik_info_hash: bytes | None,
+    aik_info_hash: Optional[bytes],
     tach_blob: bytes,
     ksp_name: str = "Microsoft Platform Crypto Provider",
     pend_time=None,
@@ -1091,7 +1091,7 @@ def build_microsoft_attestation_challenge_pki_response(
     request_id: int,
     ca_exchange_chain_der,
     encryption_algorithm_oid: str,
-    aik_info_hash: bytes | None,
+    aik_info_hash: Optional[bytes],
     tach_blob: bytes,
     pend_time=None,
 ) -> dict:
@@ -1490,7 +1490,7 @@ def _make_tach_blob(
     secret: bytes,
     ek_pub,
     aik_name: bytes,
-    attestation_blob_raw: bytes | None = None,
+    attestation_blob_raw: Optional[bytes] = None,
     ek_name_alg: int = TPM2_ALG_SHA256,
     sym_bits: int = 128,
 ) -> bytes:
@@ -1607,14 +1607,14 @@ def build_and_sign_microsoft_attestation_challenge(
     ek_pub,
     ca_exchange_chain_der,
     encryption_algorithm_oid: str,
-    aik_info_hash: bytes | None,
+    aik_info_hash: Optional[bytes],
     signer_cert_pem,
     signer_key_obj=None,
     signer_chain_pems=None,
-    secret: bytes | None = None,
-    aik_name: bytes | None = None,
-    aik_pub_raw: bytes | None = None,
-    attestation_blob_raw: bytes | None = None,
+    secret: Optional[bytes] = None,
+    aik_name: Optional[bytes] = None,
+    aik_pub_raw: Optional[bytes] = None,
+    attestation_blob_raw: Optional[bytes] = None,
 ) -> dict:
     if secret is None:
         secret = os.urandom(32)

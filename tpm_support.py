@@ -6,7 +6,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
@@ -18,7 +18,7 @@ logger = logging.getLogger("adcs.tpm_support")
 
 
 
-def _normalize_request_id(request_id: str | int) -> str:
+def _normalize_request_id(request_id: Union[str, int]) -> str:
     """Return a safe, canonical decimal request id for filesystem use."""
     s = str(request_id)
     if not s.isdigit():
@@ -38,7 +38,7 @@ def _stable_primitive(value):
     return str(value)
 
 
-def _fingerprint_dict(value: dict | None, keys: tuple[str, ...]) -> str:
+def _fingerprint_dict(value: Optional[dict], keys: tuple[str, ...]) -> str:
     selected = {}
     value = value or {}
     for key in keys:
@@ -81,7 +81,7 @@ def _ca_fingerprint(ca: Optional[dict]) -> str:
     return _fingerprint_dict(ca, _CA_CONTEXT_KEYS)
 
 
-def _save_pending_challenge(request_id: str | int, payload: dict , pending_dir) -> None:
+def _save_pending_challenge(request_id: Union[str, int], payload: dict , pending_dir) -> None:
     safe_request_id = _normalize_request_id(request_id)
     pending_dir = Path(pending_dir)
     pending_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -100,7 +100,7 @@ def _save_pending_challenge(request_id: str | int, payload: dict , pending_dir) 
         raise
 
 
-def _load_pending_challenge(request_id: str | int,pending_dir) -> Optional[dict]:
+def _load_pending_challenge(request_id: Union[str, int],pending_dir) -> Optional[dict]:
     safe_request_id = _normalize_request_id(request_id)
     path = Path(pending_dir) / f"{safe_request_id}.json"
     if not path.is_file():
@@ -108,7 +108,7 @@ def _load_pending_challenge(request_id: str | int,pending_dir) -> Optional[dict]
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _delete_pending_challenge(request_id: str | int,pending_dir) -> None:
+def _delete_pending_challenge(request_id: Union[str, int],pending_dir) -> None:
     safe_request_id = _normalize_request_id(request_id)
     path = Path(pending_dir) / f"{safe_request_id}.json"
     try:
@@ -158,10 +158,10 @@ def _resolve_ca_materials_for_tpm(template: dict, ca: Optional[dict] = None) -> 
                 return value
         return None
 
-    def _read_text(path: str | None) -> str | None:
+    def _read_text(path: Optional[str]) -> Optional[str]:
         return Path(path).read_text(encoding="utf-8") if path else None
 
-    def _split_cert_chain(pem_text: str | None) -> list[str]:
+    def _split_cert_chain(pem_text: Optional[str]) -> list[str]:
         if not pem_text:
             return []
         blocks, current, in_cert = [], [], False
@@ -315,7 +315,7 @@ def _ek_pub_sha256(public_key) -> Optional[str]:
     return hashlib.sha256(der).hexdigest()
 
 
-def _restore_ek_materials(payload: Optional[dict]) -> tuple[object | None, object | None]:
+def _restore_ek_materials(payload: Optional[dict]) -> tuple[Optional[object], Optional[object]]:
     payload = payload or {}
     ek_cert_der_b64 = payload.get("ek_cert_der_b64")
     ek_pub_der_b64 = payload.get("ek_pub_der_b64")
@@ -347,7 +347,7 @@ def _verify_pending_challenge_response(
     pending_challenge: dict,
     challenge_response_der: bytes,
     request_id: Optional[int] = None,
-    pending_dir: str | Path,
+    pending_dir: Union[str, Path],
     max_age_seconds: int,
 ) -> dict:
     if request_id is None:
@@ -577,7 +577,7 @@ def verify_tpm_for_template(
     template: dict,
     request_id: Optional[int] = None,
     ca: Optional[dict] = None,
-    pending_dir: str | Path,
+    pending_dir: Union[str, Path],
     pending_challenge_max_age_seconds: int,
 ) -> dict:
     """Verify TPM attestation for a template.

@@ -15,7 +15,7 @@ import logging
 import re
 import time
 import uuid
-from typing import Any
+from typing import Any, Optional
 
 from flask import g, has_request_context, request
 from flask.logging import default_handler
@@ -72,7 +72,7 @@ def safe_log_value(value: Any, *, max_length: int = 512) -> str:
     return json.dumps(text, ensure_ascii=False)
 
 
-def get_logger(component: str | None = None) -> logging.Logger:
+def get_logger(component: Optional[str] = None) -> logging.Logger:
     if not component:
         return logging.getLogger(_LOGGER_ROOT)
     component = component.strip(".")
