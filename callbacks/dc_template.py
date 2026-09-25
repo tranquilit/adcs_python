@@ -20,7 +20,7 @@ from cryptography.x509.oid import (
 )
 
 from utils import search_user
-from utils import _apply_static_extensions,validate_csr
+from utils import _apply_static_extensions, validate_csr, is_client_certificate_valid_for_ca_reference
 import base64
 import json
 import textwrap
@@ -59,10 +59,18 @@ def define_template(*, app_conf, username=None, request=None, params=None, auth_
     validity_seconds = 31536000       # 1 year
     renewal_seconds  = 3628800        # 42 days
 
-    if request is not None and request.headers.get('X-Ssl-Client-Sha1'):
-        return
+    XSslClientDn = request.headers.get('X-Ssl-Client-Dn', None) if request is not None else None
+    XSslClientCert = request.headers.get('X-Ssl-Client-Cert', None) if request is not None else None
 
-    username = username
+    if auth_method == "tls":
+        if not is_client_certificate_valid_for_ca_reference(
+            XSslClientCert,
+            (params or {}).get("ca_references", []),
+            template_oid=template_oid,
+        ):
+            return None
+        username = XSslClientDn.split('=', 1)[1]
+
 
     if not username:
         return
@@ -229,15 +237,27 @@ def emit_certificate(
     request=None,
     body_part_id=None,
     tpm_result=None,
+    auth_method=None,
     params=None,
     **kwargs
 ) -> Dict[str, Any]:
 
-    if request is not None and request.headers.get('X-Ssl-Client-Sha1'):
-        return {
-            "status": "denied",
-            "status_text": "denied",
-        }
+    XSslClientDn = request.headers.get('X-Ssl-Client-Dn', None) if request is not None else None
+    XSslClientCert = request.headers.get('X-Ssl-Client-Cert', None) if request is not None else None
+
+    if auth_method == "tls":
+        if not is_client_certificate_valid_for_ca_reference(
+            XSslClientCert,
+            (params or {}).get("ca_references", []),
+            template_oid=template_oid,
+        ):
+            return {
+                "status": "denied",
+                "status_text": "denied",
+            }
+
+
+        username = XSslClientDn.split('=', 1)[1]
 
     csr = cx509.load_der_x509_csr(csr_der)
     validate_csr(csr)

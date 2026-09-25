@@ -6,6 +6,7 @@ import hashlib
 import re
 from datetime import datetime, timezone
 from typing import Optional
+from urllib.parse import unquote
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 
@@ -31,6 +32,7 @@ try:
 except ImportError:  # cryptography versions without ML-DSA support
     mldsa = None
 from cryptography.x509.oid import ObjectIdentifier as CObjectIdentifier
+from utils_crt import is_certificate_revoked_by_crl
 
 # Samba / AD lookup (used by search_user)
 from samba.credentials import Credentials
@@ -2140,6 +2142,97 @@ def is_directly_issued_by_cert_in_folder(cert: cx509.Certificate, folder: str):
         except Exception:
             pass
     return False, None, None
+
+
+def is_client_certificate_valid_for_ca_reference(
+    client_cert,
+    ca_reference,
+    template_oid: str | None = None,
+) -> bool:
+    """Validate a TLS client certificate against one or more CA references.
+
+    ``client_cert`` may be a cryptography Certificate, PEM bytes, or the
+    URL-escaped PEM value received in ``X-Ssl-Client-Cert``.
+
+    ``ca_reference`` may be a resolved CA dict, a CA id/display name/refid,
+    or a list of those values. String/integer references are resolved from
+    ``current_app.confadcs``. A matching CA must explicitly allow X.509
+    authentication, directly issue the client certificate, and its configured
+    CRL must not revoke the certificate. When ``template_oid`` is provided,
+    the certificate must also contain that template OID.
+    """
+    if isinstance(client_cert, cx509.Certificate):
+        cert = client_cert
+    else:
+        try:
+            if isinstance(client_cert, str):
+                client_cert = unquote(client_cert).encode("utf-8")
+            elif isinstance(client_cert, bytearray):
+                client_cert = bytes(client_cert)
+
+            if not isinstance(client_cert, bytes):
+                return False
+
+            cert = cx509.load_pem_x509_certificate(client_cert)
+        except (TypeError, ValueError):
+            return False
+
+    if template_oid and not _cert_has_template_oid(cert, template_oid):
+        return False
+
+    if isinstance(ca_reference, (list, tuple, set)):
+        references = ca_reference
+    else:
+        references = [ca_reference]
+
+    conf = None
+
+    for reference in references:
+        if isinstance(reference, dict):
+            ca = reference
+        else:
+            if conf is None:
+                try:
+                    from flask import current_app
+                    conf = current_app.confadcs
+                except (ImportError, RuntimeError, AttributeError):
+                    return False
+
+            if isinstance(reference, int):
+                ca = (conf.get("cas_by_refid") or {}).get(reference)
+            elif isinstance(reference, str):
+                ca = (
+                    (conf.get("cas_by_id") or {}).get(reference)
+                    or (conf.get("cas_by_display_name") or {}).get(reference)
+                )
+            else:
+                ca = None
+
+        if not isinstance(ca, dict):
+            continue
+
+        if not any(
+            (entry.get("method") or "").strip().lower() == "x509"
+            for entry in (ca.get("auth_methods") or [])
+        ):
+            continue
+
+        ca_cert_path = ca.get("pem", {}).get("certificate_path_pem")
+        if not ca_cert_path:
+            continue
+
+        if not is_directly_issued_by_cert_in_folder(cert, ca_cert_path)[0]:
+            continue
+
+        if is_certificate_revoked_by_crl(
+            cert,
+            ca.get("crl", {}).get("path_crl"),
+        ):
+            continue
+
+        return True
+
+    return False
 
 # -----------------------------------------------------------------------------
 # ML-DSA / raw SubjectPublicKeyInfo helpers for certificate issuance callbacks

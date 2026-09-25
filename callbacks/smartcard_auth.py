@@ -10,14 +10,12 @@ from cryptography.x509.oid import (
     AuthorityInformationAccessOID,
     ObjectIdentifier as CObjectIdentifier,
 )
-from urllib.parse import unquote
 
 from cryptography.x509.extensions import ExtensionNotFound
 
 # As before
 from utils import NtdsCASecurityExt,search_user,validate_csr
-from utils import _apply_static_extensions, is_directly_issued_by_cert_in_folder, _cert_has_template_oid
-from utils_crt import is_certificate_revoked_by_crl
+from utils import _apply_static_extensions, is_client_certificate_valid_for_ca_reference
 import hashlib
 
 
@@ -51,11 +49,17 @@ def define_template(*, app_conf, username=None, request=None, params=None, auth_
     XSslClientSha1 = request.headers.get('X-Ssl-Client-Sha1', None)
     XSslAuthenticated = request.headers.get('X-Ssl-Authenticated', None)
     XSslClientDn = request.headers.get('X-Ssl-Client-Dn', None)
+    XSslClientCert = request.headers.get('X-Ssl-Client-Cert', None)
 
-    if username :
-       username = username
-    else:
-       username = XSslClientDn.split('=',1)[1] 
+    if auth_method == "tls":
+        if not is_client_certificate_valid_for_ca_reference(
+            XSslClientCert,
+            (params or {}).get("ca_references", []),
+            template_oid=template_oid,
+        ):
+            return None
+        username = XSslClientDn.split('=', 1)[1]
+
     r = search_user(username, "(!(userAccountControl:1.2.840.113556.1.4.803:=4096))(!(userAccountControl:1.2.840.113556.1.4.803:=8192))")
     if not r:
         return
@@ -341,6 +345,7 @@ def emit_certificate(
     body_part_id,
     p7_der=None,
     tpm_result=None,
+    auth_method=None,
     params=None
 ) -> Dict[str, Any]:
 
@@ -350,25 +355,18 @@ def emit_certificate(
     XSslClientDn = request.headers.get('X-Ssl-Client-Dn', None)
     XSslClientCert = request.headers.get('X-Ssl-Client-Cert', None)
 
-    if username:
-        username = username
-    else:
-        client_cert = cx509.load_pem_x509_certificate(unquote(XSslClientCert).encode("utf-8"))
-        if not is_directly_issued_by_cert_in_folder(client_cert, ca['pem']['certificate_path_pem'])[0]:
+    if auth_method == "tls":
+        if not is_client_certificate_valid_for_ca_reference(
+            XSslClientCert,
+            (params or {}).get("ca_references", []),
+            template_oid=template_oid,
+        ):
             return {
                 "status": "denied",
                 "status_text": "denied",
             }
-        if is_certificate_revoked_by_crl(client_cert, ca.get("crl", {}).get("path_crl")):
-            return {
-                "status": "denied",
-                "status_text": "denied",
-            }
-        if not _cert_has_template_oid(client_cert, template_oid):
-            return {
-                "status": "denied",
-                "status_text": "denied",
-            }
+
+
         username = XSslClientDn.split('=', 1)[1]
 
     r = search_user(username, "(!(userAccountControl:1.2.840.113556.1.4.803:=4096))(!(userAccountControl:1.2.840.113556.1.4.803:=8192))")

@@ -671,6 +671,7 @@ def ces_service(CAID):
             app_conf=app.confadcs,
             CAID=CAID,
             request=request,
+            auth_method=getattr(g, "auth_method", None),
             body_part_id=body_part_id,
             p7_der=p7_der,
             tpm_result=tpm_result

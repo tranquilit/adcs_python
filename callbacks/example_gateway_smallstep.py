@@ -1,13 +1,11 @@
 from typing import Iterable, Optional, Dict, Any
 from cryptography import x509 as cx509
 from cryptography.hazmat.primitives import serialization as crypto_serialization
-from utils import search_user, is_directly_issued_by_cert_in_folder, _cert_has_template_oid
-from utils_crt import is_certificate_revoked_by_crl
+from utils import search_user, is_client_certificate_valid_for_ca_reference
 import requests
 import json
 import base64
 import subprocess
-from urllib.parse import unquote
 
 template_oid           = "1.3.6.1.4.1.311.21.8.999.3"
 template_name          = "adcswebcomputer"
@@ -26,11 +24,17 @@ def define_template(*, app_conf, username=None, request=None, params=None, auth_
     XSslClientSha1 = request.headers.get('X-Ssl-Client-Sha1', None)
     XSslAuthenticated = request.headers.get('X-Ssl-Authenticated', None)
     XSslClientDn = request.headers.get('X-Ssl-Client-Dn', None)
+    XSslClientCert = request.headers.get('X-Ssl-Client-Cert', None)
 
-    if username :
-       username = username
-    else:
-       username = XSslClientDn.split('=',1)[1]
+    if auth_method == "tls":
+        if not is_client_certificate_valid_for_ca_reference(
+            XSslClientCert,
+            (params or {}).get("ca_references", []),
+            template_oid=template_oid,
+        ):
+            return None
+        username = XSslClientDn.split('=', 1)[1]
+
 
     return {
         "common_name": template_name,
@@ -205,6 +209,7 @@ def emit_certificate(
     body_part_id = None,
     p7_der=None,
     tpm_result=None,
+    auth_method=None,
     params=None
 ) -> Dict[str, Any]:
 
@@ -214,25 +219,18 @@ def emit_certificate(
     XSslClientDn = request.headers.get('X-Ssl-Client-Dn', None)
     XSslClientCert = request.headers.get('X-Ssl-Client-Cert', None)
 
-    if username:
-        username = username
-    else:
-        client_cert = cx509.load_pem_x509_certificate(unquote(XSslClientCert).encode("utf-8"))
-        if not is_directly_issued_by_cert_in_folder(client_cert, ca['pem']['certificate_path_pem'])[0]:
+    if auth_method == "tls":
+        if not is_client_certificate_valid_for_ca_reference(
+            XSslClientCert,
+            (params or {}).get("ca_references", []),
+            template_oid=template_oid,
+        ):
             return {
                 "status": "denied",
                 "status_text": "denied",
             }
-        if is_certificate_revoked_by_crl(client_cert, ca.get("crl", {}).get("path_crl")):
-            return {
-                "status": "denied",
-                "status_text": "denied",
-            }
-        if not _cert_has_template_oid(client_cert, template_oid):
-            return {
-                "status": "denied",
-                "status_text": "denied",
-            }
+
+
         username = XSslClientDn.split('=', 1)[1]
 
     ca_url="https://ca.mydomain.lan"
