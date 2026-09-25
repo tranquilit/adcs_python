@@ -12,6 +12,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 
 import tpm_attestation as tpm_mod
+from adcs_logging import safe_log_value
 
 logger = logging.getLogger("adcs.tpm_support")
 
@@ -324,17 +325,17 @@ def _restore_ek_materials(payload: Optional[dict]) -> tuple[object | None, objec
         try:
             ek_cert = _ek_cert_from_der(base64.b64decode(ek_cert_der_b64, validate=True))
         except Exception as exc:
-            logger.debug("Could not restore EK certificate from pending payload: %s", exc)
+            logger.debug("event=tpm_pending_restore_failed artifact=ek_certificate error=%s", safe_log_value(exc))
     if ek_pub_der_b64:
         try:
             ek_pub = _public_key_from_spki_der(base64.b64decode(ek_pub_der_b64, validate=True))
         except Exception as exc:
-            logger.debug("Could not restore EK public key from pending payload: %s", exc)
+            logger.debug("event=tpm_pending_restore_failed artifact=ek_public_key error=%s", safe_log_value(exc))
     elif ek_cert is not None:
         try:
             ek_pub = ek_cert.public_key()
         except Exception as exc:
-            logger.debug("Could not restore EK public key from EK certificate: %s", exc)
+            logger.debug("event=tpm_pending_restore_failed artifact=ek_public_key_from_certificate error=%s", safe_log_value(exc))
     return ek_cert, ek_pub
 
 

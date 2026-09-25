@@ -4,6 +4,10 @@ from flask import current_app
 from functools import wraps
 from callback_loader import load_func
 from defusedxml import ElementTree as ET
+from adcs_logging import get_logger, safe_log_value
+
+
+logger = get_logger("auth")
 
 
 def kerberos_authenticate(auth_header):
@@ -27,7 +31,12 @@ def kerberos_authenticate(auth_header):
             response_token = kerberos.authGSSServerResponse(context)
             return user, response_token
         return None, None
-    except kerberos.GSSError:
+    except kerberos.GSSError as exc:
+        logger.debug(
+            "event=kerberos_auth_error host=%s error=%s",
+            safe_log_value(request.host),
+            safe_log_value(exc),
+        )
         return None, None
     finally:
         if context is not None:
@@ -74,6 +83,9 @@ def auth_required(f):
         user = None
         response_token = None
         auth_method = None
+        attempted_methods = []
+        username_xml = ''
+        password_xml = ''
 
         auth_kerberos = bool(conf.get("auth_kerberos", False))
         auth_tls = bool(conf.get("auth_tls", False))
@@ -82,6 +94,10 @@ def auth_required(f):
         MAX_SOAP_BYTES = 2 * 1024 * 1024
         raw = request.data or b""
         if len(raw) > MAX_SOAP_BYTES:
+            logger.warning(
+                "event=auth_failed reason=request_too_large bytes=%d",
+                len(raw),
+            )
             return _unauthorized()
 
         # TLS client-certificate authentication is accepted only when enabled
@@ -89,13 +105,19 @@ def auth_required(f):
         # cannot bypass Kerberos or username/password authentication.
         x_ssl_client_sha1 = request.headers.get('X-Ssl-Client-Sha1') if auth_tls else None
         if x_ssl_client_sha1:
+            attempted_methods.append('tls')
             if request.headers.get('X-Ssl-Authenticated') != "SUCCESS":
+                logger.warning(
+                    "event=auth_failed method=tls reason=client_certificate_not_verified fingerprint=%s",
+                    safe_log_value(x_ssl_client_sha1, max_length=128),
+                )
                 return _unauthorized()
             auth_method = 'tls'
 
         # Kerberos is tried only when enabled and TLS did not already authenticate
         # the request.
         if not auth_method and auth_kerberos and auth_header:
+            attempted_methods.append('kerberos')
             user, response_token = kerberos_authenticate(auth_header)
             if user:
                 auth_method = 'kerberos'
@@ -103,21 +125,68 @@ def auth_required(f):
         # Username/password authentication is tried only when enabled. The
         # callback path still lives under auth.callback in adcs.yaml.
         if not auth_method and auth_username_password:
+            attempted_methods.append('username_password')
             auth_callback = conf.get("auth_callbacks") or {}
             if auth_callback.get('path') and auth_callback.get('func'):
                 username_xml, password_xml = _extract_username_password_from_soap(raw)
-                auth_func = load_func(auth_callback['path'], auth_callback['func'])
-                user = auth_func(username=username_xml, password=password_xml)
+                try:
+                    auth_func = load_func(auth_callback['path'], auth_callback['func'])
+                    user = auth_func(username=username_xml, password=password_xml)
+                except Exception as exc:
+                    logger.error(
+                        "event=auth_callback_failed callback_path=%s callback_func=%s username=%s error_type=%s",
+                        safe_log_value(auth_callback.get('path')),
+                        safe_log_value(auth_callback.get('func')),
+                        safe_log_value(username_xml, max_length=256),
+                        type(exc).__name__,
+                    )
+                    raise
                 if user:
                     auth_method = 'username_password'
 
         if not auth_method:
+            credentials_supplied = bool(
+                auth_header
+                or x_ssl_client_sha1
+                or username_xml
+                or password_xml
+            )
+
+            if credentials_supplied:
+                logger.warning(
+                    "event=auth_failed reason=no_method_succeeded attempted=%s username=%s authorization_header=%s tls_certificate=%s enabled_kerberos=%s enabled_tls=%s enabled_username_password=%s",
+                    safe_log_value(','.join(attempted_methods) or 'none'),
+                    safe_log_value(username_xml, max_length=256),
+                    bool(auth_header),
+                    bool(x_ssl_client_sha1),
+                    auth_kerberos,
+                    auth_tls,
+                    auth_username_password,
+                )
+            else:
+                # The first Kerberos/SPNEGO request commonly has no credentials
+                # and is answered with a 401 challenge. This is protocol flow,
+                # not an authentication failure worth warning on.
+                logger.debug(
+                    "event=auth_challenge reason=no_credentials enabled_kerberos=%s enabled_tls=%s enabled_username_password=%s",
+                    auth_kerberos,
+                    auth_tls,
+                    auth_username_password,
+                )
             return _unauthorized()
 
         # For TLS auth, keep g.username as None: the template callbacks already
         # resolve and validate the client certificate from X-Ssl-* headers.
         g.username = user
         g.auth_method = auth_method
+
+        if auth_method == 'tls':
+            logger.info(
+                "event=auth_success method=tls certificate_fingerprint=%s",
+                safe_log_value(x_ssl_client_sha1, max_length=128),
+            )
+        else:
+            logger.info("event=auth_success method=%s", safe_log_value(auth_method))
 
         headers = {'WWW-Authenticate': 'Negotiate ' + response_token} if response_token else {}
         resp = f(*args, **kwargs)
