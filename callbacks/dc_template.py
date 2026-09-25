@@ -20,7 +20,7 @@ from cryptography.x509.oid import (
 )
 
 from utils import search_user
-from utils import _apply_static_extensions, validate_csr, is_client_certificate_valid_for_ca_reference
+from utils import _apply_static_extensions, validate_csr
 import base64
 import json
 import textwrap
