@@ -1,18 +1,13 @@
 import base64
 import binascii
-from urllib.parse import unquote
-
 import gssapi
-from cryptography import x509 as cx509
-
 from flask import request, Response, g
 from flask import current_app
 from functools import wraps
 from callback_loader import load_func
 from defusedxml import ElementTree as ET
 from adcs_logging import get_logger, safe_log_value
-from utils import is_directly_issued_by_cert_in_folder
-from utils_crt import is_certificate_revoked_by_crl
+from utils import is_client_certificate_valid_for_ca_reference
 
 
 logger = get_logger("auth")
@@ -181,43 +176,12 @@ def auth_required(f):
                 return Response("Forbidden", 403)
 
             x_ssl_client_cert = request.headers.get('X-Ssl-Client-Cert')
-            try:
-                client_cert = cx509.load_pem_x509_certificate(
-                    unquote(x_ssl_client_cert).encode("utf-8")
-                )
-            except (AttributeError, TypeError, ValueError):
-                logger.warning(
-                    "event=auth_failed method=tls reason=invalid_client_certificate fingerprint=%s",
-                    safe_log_value(x_ssl_client_sha1, max_length=128),
-                )
-                return _unauthorized()
-
-            matching_ca = None
-            for ca in x509_cas:
-                ca_cert_path = ca.get("pem", {}).get("certificate_path_pem")
-                if (
-                    ca_cert_path
-                    and is_directly_issued_by_cert_in_folder(
-                        client_cert,
-                        ca_cert_path,
-                    )[0]
-                ):
-                    matching_ca = ca
-                    break
-
-            if matching_ca is None:
-                logger.warning(
-                    "event=auth_failed method=tls reason=certificate_not_issued_by_x509_ca fingerprint=%s",
-                    safe_log_value(x_ssl_client_sha1, max_length=128),
-                )
-                return _unauthorized()
-
-            if is_certificate_revoked_by_crl(
-                client_cert,
-                matching_ca.get("crl", {}).get("path_crl"),
+            if not is_client_certificate_valid_for_ca_reference(
+                x_ssl_client_cert,
+                x509_cas,
             ):
                 logger.warning(
-                    "event=auth_failed method=tls reason=certificate_revoked fingerprint=%s",
+                    "event=auth_failed method=tls reason=invalid_client_certificate fingerprint=%s",
                     safe_log_value(x_ssl_client_sha1, max_length=128),
                 )
                 return _unauthorized()
