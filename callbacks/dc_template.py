@@ -63,14 +63,7 @@ def define_template(*, app_conf, username=None, request=None, params=None, auth_
     XSslClientCert = request.headers.get('X-Ssl-Client-Cert', None) if request is not None else None
 
     if auth_method == "tls":
-        if not is_client_certificate_valid_for_ca_reference(
-            XSslClientCert,
-            (params or {}).get("ca_references", []),
-            template_oid=template_oid,
-        ):
-            return None
-        username = XSslClientDn.split('=', 1)[1]
-
+        return None
 
     if not username:
         return
@@ -246,15 +239,10 @@ def emit_certificate(
     XSslClientCert = request.headers.get('X-Ssl-Client-Cert', None) if request is not None else None
 
     if auth_method == "tls":
-        if not is_client_certificate_valid_for_ca_reference(
-            XSslClientCert,
-            (params or {}).get("ca_references", []),
-            template_oid=template_oid,
-        ):
-            return {
-                "status": "denied",
-                "status_text": "denied",
-            }
+        return {
+            "status": "denied",
+            "status_text": "denied",
+        }
 
 
         username = XSslClientDn.split('=', 1)[1]
