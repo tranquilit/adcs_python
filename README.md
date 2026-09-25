@@ -192,11 +192,6 @@ cp -f /opt/adcs_python/nginx-conf.conf.template /etc/nginx/sites-available/defau
 openssl dhparam -out /etc/ssl/certs/dhparam.pem 4096
 ```
 
-Change the `ssl_client_certificate` and the `ssl_crl` :
-```
-vi /etc/nginx/sites-available/default
-```
-
 Restart Nginx: 
 
 ```
