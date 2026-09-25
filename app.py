@@ -157,7 +157,8 @@ def cep_service():
         templates_for_user, oids_for_user = build_templates_for_policy_response(
             app.confadcs,
             username=username,
-            request=request
+            request=request,
+            auth_method=getattr(g, "auth_method", None)
         )
     except Exception as exc:
         cep_logger.error(
@@ -474,7 +475,8 @@ def ces_service(CAID):
         templates_for_user, _ = build_templates_for_policy_response(
             app.confadcs,
             username=username,
-            request=request
+            request=request,
+            auth_method=getattr(g, "auth_method", None)
         )
     except Exception as exc:
         ces_logger.error(

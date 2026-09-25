@@ -546,6 +546,7 @@ def build_templates_for_policy_response(
     *,
     username=None,
     request,
+    auth_method=None,
     **kwargs
 ) -> Tuple[list[dict], list[dict]]:
     """
@@ -604,6 +605,7 @@ def build_templates_for_policy_response(
             app_conf=conf,                 # conf remains read-only
             username=username,
             request=request,
+            auth_method=auth_method,
             **kwargs
         )
         if not tpl:
@@ -619,6 +621,7 @@ def build_templates_for_policy_response(
 
         # Resolve CAs into __ca_refids (read-only in conf)
         resolved = []
+        has_x509_ca = False
         raw = tpl.get("ca_references") or []
 
         if not isinstance(raw, list):
@@ -634,7 +637,20 @@ def build_templates_for_policy_response(
                 cand = conf["cas_by_id"].get(item) or conf["cas_by_display_name"].get(item)
             if cand is None:
                 raise ValueError(f"Template '{tpl.get('common_name','?')}' references unknown CA '{item}'")
+
+            if any(
+                (entry.get("method") or "").strip().lower() == "x509"
+                for entry in (cand.get("auth_methods") or [])
+            ):
+                has_x509_ca = True
+
             resolved.append(cand["__refid"])
+
+        # With TLS authentication, ignore templates that are not backed by at
+        # least one CA explicitly allowing X.509 authentication.
+        if auth_method == "tls" and not has_x509_ca:
+            continue
+
         tpl["__ca_refids"] = resolved
 
         # Register the template OID in the **local** registry
