@@ -1,7 +1,9 @@
 import base64
 import binascii
+from urllib.parse import unquote
 
 import gssapi
+from cryptography import x509 as cx509
 
 from flask import request, Response, g
 from flask import current_app
@@ -9,6 +11,8 @@ from functools import wraps
 from callback_loader import load_func
 from defusedxml import ElementTree as ET
 from adcs_logging import get_logger, safe_log_value
+from utils import is_directly_issued_by_cert_in_folder
+from utils_crt import is_certificate_revoked_by_crl
 
 
 logger = get_logger("auth")
@@ -161,12 +165,63 @@ def auth_required(f):
         x_ssl_client_sha1 = request.headers.get('X-Ssl-Client-Sha1') if auth_tls else None
         if x_ssl_client_sha1:
             attempted_methods.append('tls')
-            if request.headers.get('X-Ssl-Authenticated') != "SUCCESS":
+
+            x509_cas = [
+                ca for ca in (conf.get("cas_list") or [])
+                if any(
+                    (entry.get("method") or "").strip().lower() == "x509"
+                    for entry in (ca.get("auth_methods") or [])
+                )
+            ]
+
+            if not x509_cas:
                 logger.warning(
-                    "event=auth_failed method=tls reason=client_certificate_not_verified fingerprint=%s",
+                    "event=auth_failed method=tls reason=no_x509_ca_configured"
+                )
+                return Response("Forbidden", 403)
+
+            x_ssl_client_cert = request.headers.get('X-Ssl-Client-Cert')
+            try:
+                client_cert = cx509.load_pem_x509_certificate(
+                    unquote(x_ssl_client_cert).encode("utf-8")
+                )
+            except (AttributeError, TypeError, ValueError):
+                logger.warning(
+                    "event=auth_failed method=tls reason=invalid_client_certificate fingerprint=%s",
                     safe_log_value(x_ssl_client_sha1, max_length=128),
                 )
                 return _unauthorized()
+
+            matching_ca = None
+            for ca in x509_cas:
+                ca_cert_path = ca.get("pem", {}).get("certificate_path_pem")
+                if (
+                    ca_cert_path
+                    and is_directly_issued_by_cert_in_folder(
+                        client_cert,
+                        ca_cert_path,
+                    )[0]
+                ):
+                    matching_ca = ca
+                    break
+
+            if matching_ca is None:
+                logger.warning(
+                    "event=auth_failed method=tls reason=certificate_not_issued_by_x509_ca fingerprint=%s",
+                    safe_log_value(x_ssl_client_sha1, max_length=128),
+                )
+                return _unauthorized()
+
+            if is_certificate_revoked_by_crl(
+                client_cert,
+                matching_ca.get("crl", {}).get("path_crl"),
+            ):
+                logger.warning(
+                    "event=auth_failed method=tls reason=certificate_revoked fingerprint=%s",
+                    safe_log_value(x_ssl_client_sha1, max_length=128),
+                )
+                return _unauthorized()
+
             auth_method = 'tls'
 
         # Kerberos is tried only when enabled and TLS did not already authenticate
