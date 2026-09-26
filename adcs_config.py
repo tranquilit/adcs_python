@@ -518,25 +518,36 @@ def load_yaml_conf(path="adcs.yaml"):
 
 
 
-def _callback_accepts_params(func) -> bool:
-    """Return True if a callback can receive the optional `params` kwarg."""
+def _callback_accepts_kwarg(func, name: str) -> bool:
+    """Return True if a callback can receive the named keyword argument."""
     try:
         sig = inspect.signature(func)
     except (TypeError, ValueError):
         return False
     return (
-        "params" in sig.parameters
+        name in sig.parameters
         or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
     )
 
-def _call_callback_with_params(func, *, params=None, **kwargs):
-    """Call a callback, passing `params` only when its signature supports it.
 
-    This keeps existing callbacks compatible while allowing new callbacks to
-    declare `params=None` and receive the YAML object from `callback.params`.
+def _callback_accepts_params(func) -> bool:
+    """Backward-compatible helper for callers checking the optional `params` kwarg."""
+    return _callback_accepts_kwarg(func, "params")
+
+
+def _call_callback_with_params(func, *, params=None, **kwargs):
+    """Call a callback while preserving compatibility with older signatures.
+
+    `params` is only added when supported. `auth_method` is likewise removed
+    when present in the call but absent from the callback signature. Callbacks
+    accepting ``**kwargs`` continue to receive both optional values.
     """
     if _callback_accepts_params(func):
         kwargs["params"] = params
+
+    if "auth_method" in kwargs and not _callback_accepts_kwarg(func, "auth_method"):
+        kwargs.pop("auth_method")
+
     return func(**kwargs)
 
 # ---------------- Per-request build (CEP/CES): templates + OIDs (stateless) -----
