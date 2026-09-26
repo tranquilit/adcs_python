@@ -2182,6 +2182,18 @@ def is_client_certificate_valid_for_ca_reference(
         except (TypeError, ValueError):
             return False
 
+    now = datetime.now(timezone.utc)
+    try:
+        not_before = cert.not_valid_before_utc
+        not_after = cert.not_valid_after_utc
+    except AttributeError:
+        # Compatibility with older cryptography releases.
+        not_before = cert.not_valid_before.replace(tzinfo=timezone.utc)
+        not_after = cert.not_valid_after.replace(tzinfo=timezone.utc)
+
+    if now < not_before or now > not_after:
+        return False
+
     if template_oid and not _cert_has_template_oid(cert, template_oid):
         return False
 
