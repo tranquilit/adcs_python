@@ -27,6 +27,11 @@ from cryptography.hazmat.primitives.asymmetric import (
     ed448,
 )
 
+import smtplib
+import ssl
+from email.message import EmailMessage
+from email.utils import formataddr
+
 try:
     from cryptography.hazmat.primitives.asymmetric import mldsa
 except ImportError:  # cryptography versions without ML-DSA support
@@ -2503,3 +2508,191 @@ def _sign_tbs_with_ca_key(priv, tbs_der: bytes) -> bytes:
         return priv.sign(tbs_der)
 
     raise ValueError(f"Unsupported CA private key type: {type(priv).__name__}")
+
+def send_mail(
+    *,
+    smtp_conf: dict,
+    to,
+    subject: str,
+    body: str,
+    html: str = None,
+):
+    """
+    Send an email using the Python standard library.
+
+    Supported security modes:
+      - starttls
+      - ssl
+      - none
+    """
+
+    if not smtp_conf:
+        raise ValueError("SMTP configuration is missing")
+
+    if not smtp_conf.get("enabled", False):
+        return False
+
+    host = smtp_conf.get("host")
+
+    if not host:
+        raise ValueError("SMTP host is missing")
+
+    port = int(smtp_conf.get("port", 587))
+    security = str(
+        smtp_conf.get("security", "starttls")
+    ).strip().lower()
+
+    timeout = float(smtp_conf.get("timeout", 10))
+
+    username = smtp_conf.get("username")
+    password = smtp_conf.get("password")
+
+    # password_file takes precedence over password
+    password_file = smtp_conf.get("password_file")
+
+    if password_file:
+        try:
+            with open(
+                password_file,
+                "r",
+                encoding="utf-8",
+            ) as f:
+                password = f.readline().strip()
+
+        except OSError as exc:
+            raise ValueError(
+                f"Unable to read SMTP password file "
+                f"'{password_file}': {exc}"
+            ) from exc
+
+        if not password:
+            raise ValueError(
+                f"SMTP password file is empty: {password_file}"
+            )
+
+    sender = smtp_conf.get("sender") or username
+    sender_name = smtp_conf.get("sender_name")
+
+    if not sender:
+        raise ValueError("SMTP sender is missing")
+
+    # Accept either:
+    # to="admin@domain.lan"
+    # or:
+    # to=["admin1@domain.lan", "admin2@domain.lan"]
+    if isinstance(to, str):
+        recipients = [to]
+    else:
+        recipients = list(to or [])
+
+    recipients = [
+        str(recipient).strip()
+        for recipient in recipients
+        if recipient
+    ]
+
+    if not recipients:
+        raise ValueError("No email recipient specified")
+
+    message = EmailMessage()
+
+    if sender_name:
+        message["From"] = formataddr(
+            (sender_name, sender)
+        )
+    else:
+        message["From"] = sender
+
+    message["To"] = ", ".join(recipients)
+    message["Subject"] = subject
+
+    message.set_content(body)
+
+    if html:
+        message.add_alternative(
+            html,
+            subtype="html",
+        )
+
+    ca_file = smtp_conf.get("ca_file")
+
+    ssl_context = ssl.create_default_context(
+        cafile=ca_file if ca_file else None
+    )
+
+    #
+    # SMTPS / implicit SSL
+    #
+    if security == "ssl":
+
+        with smtplib.SMTP_SSL(
+            host,
+            port,
+            timeout=timeout,
+            context=ssl_context,
+        ) as smtp:
+
+            if username:
+                if password is None:
+                    raise ValueError(
+                        "SMTP password is missing"
+                    )
+
+                smtp.login(
+                    username,
+                    password,
+                )
+
+            smtp.send_message(
+                message,
+                from_addr=sender,
+                to_addrs=recipients,
+            )
+
+    #
+    # SMTP / STARTTLS
+    #
+    else:
+
+        with smtplib.SMTP(
+            host,
+            port,
+            timeout=timeout,
+        ) as smtp:
+
+            smtp.ehlo()
+
+            if security == "starttls":
+
+                smtp.starttls(
+                    context=ssl_context
+                )
+
+                smtp.ehlo()
+
+            elif security != "none":
+
+                raise ValueError(
+                    f"Unknown SMTP security mode: "
+                    f"{security}"
+                )
+
+            if username:
+                if password is None:
+                    raise ValueError(
+                        "SMTP password is missing"
+                    )
+
+                smtp.login(
+                    username,
+                    password,
+                )
+
+            smtp.send_message(
+                message,
+                from_addr=sender,
+                to_addrs=recipients,
+            )
+
+    return True
+
