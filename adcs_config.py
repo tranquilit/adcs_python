@@ -535,6 +535,21 @@ def _callback_accepts_params(func) -> bool:
     return _callback_accepts_kwarg(func, "params")
 
 
+def _ignore_legacy_tls_template(func, request, auth_method) -> bool:
+    """Return True when a legacy callback must not expose its template over TLS.
+
+    Older callbacks do not know about ``auth_method`` and therefore cannot
+    apply the TLS-specific filtering introduced with that argument. Preserve
+    their historical behavior, but do not expose such a template when nginx
+    has not explicitly confirmed the client certificate.
+    """
+    if auth_method != "tls" or _callback_accepts_kwarg(func, "auth_method"):
+        return False
+
+    headers = getattr(request, "headers", None)
+    return headers is None or headers.get("X-Ssl-Authenticated") != "SUCCESS"
+
+
 def _call_callback_with_params(func, *, params=None, **kwargs):
     """Call a callback while preserving compatibility with older signatures.
 
@@ -610,6 +625,13 @@ def build_templates_for_policy_response(
             )
 
         define_template = load_func(cb_path, cb["define"])
+
+        # Backward compatibility: callbacks predating `auth_method` cannot
+        # distinguish a valid TLS client-certificate request themselves. If
+        # nginx did not mark the certificate as SUCCESS, ignore this template.
+        if _ignore_legacy_tls_template(define_template, request, auth_method):
+            continue
+
         tpl = _call_callback_with_params(
             define_template,
             params=cb.get("params"),
