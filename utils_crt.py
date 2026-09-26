@@ -704,16 +704,59 @@ def revoked_serials_set(crl_path: Optional[str]) -> Set[int]:
     return {rc.serial_number for rc in _iter_revoked(crl)}
 
 
-def is_certificate_revoked_by_crl(cert: Optional[cx509.Certificate], crl_path: Optional[str]) -> bool:
-    """Return True when `cert` serial is present in the CRL at `crl_path`.
+def is_certificate_revoked_by_crl(
+    cert: Optional[cx509.Certificate],
+    crl_path: Optional[str],
+    issuer_cert: Optional[cx509.Certificate] = None,
+) -> bool:
+    """Return True when the certificate must be treated as revoked.
 
-    Missing CRL configuration/file is treated as "not revoked" so callers can
-    decide separately whether the CRL must be mandatory for their flow.
-    Invalid/unreadable CRLs still raise, making configuration problems visible.
+    This helper is intentionally fail-closed for authentication flows: a missing,
+    unreadable, stale, not-yet-valid, wrongly issued, or badly signed CRL is
+    treated exactly like a revoked certificate.
     """
-    if cert is None or not crl_path:
-        return False
-    return cert.serial_number in revoked_serials_set(crl_path)
+    if cert is None or not crl_path or issuer_cert is None:
+        return True
+
+    try:
+        crl = _load_existing_crl(crl_path)
+        if crl is None:
+            return True
+
+        if crl.issuer != issuer_cert.subject:
+            return True
+
+        if not crl.is_signature_valid(issuer_cert.public_key()):
+            return True
+
+        now = datetime.now(timezone.utc)
+
+        try:
+            last_update = crl.last_update_utc
+        except AttributeError:
+            last_update = crl.last_update
+            if last_update.tzinfo is None:
+                last_update = last_update.replace(tzinfo=timezone.utc)
+
+        try:
+            next_update = crl.next_update_utc
+        except AttributeError:
+            next_update = crl.next_update
+            if next_update is not None and next_update.tzinfo is None:
+                next_update = next_update.replace(tzinfo=timezone.utc)
+
+        if last_update is None or next_update is None:
+            return True
+
+        if now < last_update or now >= next_update:
+            return True
+
+        return any(
+            revoked.serial_number == cert.serial_number
+            for revoked in _iter_revoked(crl)
+        )
+    except Exception:
+        return True
 
 def _extract_cn_and_sans(cert: cx509.Certificate) -> tuple[str, list[str]]:
     try:

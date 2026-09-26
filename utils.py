@@ -2226,12 +2226,17 @@ def is_client_certificate_valid_for_ca_reference(
         if not ca_cert_path:
             continue
 
-        if not is_directly_issued_by_cert_in_folder(cert, ca_cert_path)[0]:
+        issued, issuer_cert, _issuer_path = is_directly_issued_by_cert_in_folder(
+            cert,
+            ca_cert_path,
+        )
+        if not issued or issuer_cert is None:
             continue
 
         if is_certificate_revoked_by_crl(
             cert,
             ca.get("crl", {}).get("path_crl"),
+            issuer_cert=issuer_cert,
         ):
             continue
 
