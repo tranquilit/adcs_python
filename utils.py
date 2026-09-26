@@ -2163,7 +2163,9 @@ def is_client_certificate_valid_for_ca_reference(
     or a list of those values. String/integer references are resolved from
     ``current_app.confadcs``. A matching CA must explicitly allow X.509
     authentication, directly issue the client certificate, and its configured
-    CRL must not revoke the certificate. When ``template_oid`` is provided,
+    CRL must not revoke the certificate. If the client certificate carries a
+    BasicConstraints extension, it must have ``ca=False``. A missing
+    BasicConstraints extension is accepted. When ``template_oid`` is provided,
     the certificate must also contain that template OID.
     """
     if isinstance(client_cert, cx509.Certificate):
@@ -2192,6 +2194,16 @@ def is_client_certificate_valid_for_ca_reference(
         not_after = cert.not_valid_after.replace(tzinfo=timezone.utc)
 
     if now < not_before or now > not_after:
+        return False
+
+    try:
+        basic_constraints = cert.extensions.get_extension_for_class(
+            cx509.BasicConstraints
+        ).value
+    except cx509.ExtensionNotFound:
+        basic_constraints = None
+
+    if basic_constraints is not None and basic_constraints.ca:
         return False
 
     if template_oid and not _cert_has_template_oid(cert, template_oid):
