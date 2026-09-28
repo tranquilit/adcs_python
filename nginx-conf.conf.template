@@ -1,12 +1,3 @@
-
-
-
-
-
-
-
- 
-
 log_format combined_ssl '$remote_addr $ssl_client_s_dn $ssl_client_verify $remote_user [$time_local] '
                     '"$request" $status $body_bytes_sent '
                     '"$http_referer" "$http_user_agent"';
