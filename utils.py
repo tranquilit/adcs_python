@@ -2152,7 +2152,7 @@ def is_directly_issued_by_cert_in_folder(cert: cx509.Certificate, folder: str):
 def is_client_certificate_valid_for_ca_reference(
     client_cert,
     ca_reference,
-    template_oid: str | None = None,
+    template_oid= None,
 ) -> bool:
     """Validate a TLS client certificate against one or more CA references.
 
