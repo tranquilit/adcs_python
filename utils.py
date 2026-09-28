@@ -29,6 +29,7 @@ from cryptography.hazmat.primitives.asymmetric import (
 
 import smtplib
 import ssl
+import time
 from email.message import EmailMessage
 from email.utils import formataddr
 
@@ -1423,7 +1424,36 @@ def build_ws_trust_response(
 
 BAD_LDAP_CHARS_RE = re.compile(r'[\x00()*\\]')
 
-def search_user(userauth: str,ldap_filter='',dc_fqdn=None,basedn=None,password=None,bind_user=None):
+
+_dc_cache = {}
+
+
+def get_dc_fqdn(realm: str,dc_cache_ttl_seconds = 300):
+    """Return the DC FQDN, caching the lookup for 5 minutes per realm."""
+    now = time.monotonic()
+
+    cached = _dc_cache.get(realm)
+    if cached is not None:
+        dc_fqdn, expires_at = cached
+        if now < expires_at:
+            return dc_fqdn
+
+    lp = LoadParm()
+    lp.load_default()
+
+    creds = Credentials()
+    creds.guess(lp)
+    creds.set_kerberos_state(True)
+    creds.set_machine_account(lp)
+
+    net = Net(creds=creds, lp=lp)
+    dc_info = net.finddc(domain=realm, flags=nbt.NBT_SERVER_LDAP)
+    dc_fqdn = str(dc_info.pdc_dns_name)
+
+    _dc_cache[realm] = (dc_fqdn, now + dc_cache_ttl_seconds)
+    return dc_fqdn
+
+def search_user(userauth: str,ldap_filter='',dc_fqdn=None,basedn=None,password=None,bind_user=None,dc_cache_ttl_seconds=300):
     """
     Resolve the SAM/LDAP entry for the Kerberos user 'user@REALM'.
     Returns (SamDB, entry) if found.
@@ -1456,10 +1486,7 @@ def search_user(userauth: str,ldap_filter='',dc_fqdn=None,basedn=None,password=N
 
     realm = lp.get("realm")
     if not dc_fqdn:
-        net = Net(creds=creds, lp=lp)
-        flags = nbt.NBT_SERVER_LDAP
-        dc_info = net.finddc(domain=realm, flags=flags)
-        dc_fqdn = str(dc_info.pdc_dns_name)
+        dc_fqdn = get_dc_fqdn(realm,dc_cache_ttl_seconds=dc_cache_ttl_seconds)
 
     ldap_url = f"ldap://{dc_fqdn}"
 
