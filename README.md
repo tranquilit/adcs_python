@@ -244,10 +244,10 @@ net ads join --use-kerberos=required
 Manage SPN 
 ---------------------------------------------------------
 
-- In Active Directory, register the HTTP SPN for the machine account:
+- Register the HTTP SPN for the machine account:
 
 ```
-samba-tool spn add "HTTP/testadcs.mydomain.lan" "testadcs$" -H ldap://srvads.mydomain.lan:389 -P
+samba-tool spn add "HTTP/testadcs.mydomain.lan" "testadcs$" -H ldap://srvads.mydomain.lan:389 --use-kerberos=required
 ```
 
 Note that the URL must be in **lowercase**.
