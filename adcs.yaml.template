@@ -12,24 +12,34 @@ global:
 templates:
   - callback:
       path: "/etc/adcs/callbacks/user_template.py"
+      auth_methods:
+        - kerberos
+        - username_password
       params:
         ca_references:
           - ca_inter_test
 
   - callback:
       path: "/etc/adcs/callbacks/computer_template.py"
+      auth_methods:
+        - kerberos
       params:
         ca_references:
           - ca_inter_test
 
   - callback:
       path: "/etc/adcs/callbacks/dc_template.py"
+      auth_methods:
+        - kerberos
       params:
         ca_references:
           - ca_inter_test
 
   - callback:
       path: "/etc/adcs/callbacks/smartcard_auth.py"
+      auth_methods:
+        - kerberos
+        - username_password
       params:
         ca_references:
           - ca_inter_test
