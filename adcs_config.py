@@ -507,11 +507,23 @@ def load_yaml_conf(path="adcs.yaml"):
         if not (cb_path and cb_define and cb_issue):
             raise ValueError("Each template must define callback.path / callback.define / callback.issue")
 
+        cb_auth_methods = cb.get("auth_methods")
+        if cb_auth_methods is None:
+            cb_auth_methods = ["kerberos", "username_password", "tls"]
+        elif not isinstance(cb_auth_methods, list) or not all(
+            isinstance(method, str) and method.strip()
+            for method in cb_auth_methods
+        ):
+            raise ValueError("callback.auth_methods must be a list of non-empty strings")
+        else:
+            cb_auth_methods = [method.strip() for method in cb_auth_methods]
+
         conf["__template_decls__"].append({
             "path": cb_path,
             "define": cb_define,
             "issue": cb_issue,
             "params": cb.get("params"),
+            "auth_methods": cb_auth_methods,
         })
     return conf
 
@@ -615,6 +627,9 @@ def build_templates_for_policy_response(
 
     # Build each template via its "define" callback
     for cb in conf.get("__template_decls__") or []:
+
+        if auth_method is not None and auth_method not in cb.get("auth_methods", ["kerberos", "username_password", "tls"]):
+            continue
 
         if cb["path"].startswith('/'):
             cb_path = cb["path"]

@@ -253,10 +253,14 @@ def auth_required(f):
                 )
             return _unauthorized()
 
-        # For TLS auth, keep g.username as None: the template callbacks already
-        # resolve and validate the client certificate from X-Ssl-* headers.
+        # Keep the transport method separate from the effective method.
+        # Authentication callbacks may set g.auth_method themselves (for
+        # example to a custom token method); otherwise preserve the historical
+        # transport method as the effective method.
         g.username = user
-        g.auth_method = auth_method
+        g.auth_transport_method = auth_method
+        if not getattr(g, "auth_method", None):
+            g.auth_method = auth_method
 
         if auth_method == 'tls':
             logger.info(

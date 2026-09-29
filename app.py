@@ -302,15 +302,18 @@ def ces_service(CAID):
         )
         return Response("CAID not found", 403)
 
-    if not _ca_allows_auth_method(ca_match[0], getattr(g, "auth_method", None)):
+    transport_auth_method = getattr(
+        g, "auth_transport_method", getattr(g, "auth_method", None)
+    )
+    if not _ca_allows_auth_method(ca_match[0], transport_auth_method):
         ces_logger.warning(
             "event=ces_request_rejected ca_id=%s reason=auth_method_not_allowed method=%s",
             safe_log_value(CAID),
-            safe_log_value(getattr(g, "auth_method", None)),
+            safe_log_value(transport_auth_method),
         )
         return Response(
             "Authentication method %s is not allowed for CA %s" %
-            (getattr(g, "auth_method", None), CAID),
+            (transport_auth_method, CAID),
             403,
         )
 
