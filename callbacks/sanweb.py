@@ -1,0 +1,497 @@
+from datetime import datetime, timedelta,timezone
+from typing import Iterable, Optional, Dict, Any
+from asn1crypto import core as a_core
+from cryptography import x509 as cx509
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import rsa, ec, ed25519, ed448  # (2) sign according to key type
+from cryptography.x509.oid import (
+    NameOID,
+    AuthorityInformationAccessOID,
+    ObjectIdentifier as CObjectIdentifier,
+    ExtensionOID
+)
+
+# helpers/structs already present in your project
+from utils import  NtdsCASecurityExt, search_user
+from utils import _apply_static_extensions, validate_csr, is_directly_issued_by_cert_in_folder,is_client_certificate_valid_for_ca_reference
+from utils_crt import is_certificate_revoked_by_crl
+from cryptography.x509.extensions import ExtensionNotFound
+import hashlib
+from flask import Flask, request, Response, g
+from urllib.parse import unquote
+from fnmatch import fnmatchcase
+
+
+# ============================================================
+# 1) Template definition for CEP (dynamic per user)
+# ============================================================
+
+template_oid           = "1.3.6.1.4.1.311.21.8.888.3"
+template_name          = "sanweb"
+template_major_version = 100
+template_minor_version = 3
+auto_enroll            = False
+
+def define_template(*, app_conf, username=None , request=None,auth_method=None,params=None):
+    #validity_seconds = 31536000       # 1 year
+    validity_seconds = 3974400 # 46 jours
+    renewal_seconds = 864000   # 10 days
+    auto_enroll = False
+
+    # if ssl auth
+    XSslClientCert = request.headers.get('X-Ssl-Client-Cert', None)
+    if auth_method == "tls":
+        if not is_client_certificate_valid_for_ca_reference(
+            XSslClientCert,
+            (params or {}).get("ca_references", []),
+            template_oid=template_oid,
+        ):
+            return None
+    else:
+        XSslClientCert = None
+
+    if (not g.get('token')) and (not XSslClientCert)  :
+        return None
+
+
+    return {
+    # MS-XCEP Attributes/commonName: friendly/unique name of a CertificateEnrollmentPolicy within a GetPoliciesResponse
+    # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cd22d3a0-f469-4a44-95ed-d10ce4dc2063
+    "common_name": template_name,
+
+    "template_oid": {
+        # MS-CRTD msPKI-Cert-Template-OID: the template OID
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/4849b1d6-b6bf-405c-8e9c-28ede1874efa
+        "value": template_oid,
+
+        # MS-CRTD (template structures overview): template name/display name you expose
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/4c6950e4-1dc2-4ae3-98c3-b8919bb73822
+        "name": template_name,
+
+        # MS-CRTD msPKI-Template-Schema-Version: template schema version (1..4)
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/bf5bd40c-0d4d-44bd-870e-8a6bdea3ca88
+        "major_version": template_major_version,
+
+        # MS-CRTD msPKI-Template-Minor-Revision: template minor revision (0..0x7fffffff)
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/3c315531-7cb0-44de-afb9-5c6f9a8aea49
+        "minor_version": template_minor_version,
+    },
+
+    # MS-XCEP CAReferenceCollection: references to issuing CAs returned by the policy response
+    # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/95baab3d-2f0b-42ad-897a-26565c5f723f
+    "ca_references": ["ca-web"],
+
+    # MS-XCEP Attributes/policySchema: schema version for the policy object (SHOULD be 1,2,3)
+    # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cd22d3a0-f469-4a44-95ed-d10ce4dc2063
+    "policy_schema": 3,
+
+    "revision": {
+        # MS-XCEP Revision/majorRevision: populated from MS-CRTD "revision" attribute
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/fc1bb552-591f-45bc-9b18-67e1fb20b394
+        "major": template_major_version,
+
+        # MS-XCEP Revision/minorRevision: populated from MS-CRTD msPKI-Template-Minor-Revision
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/fc1bb552-591f-45bc-9b18-67e1fb20b394
+        "minor": template_minor_version,
+    },
+
+    "validity": {
+        # MS-XCEP CertificateValidity/validityPeriodSeconds: expected certificate validity (seconds)
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/97bc077a-8f4b-4ab4-b78e-6b312a7642f9
+        "validity_seconds": validity_seconds,
+
+        # MS-XCEP CertificateValidity/renewalPeriodSeconds: recommended renewal window (seconds)
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/97bc077a-8f4b-4ab4-b78e-6b312a7642f9
+        "renewal_seconds": renewal_seconds,
+    },
+
+    "permissions": {
+        # MS-XCEP EnrollmentPermission/enroll: requester has permission to enroll
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cc5a0298-fd6b-41f1-a700-dad9f8e95842
+        "enroll": True,
+
+        # MS-XCEP EnrollmentPermission/autoEnroll: requester has permission to auto-enroll
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cc5a0298-fd6b-41f1-a700-dad9f8e95842
+        "auto_enroll": auto_enroll,
+    },
+
+    # FLAGS: booleans only
+    "flags": {
+        "private_key_flags": {
+            # MS-XCEP Attributes/privateKeyFlags: bitmask of private key flags
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cd22d3a0-f469-4a44-95ed-d10ce4dc2063
+            #
+            # AD CS equivalent: MS-CRTD msPKI-Private-Key-Flag (CT_FLAG_EXPORTABLE_KEY = 0x00000010)
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/f6122d87-b999-4b92-bff8-f465e8949667
+            "exportable_key": False,
+        },
+
+        "subject_name_flags": {
+            # MS-XCEP Attributes/subjectNameFlags: bitmask controlling Subject/SAN population rules
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cd22d3a0-f469-4a44-95ed-d10ce4dc2063
+            #
+            # AD CS equivalent list: MS-CRTD msPKI-Certificate-Name-Flag (CT_FLAG_*)
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/1192823c-d839-4bc3-9b6b-fa8c53507ae1
+            #
+            # Processing rules (CA-side): MS-WCCE msPKI-Certificate-Name-Flag
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wcce/a1f27ffb-7f74-4fa1-8841-7cde4ba0bcfe
+            "add_dns_to_san": True,               # require/add DNS in SAN (directory-sourced)
+            "subject_dns_as_cn": True,            # use DNS as CN in Subject (when applicable)
+            "enrollee_supplies_subject": False,   # enrollee supplies Subject in CSR
+            "enrollee_supplies_san": False,       # enrollee supplies SAN in CSR
+            "old_cert_supplies_subject_and_alt_name": False,  # renewal reuses old Subject+SAN
+            "add_domain_dns_to_san": False,       # require/add root domain DNS in SAN
+            "add_spn_to_san": False,              # require/add SPN in SAN
+            "add_directory_guid_to_san": False,   # require/add directory GUID (objectGUID) in SAN
+            "add_upn_to_san": False,              # require/add UPN in SAN
+            "add_email_to_san": False,            # require/add email in SAN
+            "subject_require_email": False,       # require email attribute in Subject
+            "subject_require_common_name": False, # require CN in Subject
+            "subject_require_directory_path": False, # require directory path in Subject
+        },
+
+        "enrollment_flags": {
+            # MS-XCEP Attributes/enrollmentFlags: bitmask controlling enrollment behavior
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cd22d3a0-f469-4a44-95ed-d10ce4dc2063
+            #
+            # AD CS equivalent list: MS-CRTD msPKI-Enrollment-Flag (CT_FLAG_*)
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/ec71fd43-61c2-407b-83c9-b52272dec8a1
+            "include_symmetric_algorithms": True,     # CT_FLAG_INCLUDE_SYMMETRIC_ALGORITHMS
+            "publish_to_ds": True,                    # CT_FLAG_PUBLISH_TO_DS
+            "auto_enrollment": auto_enroll,           # CT_FLAG_AUTO_ENROLLMENT
+            "user_interaction_required": False,       # CT_FLAG_USER_INTERACTION_REQUIRED
+            "pend_all_requests": False,               # CT_FLAG_PEND_ALL_REQUESTS
+            "publish_to_kra_container": False,        # CT_FLAG_PUBLISH_TO_KRA_CONTAINER
+            "auto_enrollment_check_user_ds_certificate": False,  # CT_FLAG_AUTO_ENROLLMENT_CHECK_USER_DS_CERTIFICATE
+            "previous_approval_validate_reenrollment": False,    # CT_FLAG_PREVIOUS_APPROVAL_VALIDATE_REENROLLMENT
+            "add_ocsp_nocheck": False,                # CT_FLAG_ADD_OCSP_NOCHECK
+            "enable_key_reuse_on_nt_token_keyset_storage_full": False,  # CT_FLAG_ENABLE_KEY_REUSE_ON_NT_TOKEN_KEYSET_STORAGE_FULL
+            "no_revocation_info_in_issued_certs": False,         # CT_FLAG_NO_REVOCATION_INFO_IN_ISSUED_CERTS
+            "include_basic_constraints_for_ee_certs": False,     # CT_FLAG_INCLUDE_BASIC_CONSTRAINTS_FOR_EE_CERTS
+            "allow_enroll_on_behalf_of": False,       # CT_FLAG_ALLOW_ENROLL_ON_BEHALF_OF
+            "allow_previous_approval_keybasedrenewal_validate_reenroll": False,  # CT_FLAG_ALLOW_PREVIOUS_APPROVAL_KEYBASEDRENEWAL_VALIDATE_REENROLL
+            "issuance_policies_from_request": False,   # CT_FLAG_ISSUANCE_POLICIES_FROM_REQUEST
+            "skip_auto_renewal": False,               # CT_FLAG_SKIP_AUTO_RENEWAL
+            "remove_invalid_certificate_from_personal_store": False,  # CT_FLAG_REMOVE_INVALID_CERTIFICATE_FROM_PERSONAL_STORE
+        },
+
+        "general_flags": {
+            # MS-XCEP Attributes/generalFlags: general template flags (machine/CA/cross-CA)
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cd22d3a0-f469-4a44-95ed-d10ce4dc2063
+            #
+            # Client processing rules: MS-WCCE Certificate.Template.flags (CT_FLAG_MACHINE_TYPE, etc.)
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wcce/c07fc301-a7c1-4a61-ba91-142b751ad114
+            "machine_type": True,  # CT_FLAG_MACHINE_TYPE: machine enrollment template
+            "ca_type": False,      # CT_FLAG_IS_CA: CA request template
+            "cross_ca": False,     # CT_FLAG_IS_CROSS_CA: cross-cert template
+        },
+    },
+
+    "private_key_attributes": {
+        # MS-XCEP PrivateKeyAttributes: private key generation requirements advertised by the policy
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cf7610a9-26cb-4172-a4c5-895066acf191
+        "minimal_key_length": 3072,  # minimalKeyLength (bits)
+
+        # MS-CRTD pKIDefaultKeySpec: allowed values for default key spec (AT_KEYEXCHANGE/AT_SIGNATURE)
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/ee5d75a7-8416-4a92-b708-ee8f6e8baffb
+        "key_spec": 1,  # 1 = AT_KEYEXCHANGE
+
+        # MS-XCEP PrivateKeyAttributes/algorithmOIDReference: optional reference into the OID table returned by XCEP
+        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cf7610a9-26cb-4172-a4c5-895066acf191
+        "algorithm_oid_reference": None,
+
+        "crypto_providers": [
+            # MS-XCEP CryptoProviders: list of allowed CSP/KSP provider names
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/808caee4-e016-4f9e-ad0a-076ce83c86c7
+            "Microsoft Platform Crypto Provider",
+            "Microsoft Software Key Storage Provider"
+        ],
+    },
+
+    # Static extensions (re-applied at issuance)
+    "required_extensions": [
+        {  # Certificate Template Information
+            # MS-WCCE szOID_CERTIFICATE_TEMPLATE: OID 1.3.6.1.4.1.311.21.7 (critical SHOULD be FALSE)
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wcce/9da866e5-9ce9-4a83-9064-0d20af8b2ccf
+            "oid": "1.3.6.1.4.1.311.21.7",
+            "critical": False,
+            "template_info": {
+                # TemplateID maps to MS-CRTD msPKI-Cert-Template-OID
+                # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/4849b1d6-b6bf-405c-8e9c-28ede1874efa
+                "oid": template_oid,
+
+                # MS-WCCE szOID_CERTIFICATE_TEMPLATE: major/minor template version carried in the extension
+                # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wcce/9da866e5-9ce9-4a83-9064-0d20af8b2ccf
+                "major_version": template_major_version,
+                "minor_version": template_minor_version,
+            },
+        },
+        {  # EKU: ClientAuth + Secure Email + EFS
+            # MS-WCCE pKIExtendedKeyUsage: server MUST add EKU OIDs specified by the template
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wcce/1c1d7aaa-281b-48f2-babc-1bc42dd3ed37
+            "oid": "2.5.29.37",
+            "critical": False,
+            "eku_oids": [
+                "1.3.6.1.5.5.7.3.1",
+                "1.3.6.1.5.5.7.3.2"        # id-kp-clientAuth
+            ],
+        },
+        {  # KeyUsage
+            # MS-WCCE pKIKeyUsage: server SHOULD build Key Usage from the template attribute
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wcce/98626a7c-31eb-46f4-9c44-3cfb29e6c823
+            "oid": "2.5.29.15",
+            "critical": True,
+            "key_usage": {
+                "digital_signature": True,     # digitalSignature
+                "content_commitment": False,   # nonRepudiation/contentCommitment
+                "key_encipherment": True,      # keyEncipherment
+                "data_encipherment": False,    # dataEncipherment
+                "key_agreement": False,        # keyAgreement
+                "key_cert_sign": False,        # keyCertSign
+                "crl_sign": False,             # cRLSign
+                "encipher_only": False,        # encipherOnly
+                "decipher_only": False,        # decipherOnly
+            },
+        },
+        {  # Application Policies
+            # MS-WCCE: Certificate Application Policy Extension (OID 1.3.6.1.4.1.311.21.10)
+            # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wcce/160b96b1-c431-457a-8eed-27c11873f378
+            "oid": "1.3.6.1.4.1.311.21.10",
+            "critical": False,
+            "app_policies": [
+                "1.3.6.1.5.5.7.3.2",        # ClientAuth
+                "1.3.6.1.5.5.7.3.1"
+            ],
+        },
+    ],
+}
+
+
+# ======================
+# 2) Certificate issuance
+# ======================
+def emit_certificate(
+    *,
+    csr_der: Optional[bytes],
+    request_id: Optional[int],
+    username: str,
+    ca: dict,
+    template: Optional[dict],
+    info: dict,
+    app_conf: dict,
+    CAID,
+    request = None,
+    body_part_id = None,
+    p7_der=None,
+    tpm_result=None,
+    auth_method=None,
+    params=None
+) -> Dict[str, Any]:
+
+    # if ssl auth
+    XSslClientCert = request.headers.get('X-Ssl-Client-Cert', None)
+    if auth_method == "tls":
+        if not is_client_certificate_valid_for_ca_reference(
+            XSslClientCert,
+            (params or {}).get("ca_references", []),
+            template_oid=template_oid,
+        ):
+            return {
+                "status": "denied",
+                "status_text": "denied",
+            }
+    else:
+        XSslClientCert = None
+
+    if (not g.get('token')) and (not XSslClientCert)  :
+        return {
+            "status": "unsupported_auth",
+            "status_text": "unsupported_auth",
+        }
+
+
+    csr = cx509.load_der_x509_csr(csr_der)
+    validate_csr(csr)
+    ca_cert = cx509.load_der_x509_certificate(ca["__certificate_der"])
+    now = datetime.utcnow() - timedelta(minutes=5)
+    try:
+        san = csr.extensions.get_extension_for_oid(
+            ExtensionOID.SUBJECT_ALTERNATIVE_NAME
+        ).value
+    except ExtensionNotFound :
+        san = []
+    
+    if XSslClientCert:
+
+        if isinstance(XSslClientCert, str):
+            pem_bytes = cx509.load_pem_x509_certificate(unquote(XSslClientCert).encode("utf-8"))
+        else:
+            pem_bytes = XSslClientCert
+
+        cert = pem_bytes
+        
+        expire_at = getattr(cert, "not_valid_after_utc", None) or cert.not_valid_after
+        if expire_at.tzinfo is None:
+            expire_at = expire_at.replace(tzinfo=timezone.utc)
+
+        # Temps restant
+        now = datetime.now(timezone.utc)
+        remaining = expire_at - now
+        
+        # Renouvellement seulement en fin de vie : évite de transformer un
+        # certificat client valide mais hors template en certificat sanweb.
+#        if remaining.days > SANWEB_RENEWAL_WINDOW_DAYS:
+#            return {
+#            "status": "denied",
+#            "status_text": "denied",
+#            }
+
+        if not _cert_has_template_oid(cert, template_oid):
+            return {
+            "status": "denied",
+            "status_text": "denied",
+            }
+
+        
+        datacert = parse_cert_cn_and_san(cert)
+        cn = datacert['cn']
+        list_san = datacert['san']
+    else:
+        token = g.get('token') or {}
+        allow_san = str(token.get('name', '')).split(',')
+
+        cn= ''
+        list_san = []
+        for name in san:
+            if isinstance(name, cx509.DNSName):
+                data = name.value
+
+                 
+                if not san_allowed(data, allow_san):
+                    return {
+                        "status": "denied",
+                        "status_text": "%s NOT ALLOWED, SAN IN TOKEN %s" % (str(data),str(allow_san))
+                    }
+        
+                if not cn:
+                    cn = data
+        
+                list_san.append(name)
+    if not cn or not list_san:
+        return {"status": "denied", "status_text": "denied"}
+
+    validity_seconds = (template or {}).get("validity", {}).get("validity_seconds")
+
+    builder = (
+        cx509.CertificateBuilder()
+        .subject_name(cx509.Name([cx509.NameAttribute(NameOID.COMMON_NAME, cn)]))
+        .issuer_name(ca_cert.subject)
+        .public_key(csr.public_key())
+        .serial_number(cx509.random_serial_number())
+        .not_valid_before(now)
+        .not_valid_after(now + timedelta(seconds=int(validity_seconds)))
+        .add_extension(cx509.SubjectKeyIdentifier.from_public_key(csr.public_key()), critical=False)
+    )
+
+    # AIA/CDP from CA
+    if ca.get("urls", {}).get("ca_issuers_http"):
+        aia = cx509.AuthorityInformationAccess([
+            cx509.AccessDescription(
+                AuthorityInformationAccessOID.CA_ISSUERS,
+                cx509.UniformResourceIdentifier(ca["urls"]["ca_issuers_http"])
+            )
+        ])
+        builder = builder.add_extension(aia, critical=False)
+    if ca.get("urls", {}).get("crl_http"):
+        cdp = cx509.CRLDistributionPoints([
+            cx509.DistributionPoint(
+                full_name=[cx509.UniformResourceIdentifier(ca["urls"]["crl_http"])],
+                relative_name=None, reasons=None, crl_issuer=None
+            )
+        ])
+        builder = builder.add_extension(cdp, critical=False)
+
+    # ✅ static template extensions (EKU/KU/AppPolicies/TemplateInfo)
+    builder = _apply_static_extensions(builder, template)
+
+
+
+    # Dynamic SAN DNS (de-dup)
+    names = []
+    seen = set()
+    for n in list_san:
+        seen.add(n)
+        names.append(n)
+    if names:
+        builder = builder.add_extension(cx509.SubjectAlternativeName(names), critical=False)
+
+
+    # (2) sign according to CA key type
+    priv = ca["__key_obj"]
+    if isinstance(priv, (ed25519.Ed25519PrivateKey, ed448.Ed448PrivateKey)):
+        cert = builder.sign(private_key=priv, algorithm=None)
+    else:
+        cert = builder.sign(private_key=priv, algorithm=hashes.SHA256())
+
+
+    return {
+        "status": "issued",
+        "cert": cert,
+    }
+
+
+SANWEB_RENEWAL_WINDOW_DAYS = 60
+
+class _CertificateTemplate(a_core.Sequence):
+    _fields = [
+        ('template_id', a_core.ObjectIdentifier),
+        ('template_major_version', a_core.Integer, {'explicit': 0, 'optional': True}),
+        ('template_minor_version', a_core.Integer, {'explicit': 1, 'optional': True}),
+    ]
+
+def _cert_has_template_oid(cert, oid: str) -> bool:
+    try:
+        ext_value = cert.extensions.get_extension_for_oid(
+            CObjectIdentifier("1.3.6.1.4.1.311.21.7")
+        ).value
+
+        template_id = getattr(ext_value, "template_id", None)
+        if template_id is not None:
+            return getattr(template_id, "dotted_string", str(template_id)) == oid
+
+        raw = getattr(ext_value, "value", None)
+        if raw is None:
+            return False
+
+        return _CertificateTemplate.load(bytes(raw))["template_id"].native == oid
+    except Exception:
+        return False
+
+
+def parse_cert_cn_and_san(cert) :
+
+
+    # CN (Common Name)
+    cn = None
+    cn_attrs = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+    if cn_attrs:
+        cn = cn_attrs[0].value
+
+    try:
+        san = cert.extensions.get_extension_for_oid(
+                ExtensionOID.SUBJECT_ALTERNATIVE_NAME
+            ).value
+    except ExtensionNotFound:
+        san = []
+
+    return {"cn": cn, "san": san}
+
+def san_allowed(value: str, allowed_patterns: list[str]) -> bool:
+    value = value.strip().lower()
+    for pattern in allowed_patterns:
+        pattern = pattern.strip().lower()
+        if not pattern or pattern in {'*', '*.*'} or (pattern.startswith('*.') and pattern.count('.') == 1):
+            continue
+        if fnmatchcase(value, pattern):
+            return True
+    return False

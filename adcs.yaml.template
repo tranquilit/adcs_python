@@ -44,6 +44,14 @@ templates:
         ca_references:
           - ca_inter_test
 
+#  - callback:
+#      path: "/etc/adcs/callbacks/sanweb.py"
+#      params:
+#        ca_references:
+#          - ca-web
+#      auth_methods:
+#        - tls
+#        - token
 
 auth:
   - kerberos: true
@@ -51,6 +59,7 @@ auth:
   - username_password: true
   - callback:
       path: "/etc/adcs/callbacks/auth_basic_template.py"
+#      path: "/etc/adcs/callbacks/auth_token_password.py"
 
 ################Example########################
 ##cas:

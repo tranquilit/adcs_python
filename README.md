@@ -89,7 +89,8 @@ apt-get install -y \
        python3-yaml \
        python3-samba \
        python3-cryptography \
-       python3-pkcs11
+       python3-pkcs11 \
+       python3-itsdangerous
 ```
 
 Retrieve the project
