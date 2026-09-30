@@ -1,0 +1,4 @@
+security:
+  secret_key: "secret"
+  token_salt: "salt"
+  token_max_age: 3600
