@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 from flask import Flask, request, Response, g
+from werkzeug.middleware.proxy_fix import ProxyFix
 import os
 import argparse
 import uuid
@@ -35,6 +36,8 @@ from adcs_logging import configure_logging, get_logger, install_request_logging,
 MAX_SOAP_BYTES = 2 * 1024 * 1024  # 2 MiB: hard limit to avoid OOM
 
 app = Flask(__name__)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
+
 install_request_logging(app)
 
 logger = get_logger("app")
