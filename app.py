@@ -1008,7 +1008,15 @@ if __name__ == "__main__":
             app,
             host=args.host,
             port=args.port,
-            threads=args.threads
+            threads=args.threads,
+            trusted_proxy="127.0.0.1",
+            trusted_proxy_count=1,
+            trusted_proxy_headers={
+                "x-forwarded-for",
+                "x-forwarded-proto",
+                "x-forwarded-port",
+            },
+            clear_untrusted_proxy_headers=True,
         )
 
     else:
