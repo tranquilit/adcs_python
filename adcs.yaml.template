@@ -1,5 +1,11 @@
 global:
 
+
+  logging:
+    level: INFO
+    format: json
+    include_stack_trace: true
+
   #30 days
   next_update_hours_crl: 720
 

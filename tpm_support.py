@@ -12,18 +12,21 @@ from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 
 import tpm_attestation as tpm_mod
-from adcs_logging import safe_log_value
+from adcs_logging import get_logger, log_event
 
-logger = logging.getLogger("adcs.tpm_support")
+logger = get_logger("tpm_support")
 
 
 
 def _normalize_request_id(request_id: Union[str, int]) -> str:
-    """Return a safe, canonical decimal request id for filesystem use."""
-    s = str(request_id)
-    if not s.isdigit():
+    """Return a safe, canonical 128-bit decimal request id for filesystem use."""
+    s = str(request_id).strip()
+    if not s.isdigit() or len(s) > 39:
         raise ValueError("Invalid request_id")
-    return str(int(s))
+    value = int(s, 10)
+    if value < 0 or value >= (1 << 128):
+        raise ValueError("Invalid request_id")
+    return str(value)
 
 
 def _stable_primitive(value):
@@ -325,17 +328,32 @@ def _restore_ek_materials(payload: Optional[dict]) -> tuple[Optional[object], Op
         try:
             ek_cert = _ek_cert_from_der(base64.b64decode(ek_cert_der_b64, validate=True))
         except Exception as exc:
-            logger.debug("event=tpm_pending_restore_failed artifact=ek_certificate error=%s", safe_log_value(exc))
+            log_event(
+                logger, logging.DEBUG, "tpm_pending_restore_failed",
+                "TPM pending state restore failed", outcome="failure",
+                reason="invalid_ek_certificate", artifact="ek_certificate",
+                error_type=type(exc).__name__,
+            )
     if ek_pub_der_b64:
         try:
             ek_pub = _public_key_from_spki_der(base64.b64decode(ek_pub_der_b64, validate=True))
         except Exception as exc:
-            logger.debug("event=tpm_pending_restore_failed artifact=ek_public_key error=%s", safe_log_value(exc))
+            log_event(
+                logger, logging.DEBUG, "tpm_pending_restore_failed",
+                "TPM pending state restore failed", outcome="failure",
+                reason="invalid_ek_public_key", artifact="ek_public_key",
+                error_type=type(exc).__name__,
+            )
     elif ek_cert is not None:
         try:
             ek_pub = ek_cert.public_key()
         except Exception as exc:
-            logger.debug("event=tpm_pending_restore_failed artifact=ek_public_key_from_certificate error=%s", safe_log_value(exc))
+            log_event(
+                logger, logging.DEBUG, "tpm_pending_restore_failed",
+                "TPM pending state restore failed", outcome="failure",
+                reason="ek_public_key_restore_failed", artifact="ek_public_key_from_certificate",
+                error_type=type(exc).__name__,
+            )
     return ek_cert, ek_pub
 
 

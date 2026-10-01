@@ -2,7 +2,6 @@ from pathlib import Path
 import base64
 import hashlib
 import hmac
-import logging
 import os
 import struct
 from datetime import datetime, timezone
@@ -13,6 +12,8 @@ from asn1crypto import algos as a_algos
 from asn1crypto import cms as a_cms
 from asn1crypto import core as a_core
 from asn1crypto import csr as a_csr
+from adcs_logging import get_logger
+
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, padding as sym_padding, serialization
@@ -20,7 +21,7 @@ from utils import _signature_algo_for_ca_key, _sign_tbs_with_ca_key, _tbs_signed
 from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-logger = logging.getLogger("adcs.tpm_attestation")
+logger = get_logger("tpm_attestation")
 
 OID_MS_ENROLL_EK_INFO = "1.3.6.1.4.1.311.21.23"
 OID_MS_ENROLL_AIK_INFO = "1.3.6.1.4.1.311.21.39"

@@ -356,10 +356,18 @@ def load_yaml_conf(path="adcs.yaml"):
     conf["tpm_pending_dir"] = gbl.get("tpm_pending_dir", "/var/lib/adcs/tpm-pending")
     conf["tpm_pending_challenge_max_age_seconds"] = int(gbl.get("tpm_pending_challenge_max_age_seconds",300,))
 
-    # The application owns only log verbosity. Routing, persistence and
-    # rotation are delegated to systemd/journald/rsyslog.
+    # The application owns log verbosity and serialization only. Routing,
+    # persistence and rotation are delegated to systemd/journald/rsyslog.
+    log_format = str(logging_cfg.get("format", "json")).strip().lower()
+    if log_format not in {"json", "text"}:
+        raise ValueError("global.logging.format must be 'json' or 'text'")
+    include_stack_trace = logging_cfg.get("include_stack_trace", True)
+    if not isinstance(include_stack_trace, bool):
+        raise ValueError("global.logging.include_stack_trace must be true or false")
     conf["logging"] = {
         "level": str(logging_cfg.get("level", "INFO")).upper(),
+        "format": log_format,
+        "include_stack_trace": include_stack_trace,
     }
 
     conf["policyid"] = policy_provider.get("policy_id")

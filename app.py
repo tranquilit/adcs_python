@@ -5,13 +5,14 @@ from flask import Flask, request, Response, g
 from werkzeug.middleware.proxy_fix import ProxyFix
 import os
 import argparse
+import logging
 import uuid
 import base64
 import textwrap
 from defusedxml import ElementTree as ET  # anti-XXE / billion-laughs
 
 from cryptography import x509 as cx509
-from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives import hashes, serialization
 
 from decoratorauth import auth_required
 
@@ -29,7 +30,13 @@ from utils import (
 from adcs_config import load_yaml_conf, build_templates_for_policy_response, _call_callback_with_params
 from callback_loader import load_func
 from tpm_support import verify_tpm_for_template
-from adcs_logging import configure_logging, get_logger, install_request_logging, safe_log_value
+from adcs_logging import (
+    configure_logging,
+    get_logger,
+    install_request_logging,
+    log_event,
+    set_enrollment_request_id,
+)
 
 
 # ------------- SOAP parsing security -------------
@@ -60,11 +67,10 @@ def init_app(confadcs="/etc/adcs/adcs.yaml"):
     os.makedirs(app.confadcs['path_list_request_id'], exist_ok=True)
 
     decls = app.confadcs.get("__template_decls__") or []
-    logger.info(
-        "event=config_loaded file=%s template_declarations=%d cas=%d",
-        safe_log_value(confadcs),
-        len(decls),
-        len(app.confadcs.get("cas_list") or []),
+    log_event(
+        logger, logging.INFO, "config_loaded", "Configuration loaded",
+        outcome="success", file=confadcs, template_declarations=len(decls),
+        cas=len(app.confadcs.get("cas_list") or []),
     )
 
     return app
@@ -115,19 +121,27 @@ def cep_service():
     raw = request.data or b""
 
     if len(raw) > MAX_SOAP_BYTES:
-        cep_logger.warning("event=cep_request_rejected reason=request_too_large bytes=%d", len(raw))
+        log_event(
+            cep_logger, logging.WARNING, "cep_request_rejected",
+            "CEP request rejected", outcome="failure", reason="request_too_large",
+            bytes=len(raw),
+        )
         return Response("Request too large", status=413, content_type="text/plain; charset=utf-8")
 
     try:
         xml_data = raw.decode('utf-8', errors='replace')
     except Exception as exc:
-        cep_logger.warning(
-            "event=cep_request_rejected reason=invalid_encoding error=%s",
-            safe_log_value(exc),
+        log_event(
+            cep_logger, logging.WARNING, "cep_request_rejected",
+            "CEP request rejected", outcome="failure", reason="invalid_encoding",
+            error_type=type(exc).__name__,
         )
         return Response("Invalid encoding", status=400, content_type="text/plain; charset=utf-8")
 
-    cep_logger.debug("event=cep_policy_request bytes=%d", len(raw))
+    log_event(
+        cep_logger, logging.DEBUG, "cep_policy_request", "CEP policy request received",
+        bytes=len(raw),
+    )
 
     rst_xml = xml_data
     uuid_request = ''
@@ -144,9 +158,10 @@ def cep_service():
         except Exception as exc:
             # Continue: CEP can generate a response without correlation if parsing fails.
             uuid_request = ''
-            cep_logger.warning(
-                "event=cep_message_id_parse_failed error=%s",
-                safe_log_value(exc),
+            log_event(
+                cep_logger, logging.WARNING, "cep_message_id_parse_failed",
+                "CEP MessageID could not be parsed", outcome="failure",
+                reason="invalid_message_id", error_type=type(exc).__name__,
             )
 
     uuid_random = str(uuid.uuid4())
@@ -164,9 +179,10 @@ def cep_service():
             auth_method=getattr(g, "auth_method", None)
         )
     except Exception as exc:
-        cep_logger.error(
-            "event=cep_policy_build_failed error_type=%s",
-            type(exc).__name__,
+        log_event(
+            cep_logger, logging.ERROR, "cep_policy_build_failed",
+            "CEP policy build failed", outcome="failure", reason="python_exception",
+            exc_info=True, error_type=type(exc).__name__,
         )
         raise
 
@@ -188,25 +204,40 @@ def cep_service():
             oids=oids_for_user,
         )
     except Exception as exc:
-        cep_logger.error(
-            "event=cep_policy_response_failed soap_message_id=%s error_type=%s",
-            safe_log_value(relates_to, max_length=128),
-            type(exc).__name__,
+        log_event(
+            cep_logger, logging.ERROR, "cep_policy_response_failed",
+            "CEP policy response build failed", outcome="failure", reason="python_exception",
+            exc_info=True, soap_message_id=relates_to, error_type=type(exc).__name__,
         )
         raise
 
-    cep_logger.info(
-        "event=cep_policy_response soap_message_id=%s templates=%d oids=%d cas=%d",
-        safe_log_value(relates_to, max_length=128),
-        len(templates_for_user),
-        len(oids_for_user),
-        len(app.confadcs.get('cas_list') or []),
+    log_event(
+        cep_logger, logging.INFO, "cep_policy_response", "CEP policy response built",
+        outcome="success", soap_message_id=relates_to,
+        templates=len(templates_for_user), oids=len(oids_for_user),
+        cas=len(app.confadcs.get('cas_list') or []),
     )
 
     return Response(response_xml, content_type='application/soap+xml')
 
 
 CHALLENGE_RESPONSE = "http://schemas.microsoft.com/windows/pki/2009/01/enrollment#CHALLENGERESPONSE"
+
+
+def _parse_enrollment_request_id(value) -> int:
+    """Validate an ADCS protocol RequestID without changing its semantics.
+
+    Server-generated RequestIDs are UUID integers (at most 128 bits). Client
+    values are accepted only in the same non-negative decimal range so they remain
+    safe for filenames and SOC correlation.
+    """
+    text = str(value or "").strip()
+    if not text or not text.isdigit() or len(text) > 39:
+        raise ValueError("Invalid enrollment RequestID")
+    request_id = int(text, 10)
+    if request_id < 0 or request_id >= (1 << 128):
+        raise ValueError("Invalid enrollment RequestID")
+    return request_id
 
 
 def extract_challenge_response_and_request_id(xml_data: str):
@@ -231,7 +262,7 @@ def extract_challenge_response_and_request_id(xml_data: str):
     )
 
     if request_id:
-        request_id = int(request_id)
+        request_id = _parse_enrollment_request_id(request_id)
 
     return {
         "is_challenge_response": challenge_response != "",
@@ -246,20 +277,20 @@ def ces_service(CAID):
     raw = request.data or b""
 
     if len(raw) > MAX_SOAP_BYTES:
-        ces_logger.warning(
-            "event=ces_request_rejected ca_id=%s reason=request_too_large bytes=%d",
-            safe_log_value(CAID),
-            len(raw),
+        log_event(
+            ces_logger, logging.WARNING, "ces_request_rejected",
+            "CES request rejected", outcome="failure", reason="request_too_large",
+            ca_id=CAID, bytes=len(raw),
         )
         return Response("Request too large", status=413, content_type="text/plain; charset=utf-8")
 
     try:
         rst_xml = raw.decode('utf-8', errors='replace')
     except Exception as exc:
-        ces_logger.warning(
-            "event=ces_request_rejected ca_id=%s reason=invalid_encoding error=%s",
-            safe_log_value(CAID),
-            safe_log_value(exc),
+        log_event(
+            ces_logger, logging.WARNING, "ces_request_rejected",
+            "CES request rejected", outcome="failure", reason="invalid_encoding",
+            ca_id=CAID, error_type=type(exc).__name__,
         )
         return Response("Invalid encoding", status=400, content_type="text/plain; charset=utf-8")
 
@@ -267,10 +298,10 @@ def ces_service(CAID):
     try:
         root = ET.fromstring(rst_xml)
     except Exception as exc:
-        ces_logger.warning(
-            "event=ces_request_rejected ca_id=%s reason=invalid_soap error=%s",
-            safe_log_value(CAID),
-            safe_log_value(exc),
+        log_event(
+            ces_logger, logging.WARNING, "ces_request_rejected",
+            "CES request rejected", outcome="failure", reason="invalid_soap",
+            ca_id=CAID, error_type=type(exc).__name__,
         )
         return Response("Bad SOAP: cannot parse XML", status=400, content_type="text/plain; charset=utf-8")
 
@@ -283,25 +314,25 @@ def ces_service(CAID):
     message_id_elem = root.find('.//a:MessageID', namespaces)
     message_id_text = (message_id_elem.text or "").strip() if message_id_elem is not None else ""
     if not message_id_text:
-        ces_logger.warning(
-            "event=ces_request_rejected ca_id=%s reason=missing_message_id",
-            safe_log_value(CAID),
+        log_event(
+            ces_logger, logging.WARNING, "ces_request_rejected",
+            "CES request rejected", outcome="failure", reason="missing_message_id",
+            ca_id=CAID,
         )
         return Response("Missing WS-Addressing MessageID", status=400, content_type="text/plain; charset=utf-8")
     uuid_request = message_id_text.removeprefix("urn:uuid:")
 
-    ces_logger.debug(
-        "event=ces_request ca_id=%s soap_message_id=%s bytes=%d",
-        safe_log_value(CAID),
-        safe_log_value(uuid_request, max_length=128),
-        len(raw),
+    log_event(
+        ces_logger, logging.DEBUG, "ces_request", "CES request received",
+        ca_id=CAID, soap_message_id=uuid_request, bytes=len(raw),
     )
 
     ca_match = [u for u in app.confadcs['cas_list'] if u['id'] == CAID]
     if not ca_match:
-        ces_logger.warning(
-            "event=ces_request_rejected ca_id=%s reason=ca_not_found",
-            safe_log_value(CAID),
+        log_event(
+            ces_logger, logging.WARNING, "ces_request_rejected",
+            "CES request rejected", outcome="failure", reason="ca_not_found",
+            ca_id=CAID,
         )
         return Response("CAID not found", 403)
 
@@ -309,10 +340,10 @@ def ces_service(CAID):
         g, "auth_transport_method", getattr(g, "auth_method", None)
     )
     if not _ca_allows_auth_method(ca_match[0], transport_auth_method):
-        ces_logger.warning(
-            "event=ces_request_rejected ca_id=%s reason=auth_method_not_allowed method=%s",
-            safe_log_value(CAID),
-            safe_log_value(transport_auth_method),
+        log_event(
+            ces_logger, logging.WARNING, "ces_request_rejected",
+            "CES request rejected", outcome="failure", reason="auth_method_not_allowed",
+            ca_id=CAID, method=transport_auth_method,
         )
         return Response(
             "Authentication method %s is not allowed for CA %s" %
@@ -328,23 +359,26 @@ def ces_service(CAID):
                 ket_cert_der=ca_match[0]['__ket_certificate_b64']
             )
         except Exception as exc:
-            ces_logger.error(
-                "event=ket_response_failed ca_id=%s error_type=%s",
-                safe_log_value(CAID),
-                type(exc).__name__,
+            log_event(
+                ces_logger, logging.ERROR, "ket_response_failed",
+                "KET response build failed", outcome="failure", reason="python_exception",
+                exc_info=True, ca_id=CAID, error_type=type(exc).__name__,
             )
             raise
 
-        ces_logger.info("event=ket_response ca_id=%s", safe_log_value(CAID))
+        log_event(
+            ces_logger, logging.INFO, "ket_response", "KET response built",
+            outcome="success", ca_id=CAID,
+        )
         return Response(response_xml, content_type='application/soap+xml')
 
     try:
         challenge = extract_challenge_response_and_request_id(rst_xml)
     except (TypeError, ValueError) as exc:
-        ces_logger.warning(
-            "event=ces_request_rejected ca_id=%s reason=invalid_challenge_request_id error_type=%s",
-            safe_log_value(CAID),
-            type(exc).__name__,
+        log_event(
+            ces_logger, logging.WARNING, "ces_request_rejected",
+            "CES request rejected", outcome="failure", reason="invalid_challenge_request_id",
+            ca_id=CAID, error_type=type(exc).__name__,
         )
         return Response("Invalid TPM challenge RequestID", status=400, content_type="text/plain; charset=utf-8")
 
@@ -356,20 +390,21 @@ def ces_service(CAID):
     enr_request_id = None
     if req_id_elem is not None and (req_id_elem.text or "").strip():
         try:
-            enr_request_id = int(req_id_elem.text.strip())
+            enr_request_id = _parse_enrollment_request_id(req_id_elem.text)
         except (TypeError, ValueError) as exc:
-            ces_logger.warning(
-                "event=ces_request_rejected ca_id=%s reason=invalid_enrollment_request_id error_type=%s",
-                safe_log_value(CAID),
-                type(exc).__name__,
+            log_event(
+                ces_logger, logging.WARNING, "ces_request_rejected",
+                "CES request rejected", outcome="failure", reason="invalid_enrollment_request_id",
+                ca_id=CAID, error_type=type(exc).__name__,
             )
             return Response("Invalid enrollment RequestID", status=400, content_type="text/plain; charset=utf-8")
 
     if challenge['is_challenge_response']:
         if challenge['request_id'] is None:
-            ces_logger.warning(
-                "event=tpm_challenge_rejected ca_id=%s reason=missing_request_id",
-                safe_log_value(CAID),
+            log_event(
+                ces_logger, logging.WARNING, "tpm_challenge_rejected",
+                "TPM challenge response rejected", outcome="failure", reason="missing_request_id",
+                ca_id=CAID,
             )
             return Response(
                 "Missing ContextItem RequestID for TPM challenge response",
@@ -378,11 +413,11 @@ def ces_service(CAID):
             )
 
         if enr_request_id is not None and enr_request_id != challenge['request_id']:
-            ces_logger.warning(
-                "event=tpm_challenge_rejected ca_id=%s reason=request_id_mismatch enrollment_request_id=%s challenge_request_id=%s",
-                safe_log_value(CAID),
-                safe_log_value(enr_request_id),
-                safe_log_value(challenge['request_id']),
+            log_event(
+                ces_logger, logging.WARNING, "tpm_challenge_rejected",
+                "TPM challenge response rejected", outcome="failure", reason="request_id_mismatch",
+                ca_id=CAID, enrollment_request_id=enr_request_id,
+                challenge_request_id=challenge['request_id'],
             )
             return Response(
                 "Mismatched RequestID between enr:RequestID and challenge-response ContextItem",
@@ -395,10 +430,10 @@ def ces_service(CAID):
         p7_path = os.path.join(app.confadcs['path_list_request_id'], str(request_id))
 
         if not os.path.isfile(p7_path):
-            ces_logger.error(
-                "event=pending_request_missing ca_id=%s enrollment_request_id=%s",
-                safe_log_value(CAID),
-                safe_log_value(request_id),
+            log_event(
+                ces_logger, logging.ERROR, "pending_request_missing",
+                "Pending enrollment request state is missing", outcome="failure",
+                reason="pending_state_missing", ca_id=CAID, enrollment_request_id=request_id,
             )
             return Response(
                 'File %s not foud in path_list_request_id' % str(request_id),
@@ -410,11 +445,11 @@ def ces_service(CAID):
             with open(p7_path, 'rb') as f:
                 p7_der = f.read()
         except Exception as exc:
-            ces_logger.error(
-                "event=pending_request_read_failed ca_id=%s enrollment_request_id=%s error_type=%s",
-                safe_log_value(CAID),
-                safe_log_value(request_id),
-                type(exc).__name__,
+            log_event(
+                ces_logger, logging.ERROR, "pending_request_read_failed",
+                "Pending enrollment request state could not be read", outcome="failure",
+                reason="python_exception", exc_info=True, ca_id=CAID,
+                enrollment_request_id=request_id, error_type=type(exc).__name__,
             )
             raise
 
@@ -423,10 +458,10 @@ def ces_service(CAID):
         p7_path = os.path.join(app.confadcs['path_list_request_id'], str(request_id))
 
         if not os.path.isfile(p7_path):
-            ces_logger.error(
-                "event=pending_request_missing ca_id=%s enrollment_request_id=%s",
-                safe_log_value(CAID),
-                safe_log_value(request_id),
+            log_event(
+                ces_logger, logging.ERROR, "pending_request_missing",
+                "Pending enrollment request state is missing", outcome="failure",
+                reason="pending_state_missing", ca_id=CAID, enrollment_request_id=request_id,
             )
             return Response(
                 'File %s not foud in path_list_request_id' % str(request_id),
@@ -438,11 +473,11 @@ def ces_service(CAID):
             with open(p7_path, 'rb') as f:
                 p7_der = f.read()
         except Exception as exc:
-            ces_logger.error(
-                "event=pending_request_read_failed ca_id=%s enrollment_request_id=%s error_type=%s",
-                safe_log_value(CAID),
-                safe_log_value(request_id),
-                type(exc).__name__,
+            log_event(
+                ces_logger, logging.ERROR, "pending_request_read_failed",
+                "Pending enrollment request state could not be read", outcome="failure",
+                reason="python_exception", exc_info=True, ca_id=CAID,
+                enrollment_request_id=request_id, error_type=type(exc).__name__,
             )
             raise
 
@@ -456,21 +491,25 @@ def ces_service(CAID):
             p7_der = base64.b64decode(bst_node.text)
             request_id = uuid.uuid4().int
         except Exception as exc:
-            ces_logger.error(
-                "event=cmc_payload_extract_failed ca_id=%s error_type=%s",
-                safe_log_value(CAID),
-                type(exc).__name__,
+            log_event(
+                ces_logger, logging.ERROR, "cmc_payload_extract_failed",
+                "CMC payload extraction failed", outcome="failure", reason="python_exception",
+                exc_info=True, ca_id=CAID, error_type=type(exc).__name__,
             )
             raise
+
+    # From this point on, every log record automatically carries the existing
+    # ADCS enrollment RequestID is exposed as requestId in the structured
+    # event object. The separate HTTP correlation ID remains correlationId.
+    set_enrollment_request_id(request_id)
 
     try:
         csr_der, body_part_id, info = exct_csr_from_cmc(p7_der)
     except Exception as exc:
-        ces_logger.error(
-            "event=cmc_parse_failed ca_id=%s enrollment_request_id=%s error_type=%s",
-            safe_log_value(CAID),
-            safe_log_value(request_id),
-            type(exc).__name__,
+        log_event(
+            ces_logger, logging.ERROR, "cmc_parse_failed", "CMC parsing failed",
+            outcome="failure", reason="python_exception", exc_info=True, ca_id=CAID,
+            enrollment_request_id=request_id, error_type=type(exc).__name__,
         )
         raise
 
@@ -485,11 +524,11 @@ def ces_service(CAID):
             auth_method=getattr(g, "auth_method", None)
         )
     except Exception as exc:
-        ces_logger.error(
-            "event=ces_template_build_failed ca_id=%s enrollment_request_id=%s error_type=%s",
-            safe_log_value(CAID),
-            safe_log_value(request_id),
-            type(exc).__name__,
+        log_event(
+            ces_logger, logging.ERROR, "ces_template_build_failed",
+            "CES template policy build failed", outcome="failure", reason="python_exception",
+            exc_info=True, ca_id=CAID, enrollment_request_id=request_id,
+            error_type=type(exc).__name__,
         )
         raise
 
@@ -507,21 +546,19 @@ def ces_service(CAID):
         tpl = tmap_name.get(info.get('name'))
 
     if not tpl:
-        ces_logger.warning(
-            "event=enrollment_rejected ca_id=%s enrollment_request_id=%s reason=invalid_template template_oid=%s template_name=%s",
-            safe_log_value(CAID),
-            safe_log_value(request_id),
-            safe_log_value(info.get('oid')),
-            safe_log_value(info.get('name')),
+        log_event(
+            ces_logger, logging.INFO, "enrollment_rejected", "Enrollment rejected",
+            outcome="failure", reason="invalid_template", ca_id=CAID,
+            enrollment_request_id=request_id, template_oid=info.get('oid'),
+            template_name=info.get('name'),
         )
         return Response("The requested template is not valid", 403)
 
     if not tpl['permissions']['enroll']:
-        ces_logger.warning(
-            "event=enrollment_rejected ca_id=%s enrollment_request_id=%s reason=enroll_not_permitted template=%s",
-            safe_log_value(CAID),
-            safe_log_value(request_id),
-            safe_log_value(tpl.get('common_name')),
+        log_event(
+            ces_logger, logging.INFO, "enrollment_rejected", "Enrollment rejected",
+            outcome="failure", reason="enroll_not_permitted", ca_id=CAID,
+            enrollment_request_id=request_id, template=tpl.get('common_name'),
         )
         return Response("You do not have permission to enroll on this template", 403)
 
@@ -529,19 +566,19 @@ def ces_service(CAID):
     ca = dict_id_ca.get(CAID)
 
     if not ca:
-        ces_logger.warning(
-            "event=enrollment_rejected ca_id=%s enrollment_request_id=%s reason=ca_not_found",
-            safe_log_value(CAID),
-            safe_log_value(request_id),
+        log_event(
+            ces_logger, logging.INFO, "enrollment_rejected", "Enrollment rejected",
+            outcome="failure", reason="ca_not_found", ca_id=CAID,
+            enrollment_request_id=request_id,
         )
         return Response("CAID not found", 403)
 
     if ca.get("__refid") not in set(tpl.get("__ca_refids") or []):
-        ces_logger.warning(
-            "event=enrollment_rejected ca_id=%s enrollment_request_id=%s reason=template_ca_mismatch template=%s",
-            safe_log_value(CAID),
-            safe_log_value(request_id),
-            safe_log_value((tpl.get('template_oid') or {}).get('value')),
+        log_event(
+            ces_logger, logging.INFO, "enrollment_rejected", "Enrollment rejected",
+            outcome="failure", reason="template_ca_mismatch", ca_id=CAID,
+            enrollment_request_id=request_id,
+            template=(tpl.get('template_oid') or {}).get('value'),
         )
         return Response(
             '%s not in ca_references for template %s' %
@@ -556,25 +593,24 @@ def ces_service(CAID):
     try:
         emit_certificate = load_func(cb_path, cb_issue)
     except Exception as exc:
-        issuance_logger.error(
-            "event=certificate_callback_load_failed ca_id=%s enrollment_request_id=%s template=%s callback_path=%s callback_func=%s error_type=%s",
-            safe_log_value(CAID),
-            safe_log_value(request_id),
-            safe_log_value(tpl.get('common_name')),
-            safe_log_value(cb_path),
-            safe_log_value(cb_issue),
-            type(exc).__name__,
+        log_event(
+            issuance_logger, logging.ERROR, "callback_exception",
+            "Certificate callback could not be loaded",
+            outcome="failure", reason="callback_load_failed", exc_info=True,
+            stage="issuance", ca_id=CAID, enrollment_request_id=request_id,
+            template=tpl.get('common_name'), callback_path=cb_path,
+            callback_func=cb_issue, error_type=type(exc).__name__,
         )
         raise
 
-    issuance_logger.info(
-        "event=certificate_request ca_id=%s enrollment_request_id=%s template=%s template_oid=%s challenge_response=%s body_part_id=%s",
-        safe_log_value(CAID),
-        safe_log_value(request_id),
-        safe_log_value(tpl.get('common_name')),
-        safe_log_value((tpl.get('template_oid') or {}).get('value')),
-        bool(challenge['is_challenge_response']),
-        safe_log_value(body_part_id),
+    log_event(
+        issuance_logger, logging.INFO, "enrollment_requested",
+        "Certificate enrollment requested",
+        ca_id=CAID, enrollment_request_id=request_id,
+        template=tpl.get('common_name'),
+        template_oid=(tpl.get('template_oid') or {}).get('value'),
+        tpm_challenge_response_present=bool(challenge['is_challenge_response']),
+        body_part_id=body_part_id,
     )
 
     ces_uri = f"{_https_base_url()}/CES/{CAID}"
@@ -604,23 +640,24 @@ def ces_service(CAID):
                 pending_challenge_max_age_seconds=app.confadcs["tpm_pending_challenge_max_age_seconds"],
             )
     except Exception as exc:
-        issuance_logger.error(
-            "event=tpm_verification_failed ca_id=%s enrollment_request_id=%s template=%s error_type=%s",
-            safe_log_value(CAID),
-            safe_log_value(request_id),
-            safe_log_value(tpl.get('common_name')),
-            type(exc).__name__,
+        log_event(
+            issuance_logger, logging.ERROR, "tpm_attestation_failed",
+            "TPM attestation failed",
+            outcome="failure", reason="verification_exception", exc_info=True,
+            ca_id=CAID, enrollment_request_id=request_id,
+            template=tpl.get('common_name'), error_type=type(exc).__name__,
         )
         raise
 
     if tpm_result.get("status") == "pending":
         status_text = "Waiting for processing"
 
-        issuance_logger.info(
-            "event=certificate_pending ca_id=%s enrollment_request_id=%s template=%s reason=tpm_challenge",
-            safe_log_value(CAID),
-            safe_log_value(request_id),
-            safe_log_value(tpl.get('common_name')),
+        log_event(
+            issuance_logger, logging.INFO, "certificate_pending",
+            "Certificate enrollment is pending TPM challenge completion",
+            outcome="unknown", reason="tpm_challenge",
+            ca_id=CAID, enrollment_request_id=request_id,
+            template=tpl.get('common_name'),
         )
 
         try:
@@ -634,12 +671,12 @@ def ces_service(CAID):
                 lang="en-US",
             )
         except Exception as exc:
-            issuance_logger.error(
-                "event=certificate_response_failed ca_id=%s enrollment_request_id=%s template=%s status=pending stage=tpm_challenge error_type=%s",
-                safe_log_value(CAID),
-                safe_log_value(request_id),
-                safe_log_value(tpl.get('common_name')),
-                type(exc).__name__,
+            log_event(
+                issuance_logger, logging.ERROR, "certificate_response_failed",
+                "Certificate response build failed", outcome="failure", reason="python_exception",
+                exc_info=True, ca_id=CAID, enrollment_request_id=request_id,
+                template=tpl.get('common_name'), status="pending", stage="tpm_challenge",
+                error_type=type(exc).__name__,
             )
             raise
 
@@ -653,12 +690,12 @@ def ces_service(CAID):
             with open(os.path.join(app.confadcs['path_list_request_id'], str(request_id)), 'wb') as f:
                 f.write(p7_der)
         except Exception as exc:
-            issuance_logger.error(
-                "event=certificate_issue_failed ca_id=%s enrollment_request_id=%s template=%s reason=pending_state_store_failed stage=tpm_challenge error_type=%s",
-                safe_log_value(CAID),
-                safe_log_value(request_id),
-                safe_log_value(tpl.get('common_name')),
-                type(exc).__name__,
+            log_event(
+                issuance_logger, logging.ERROR, "certificate_issue_failed",
+                "Certificate issuance failed", outcome="failure", reason="pending_state_store_failed",
+                exc_info=True, ca_id=CAID, enrollment_request_id=request_id,
+                template=tpl.get('common_name'), stage="tpm_challenge",
+                error_type=type(exc).__name__,
             )
             raise
 
@@ -683,22 +720,22 @@ def ces_service(CAID):
             tpm_result=tpm_result
         )
     except Exception as exc:
-        issuance_logger.error(
-            "event=certificate_issue_failed ca_id=%s enrollment_request_id=%s template=%s reason=callback_exception error_type=%s",
-            safe_log_value(CAID),
-            safe_log_value(request_id),
-            safe_log_value(tpl.get('common_name')),
-            type(exc).__name__,
+        log_event(
+            issuance_logger, logging.ERROR, "callback_exception",
+            "Certificate issuance callback raised an exception",
+            outcome="failure", reason="python_exception", exc_info=True,
+            stage="issuance", ca_id=CAID, enrollment_request_id=request_id,
+            template=tpl.get('common_name'), callback_path=cb_path,
+            callback_func=cb_issue, error_type=type(exc).__name__,
         )
         raise
 
     if not isinstance(result, dict):
-        issuance_logger.error(
-            "event=certificate_issue_failed ca_id=%s enrollment_request_id=%s template=%s reason=invalid_callback_result result_type=%s",
-            safe_log_value(CAID),
-            safe_log_value(request_id),
-            safe_log_value(tpl.get('common_name')),
-            safe_log_value(type(result).__name__),
+        log_event(
+            issuance_logger, logging.ERROR, "certificate_issue_failed",
+            "Certificate callback returned an invalid result", outcome="failure",
+            reason="invalid_callback_result", ca_id=CAID, enrollment_request_id=request_id,
+            template=tpl.get('common_name'), result_type=type(result).__name__,
         )
         return Response(
             "Certificate callback must return a mapping",
@@ -709,12 +746,13 @@ def ces_service(CAID):
     status = str(result.get("status", "")).lower()
 
     if status == "unsupported_auth":
-        issuance_logger.warning(
-            "event=certificate_rejected ca_id=%s enrollment_request_id=%s template=%s reason=unsupported_auth detail=%s",
-            safe_log_value(CAID),
-            safe_log_value(request_id),
-            safe_log_value(tpl.get('common_name')),
-            safe_log_value(result.get("status_text") or "Unsupported authentication method"),
+        log_event(
+            issuance_logger, logging.INFO, "certificate_denied",
+            "Certificate enrollment denied",
+            outcome="failure", reason="unsupported_auth",
+            ca_id=CAID, enrollment_request_id=request_id,
+            template=tpl.get('common_name'),
+            detail=result.get("status_text") or "Unsupported authentication method",
         )
         return Response(
             result.get("status_text") or "Unsupported authentication method",
@@ -736,12 +774,11 @@ def ces_service(CAID):
             with open(csr_path, 'w') as f:
                 f.write(pem_csr)
         except Exception as exc:
-            issuance_logger.error(
-                "event=certificate_issue_failed ca_id=%s enrollment_request_id=%s template=%s reason=csr_store_failed error_type=%s",
-                safe_log_value(CAID),
-                safe_log_value(request_id),
-                safe_log_value(tpl.get('common_name')),
-                type(exc).__name__,
+            log_event(
+                issuance_logger, logging.ERROR, "certificate_issue_failed",
+                "Certificate issuance failed", outcome="failure", reason="csr_store_failed",
+                exc_info=True, ca_id=CAID, enrollment_request_id=request_id,
+                template=tpl.get('common_name'), error_type=type(exc).__name__,
             )
             raise
 
@@ -755,12 +792,12 @@ def ces_service(CAID):
             try:
                 os.remove(p7_path)
             except Exception as exc:
-                issuance_logger.error(
-                    "event=certificate_issue_failed ca_id=%s enrollment_request_id=%s template=%s reason=pending_state_cleanup_failed error_type=%s",
-                    safe_log_value(CAID),
-                    safe_log_value(request_id),
-                    safe_log_value(tpl.get('common_name')),
-                    type(exc).__name__,
+                log_event(
+                    issuance_logger, logging.ERROR, "certificate_issue_failed",
+                    "Certificate issuance failed", outcome="failure",
+                    reason="pending_state_cleanup_failed", exc_info=True, ca_id=CAID,
+                    enrollment_request_id=request_id, template=tpl.get('common_name'),
+                    error_type=type(exc).__name__,
                 )
                 raise
     else:
@@ -768,12 +805,12 @@ def ces_service(CAID):
             with open(os.path.join(app.confadcs['path_list_request_id'], str(request_id)), 'wb') as f:
                 f.write(p7_der)
         except Exception as exc:
-            issuance_logger.error(
-                "event=certificate_issue_failed ca_id=%s enrollment_request_id=%s template=%s reason=pending_state_store_failed stage=callback_pending error_type=%s",
-                safe_log_value(CAID),
-                safe_log_value(request_id),
-                safe_log_value(tpl.get('common_name')),
-                type(exc).__name__,
+            log_event(
+                issuance_logger, logging.ERROR, "certificate_issue_failed",
+                "Certificate issuance failed", outcome="failure", reason="pending_state_store_failed",
+                exc_info=True, ca_id=CAID, enrollment_request_id=request_id,
+                template=tpl.get('common_name'), stage="callback_pending",
+                error_type=type(exc).__name__,
             )
             raise
 
@@ -784,21 +821,21 @@ def ces_service(CAID):
         )
 
         if status == "pending":
-            issuance_logger.info(
-                "event=certificate_pending ca_id=%s enrollment_request_id=%s template=%s reason=%s",
-                safe_log_value(CAID),
-                safe_log_value(request_id),
-                safe_log_value(tpl.get('common_name')),
-                safe_log_value(status_text),
+            log_event(
+                issuance_logger, logging.INFO, "certificate_pending",
+                "Certificate enrollment is pending",
+                outcome="unknown", reason="callback_pending",
+                ca_id=CAID, enrollment_request_id=request_id,
+                template=tpl.get('common_name'), detail=status_text,
             )
         else:
-            issuance_logger.warning(
-                "event=certificate_denied ca_id=%s enrollment_request_id=%s template=%s reason=%s error_code=%s",
-                safe_log_value(CAID),
-                safe_log_value(request_id),
-                safe_log_value(tpl.get('common_name')),
-                safe_log_value(status_text),
-                safe_log_value(result.get("error_code", -2146877420)),
+            log_event(
+                issuance_logger, logging.INFO, "certificate_denied",
+                "Certificate enrollment denied",
+                outcome="failure", reason="callback_denied",
+                ca_id=CAID, enrollment_request_id=request_id,
+                template=tpl.get('common_name'), detail=status_text,
+                error_code=result.get("error_code", -2146877420),
             )
 
         try:
@@ -825,13 +862,11 @@ def ces_service(CAID):
                 lang="en-US",
             )
         except Exception as exc:
-            issuance_logger.error(
-                "event=certificate_response_failed ca_id=%s enrollment_request_id=%s template=%s status=%s error_type=%s",
-                safe_log_value(CAID),
-                safe_log_value(request_id),
-                safe_log_value(tpl.get('common_name')),
-                safe_log_value(status),
-                type(exc).__name__,
+            log_event(
+                issuance_logger, logging.ERROR, "certificate_response_failed",
+                "Certificate response build failed", outcome="failure", reason="python_exception",
+                exc_info=True, ca_id=CAID, enrollment_request_id=request_id,
+                template=tpl.get('common_name'), status=status, error_type=type(exc).__name__,
             )
             raise
 
@@ -853,21 +888,21 @@ def ces_service(CAID):
             try:
                 cert_obj = cx509.load_der_x509_certificate(cert_der)
             except Exception as exc:
-                issuance_logger.error(
-                    "event=certificate_issue_failed ca_id=%s enrollment_request_id=%s template=%s reason=invalid_callback_certificate error_type=%s",
-                    safe_log_value(CAID),
-                    safe_log_value(request_id),
-                    safe_log_value(tpl.get('common_name')),
-                    type(exc).__name__,
+                log_event(
+                    issuance_logger, logging.ERROR, "certificate_issue_failed",
+                    "Certificate callback returned an invalid certificate", outcome="failure",
+                    reason="invalid_callback_certificate", exc_info=True, ca_id=CAID,
+                    enrollment_request_id=request_id, template=tpl.get('common_name'),
+                    error_type=type(exc).__name__,
                 )
                 raise
 
         else:
-            issuance_logger.error(
-                "event=certificate_issue_failed ca_id=%s enrollment_request_id=%s template=%s reason=callback_missing_certificate",
-                safe_log_value(CAID),
-                safe_log_value(request_id),
-                safe_log_value(tpl.get('common_name')),
+            log_event(
+                issuance_logger, logging.ERROR, "certificate_issue_failed",
+                "Certificate callback did not return a certificate", outcome="failure",
+                reason="callback_missing_certificate", ca_id=CAID,
+                enrollment_request_id=request_id, template=tpl.get('common_name'),
             )
             return Response(
                 "Callback(issued) must return 'cert' (x509 or DER bytes)",
@@ -885,12 +920,11 @@ def ces_service(CAID):
                     body_part_id
                 )
             except Exception as exc:
-                issuance_logger.error(
-                    "event=certificate_issue_failed ca_id=%s enrollment_request_id=%s template=%s reason=pkcs7_build_failed error_type=%s",
-                    safe_log_value(CAID),
-                    safe_log_value(request_id),
-                    safe_log_value(tpl.get('common_name')),
-                    type(exc).__name__,
+                log_event(
+                    issuance_logger, logging.ERROR, "certificate_issue_failed",
+                    "Certificate issuance failed", outcome="failure", reason="pkcs7_build_failed",
+                    exc_info=True, ca_id=CAID, enrollment_request_id=request_id,
+                    template=tpl.get('common_name'), error_type=type(exc).__name__,
                 )
                 raise
 
@@ -906,21 +940,27 @@ def ces_service(CAID):
                     "\n-----END CERTIFICATE-----"
                 )
         except Exception as exc:
-            issuance_logger.error(
-                "event=certificate_issue_failed ca_id=%s enrollment_request_id=%s template=%s reason=certificate_store_failed error_type=%s",
-                safe_log_value(CAID),
-                safe_log_value(request_id),
-                safe_log_value(tpl.get('common_name')),
-                type(exc).__name__,
+            log_event(
+                issuance_logger, logging.ERROR, "certificate_issue_failed",
+                "Certificate issuance failed", outcome="failure", reason="certificate_store_failed",
+                exc_info=True, ca_id=CAID, enrollment_request_id=request_id,
+                template=tpl.get('common_name'), error_type=type(exc).__name__,
             )
             raise
 
-        issuance_logger.info(
-            "event=certificate_issued ca_id=%s enrollment_request_id=%s template=%s serial=%s",
-            safe_log_value(CAID),
-            safe_log_value(request_id),
-            safe_log_value(tpl.get('common_name')),
-            format(cert_obj.serial_number, "X"),
+        log_event(
+            issuance_logger, logging.INFO, "certificate_issued",
+            "Certificate issued",
+            outcome="success", ca_id=CAID, enrollment_request_id=request_id,
+            template=tpl.get('common_name'),
+            serial=format(cert_obj.serial_number, "X"),
+            subject=cert_obj.subject.rfc4514_string(),
+            issuer=cert_obj.issuer.rfc4514_string(),
+            certificate_fingerprint_sha256=cert_obj.fingerprint(hashes.SHA256()).hex(),
+            tpm_used=bool(tpm_result.get("used")),
+            tpm_attestation_valid=bool(tpm_result.get("attestation_valid")),
+            tpm_ek_cert_sha256=tpm_result.get("ek_cert_sha256"),
+            tpm_ek_public_key_identity_sha256=tpm_result.get("ek_public_key_identity_sha256"),
         )
 
         try:
@@ -932,25 +972,24 @@ def ces_service(CAID):
                 body_part_id=body_part_id,
             )
         except Exception as exc:
-            issuance_logger.error(
-                "event=certificate_response_failed ca_id=%s enrollment_request_id=%s template=%s status=issued serial=%s error_type=%s",
-                safe_log_value(CAID),
-                safe_log_value(request_id),
-                safe_log_value(tpl.get('common_name')),
-                format(cert_obj.serial_number, "X"),
-                type(exc).__name__,
+            log_event(
+                issuance_logger, logging.ERROR, "certificate_response_failed",
+                "Certificate response build failed", outcome="failure", reason="python_exception",
+                exc_info=True, ca_id=CAID, enrollment_request_id=request_id,
+                template=tpl.get('common_name'), status="issued",
+                serial=format(cert_obj.serial_number, "X"), error_type=type(exc).__name__,
             )
             raise
 
         return Response(response_xml, content_type='application/soap+xml')
 
     else:
-        issuance_logger.error(
-            "event=certificate_issue_failed ca_id=%s enrollment_request_id=%s template=%s reason=unknown_callback_status status=%s",
-            safe_log_value(CAID),
-            safe_log_value(request_id),
-            safe_log_value(tpl.get('common_name')),
-            safe_log_value(status),
+        log_event(
+            issuance_logger, logging.ERROR, "certificate_issue_failed",
+            "Certificate callback returned an unknown status",
+            outcome="failure", reason="unknown_callback_status",
+            ca_id=CAID, enrollment_request_id=request_id,
+            template=tpl.get('common_name'), status=status,
         )
         return Response(
             f"Unknown callback status '{status}'",

@@ -1,12 +1,13 @@
 import base64
 import binascii
+import logging
 import gssapi
 from flask import request, Response, g
 from flask import current_app
 from functools import wraps
 from callback_loader import load_func
 from defusedxml import ElementTree as ET
-from adcs_logging import get_logger, safe_log_value
+from adcs_logging import get_logger, log_event
 from utils import is_client_certificate_valid_for_ca_reference
 
 
@@ -82,10 +83,10 @@ def kerberos_authenticate(auth_header):
         UnicodeEncodeError,
         ValueError,
     ) as exc:
-        logger.debug(
-            "event=kerberos_auth_error host=%s error=%s",
-            safe_log_value(request.host),
-            safe_log_value(exc),
+        log_event(
+            logger, logging.DEBUG, "kerberos_auth_error",
+            "Kerberos authentication error", outcome="failure",
+            reason="kerberos_error", host=request.host, error_type=type(exc).__name__,
         )
         return None, None
 
@@ -148,9 +149,10 @@ def auth_required(f):
         MAX_SOAP_BYTES = 2 * 1024 * 1024
         raw = request.data or b""
         if len(raw) > MAX_SOAP_BYTES:
-            logger.warning(
-                "event=auth_failed reason=request_too_large bytes=%d",
-                len(raw),
+            log_event(
+                logger, logging.WARNING, "authentication_failed",
+                "Authentication request rejected",
+                outcome="failure", reason="request_too_large", bytes=len(raw),
             )
             return _unauthorized()
 
@@ -170,8 +172,10 @@ def auth_required(f):
             ]
 
             if not x509_cas:
-                logger.warning(
-                    "event=auth_failed method=tls reason=no_x509_ca_configured"
+                log_event(
+                    logger, logging.WARNING, "authentication_failed",
+                    "TLS authentication rejected",
+                    outcome="failure", reason="no_x509_ca_configured", method="tls",
                 )
                 return Response("Forbidden", 403)
 
@@ -180,9 +184,11 @@ def auth_required(f):
                 x_ssl_client_cert,
                 x509_cas,
             ):
-                logger.warning(
-                    "event=auth_failed method=tls reason=invalid_client_certificate fingerprint=%s",
-                    safe_log_value(x_ssl_client_sha1, max_length=128),
+                log_event(
+                    logger, logging.WARNING, "authentication_failed",
+                    "TLS client certificate rejected",
+                    outcome="failure", reason="invalid_client_certificate",
+                    method="tls", certificate_fingerprint=x_ssl_client_sha1,
                 )
                 return _unauthorized()
 
@@ -211,12 +217,15 @@ def auth_required(f):
                     auth_func = load_func(auth_callback['path'], auth_callback['func'])
                     user = auth_func(username=username_xml, password=password_xml)
                 except Exception as exc:
-                    logger.error(
-                        "event=auth_callback_failed callback_path=%s callback_func=%s username=%s error_type=%s",
-                        safe_log_value(auth_callback.get('path')),
-                        safe_log_value(auth_callback.get('func')),
-                        safe_log_value(username_xml, max_length=256),
-                        type(exc).__name__,
+                    log_event(
+                        logger, logging.ERROR, "callback_exception",
+                        "Authentication callback raised an exception",
+                        outcome="failure", reason="python_exception", exc_info=True,
+                        stage="authentication",
+                        callback_path=auth_callback.get('path'),
+                        callback_func=auth_callback.get('func'),
+                        username=username_xml,
+                        error_type=type(exc).__name__,
                     )
                     raise
                 if user:
@@ -231,25 +240,29 @@ def auth_required(f):
             )
 
             if credentials_supplied:
-                logger.warning(
-                    "event=auth_failed reason=no_method_succeeded attempted=%s username=%s authorization_header=%s tls_certificate=%s enabled_kerberos=%s enabled_tls=%s enabled_username_password=%s",
-                    safe_log_value(','.join(attempted_methods) or 'none'),
-                    safe_log_value(username_xml, max_length=256),
-                    bool(auth_header),
-                    bool(x_ssl_client_sha1),
-                    auth_kerberos,
-                    auth_tls,
-                    auth_username_password,
+                log_event(
+                    logger, logging.WARNING, "authentication_failed",
+                    "Authentication failed",
+                    outcome="failure", reason="no_method_succeeded",
+                    attempted_methods=attempted_methods or ["none"],
+                    username=username_xml or None,
+                    authorization_header_present=bool(auth_header),
+                    tls_certificate_present=bool(x_ssl_client_sha1),
+                    enabled_kerberos=auth_kerberos,
+                    enabled_tls=auth_tls,
+                    enabled_username_password=auth_username_password,
                 )
             else:
                 # The first Kerberos/SPNEGO request commonly has no credentials
                 # and is answered with a 401 challenge. This is protocol flow,
                 # not an authentication failure worth warning on.
-                logger.debug(
-                    "event=auth_challenge reason=no_credentials enabled_kerberos=%s enabled_tls=%s enabled_username_password=%s",
-                    auth_kerberos,
-                    auth_tls,
-                    auth_username_password,
+                log_event(
+                    logger, logging.DEBUG, "authentication_challenge",
+                    "Authentication challenge sent",
+                    reason="no_credentials",
+                    enabled_kerberos=auth_kerberos,
+                    enabled_tls=auth_tls,
+                    enabled_username_password=auth_username_password,
                 )
             return _unauthorized()
 
@@ -263,12 +276,18 @@ def auth_required(f):
             g.auth_method = auth_method
 
         if auth_method == 'tls':
-            logger.info(
-                "event=auth_success method=tls certificate_fingerprint=%s",
-                safe_log_value(x_ssl_client_sha1, max_length=128),
+            log_event(
+                logger, logging.INFO, "authentication_succeeded",
+                "TLS authentication succeeded",
+                outcome="success", method="tls",
+                certificate_fingerprint=x_ssl_client_sha1,
             )
         else:
-            logger.info("event=auth_success method=%s", safe_log_value(auth_method))
+            log_event(
+                logger, logging.INFO, "authentication_succeeded",
+                "Authentication succeeded",
+                outcome="success", method=auth_method,
+            )
 
         headers = {'WWW-Authenticate': 'Negotiate ' + response_token} if response_token else {}
         resp = f(*args, **kwargs)
