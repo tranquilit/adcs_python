@@ -58,6 +58,7 @@ from textual.widgets import (
 )
 from textual.reactive import reactive
 from textual import events  # to intercept keys
+from rich.text import Text
 
 # --- Textual compatibility: TextLog, ModalScreen/Screen ---
 try:
@@ -72,6 +73,17 @@ try:
     from textual.screen import ModalScreen as _BaseScreen
 except Exception:
     from textual.screen import Screen as _BaseScreen  # type: ignore
+
+# --- Midnight Commander inspired xterm-256-safe colors ---
+# Main application background is intentionally pure black.
+MC_BLACK = "#000000"       # xterm-256 0
+MC_GRAY = "#5F5F5F"        # xterm-256 59
+MC_BLUE = "#000000"        # main background (black)
+MC_ACCENT = "#5F5F5F"      # neutral xterm-256 gray accent (no blue/green)
+MC_LIGHTGRAY = "#D7D7D7"   # xterm-256 188 - normal text / frames
+MC_WHITE = "#FFFFFF"       # xterm-256 white
+MC_YELLOW = "#D7AF00"      # xterm-256 178 - warm MC header yellow
+MC_RED = "#D70000"         # xterm-256 160 - errors
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -106,6 +118,32 @@ FULL_COLUMNS = ["Sel", "#", "Serial", "Subject", "Valid from", "Valid until",
 COMPACT_COLUMNS = ["Sel", "#", "Serial", "Subject", "Valid until", "Days", "Revoked", "Is CA"]
 
 MAX_ROWS_DEFAULT = 10000
+
+
+def _mc_select(*args, **kwargs):
+    """Create a borderless compact Select when supported by Textual.
+
+    Older Textual releases don't expose the compact keyword, so keep a
+    compatibility class that CSS can give the traditional 3-row height.
+    """
+    try:
+        widget = Select(*args, compact=True, **kwargs)
+        widget.add_class("mc-select-compact")
+    except TypeError:
+        widget = Select(*args, **kwargs)
+        widget.add_class("mc-select-legacy")
+    return widget
+
+
+def _mc_button(label: str, **kwargs):
+    """Create a compact / flat button when the installed Textual supports it."""
+    try:
+        return Button(label, compact=True, flat=True, **kwargs)
+    except TypeError:
+        try:
+            return Button(label, flat=True, **kwargs)
+        except TypeError:
+            return Button(label, **kwargs)
 
 
 @dataclass
@@ -542,34 +580,65 @@ class NewCertScreen(_BaseScreen[None]):
                 id="dlg_form",
             ),
             Horizontal(
-                Button("Create", id="nc_ok", variant="success"),
+                Button("Create", id="nc_ok"),
                 Button("Cancel", id="nc_cancel"),
                 id="dlg_buttons",
             ),
             id="dlg_container",
         )
 
-    CSS = """
-    #dlg_container {
+    CSS = f"""
+    /* GNU Midnight Commander standard dialog colors. */
+    Screen {{
+        background: {MC_BLUE};
+        color: {MC_LIGHTGRAY};
+    }}
+    #dlg_container {{
         width: 80%;
         height: auto;
-        border: round $primary;
+        border: solid {MC_BLACK};
         padding: 1 2;
-        background: $surface;
+        background: {MC_LIGHTGRAY};
+        color: {MC_BLACK};
         margin: 2 10;
-    }
-    #dlg_title {
+    }}
+    #dlg_title {{
         content-align: center middle;
         height: 3;
         text-style: bold;
+        color: {MC_BLUE};
+        background: {MC_LIGHTGRAY};
         border: none;
-    }
-    #dlg_form > * { margin: 0 0 1 0; }
-    #dlg_buttons {
+    }}
+    #dlg_form > * {{ margin: 0 0 1 0; }}
+    #dlg_buttons {{
         height: auto;
         content-align: right middle;
-    }
-    #dlg_buttons Button { margin-left: 1; }
+        background: {MC_LIGHTGRAY};
+        color: {MC_BLACK};
+    }}
+    #dlg_buttons Button {{ margin-left: 1; }}
+    Input, Select {{
+        background: {MC_ACCENT};
+        color: {MC_WHITE};
+        border: solid {MC_LIGHTGRAY};
+    }}
+    Input:focus, Select:focus {{
+        background: {MC_ACCENT};
+        color: {MC_WHITE};
+        border: solid {MC_BLACK};
+    }}
+    Button {{
+        background: {MC_LIGHTGRAY};
+        color: {MC_BLACK};
+        border: solid {MC_LIGHTGRAY};
+    }}
+    Button:focus, Button:hover {{
+        background: {MC_ACCENT};
+        color: {MC_WHITE};
+        border: solid {MC_BLACK};
+        text-style: bold;
+    }}
     """
 
     BINDINGS = [
@@ -687,17 +756,248 @@ class Status(Static):
 
 
 class ADCSApp(App):
-    CSS = """
-    Screen { layout: vertical; }
-    #top { height: 3; }
-    #main { layout: horizontal; }
-    #left { width: 40; border: tall; }
-    #right { border: tall; }
-    #filters { border: round $accent; padding: 1 1; height: auto; }
-    #table { height: 1fr; }
-    #detail { height: 12; overflow: auto; border: round $primary; }
-    #status { height: 1; }
-    .mono { text-style: italic; }
+    # Disable Textual's built-in Ctrl+P command palette and remove it from the footer.
+    ENABLE_COMMAND_PALETTE = False
+
+    CSS = f"""
+    /* GNU Midnight Commander standard skin:
+       normal     = lightgray;blue
+       selected   = white;gray
+       marked     = yellow;blue
+       markselect = yellow;gray
+       header     = yellow;blue
+       frame      = lightgray;blue
+       input      = white;gray
+       dialog     = black;lightgray
+       statusbar  = white;gray
+       menu       = white;gray, selected white;black
+       buttonbar  = hotkey white;black, button white;gray
+    */
+    Screen {{
+        layout: vertical;
+        background: {MC_BLUE};
+        color: {MC_LIGHTGRAY};
+        scrollbar-background: {MC_BLACK};
+        scrollbar-color: #5F5F5F;
+        scrollbar-color-hover: #878787;
+        scrollbar-color-active: #AFAFAF;
+        scrollbar-corner-color: {MC_BLACK};
+    }}
+
+    Header {{
+        background: {MC_ACCENT};
+        color: {MC_WHITE};
+        text-style: bold;
+    }}
+    Footer {{
+        background: {MC_ACCENT};
+        color: {MC_WHITE};
+    }}
+    Footer > .footer--key {{
+        background: {MC_BLACK};
+        color: {MC_WHITE};
+        text-style: bold;
+    }}
+    Footer > .footer--description {{
+        background: {MC_ACCENT};
+        color: {MC_WHITE};
+    }}
+
+    #top {{
+        height: 3;
+        background: {MC_BLUE};
+        color: {MC_LIGHTGRAY};
+    }}
+    #status {{
+        height: 1;
+        background: {MC_BLUE};
+        color: {MC_LIGHTGRAY};
+        text-style: bold;
+    }}
+    #main {{
+        layout: horizontal;
+        background: {MC_BLUE};
+        color: {MC_LIGHTGRAY};
+    }}
+    #left {{
+        width: 40;
+        border: solid {MC_LIGHTGRAY};
+        background: {MC_BLUE};
+        color: {MC_LIGHTGRAY};
+    }}
+    #right {{
+        border: solid {MC_LIGHTGRAY};
+        background: {MC_BLUE};
+        color: {MC_LIGHTGRAY};
+    }}
+    #filters {{
+        border: none;
+        padding: 1 1 0 1;
+        margin: 1 0;
+        height: auto;
+        background: {MC_BLUE};
+        color: {MC_LIGHTGRAY};
+    }}
+    #table {{
+        height: 1fr;
+        background: {MC_BLUE};
+        color: {MC_LIGHTGRAY};
+    }}
+    #detail {{
+        height: 12;
+        overflow: auto;
+        border: solid {MC_LIGHTGRAY};
+        background: {MC_BLUE};
+        color: {MC_LIGHTGRAY};
+        scrollbar-background: {MC_BLACK};
+        scrollbar-color: #5F5F5F;
+        scrollbar-color-hover: #878787;
+        scrollbar-color-active: #AFAFAF;
+        scrollbar-corner-color: {MC_BLACK};
+    }}
+
+    Label, Static, Container, Vertical, Horizontal {{
+        background: {MC_BLUE};
+        color: {MC_LIGHTGRAY};
+    }}
+    #lbl_ca, #filters Label {{
+        color: {MC_YELLOW};
+        text-style: bold;
+    }}
+
+    Input, Select {{
+        background: {MC_ACCENT};
+        color: {MC_WHITE};
+        border: solid {MC_BLUE};
+    }}
+    Input:focus, Select:focus {{
+        background: {MC_ACCENT};
+        color: {MC_WHITE};
+        border: solid {MC_BLACK};
+    }}
+    Button {{
+        background: {MC_ACCENT};
+        color: {MC_WHITE};
+        border: solid {MC_BLUE};
+    }}
+    Button:focus, Button:hover {{
+        background: {MC_BLACK};
+        color: {MC_WHITE};
+        border: solid {MC_ACCENT};
+        text-style: bold;
+    }}
+
+    /* Left command pane: compact MC-like navigation.
+       Select/Button compact modes remove the widget chrome cleanly rather
+       than clipping a normal 3-row Select down to one terminal row. */
+    #left Input,
+    #left Button {{
+        width: 1fr;
+        min-width: 0;
+        height: 1;
+        background: {MC_BLUE};
+        color: {MC_LIGHTGRAY};
+        border: none;
+        padding: 0 1;
+        margin: 0 1;
+    }}
+    #left Select {{
+        width: 1fr;
+        min-width: 0;
+        background: {MC_BLUE};
+        color: {MC_LIGHTGRAY};
+        border: none;
+        padding: 0 1;
+        margin: 0 1;
+    }}
+    #left .mc-select-compact {{
+        height: 1;
+    }}
+    #left .mc-select-legacy {{
+        height: 3;
+    }}
+    #left Button {{
+        content-align: left middle;
+        text-align: left;
+    }}
+    #left Input:focus,
+    #left Select:focus,
+    #left Button:focus,
+    #left Button:hover {{
+        background: {MC_ACCENT};
+        color: {MC_WHITE};
+        border: none;
+        text-style: bold;
+    }}
+    #lbl_ca {{
+        margin: 0 1;
+    }}
+    #sel_ca {{
+        margin: 0 1 1 1;
+    }}
+    #filters Label {{
+        margin: 0 0 1 0;
+    }}
+    #filters Input,
+    #filters Select,
+    #filters Button {{
+        margin: 0 0 1 0;
+    }}
+    #filters Button {{
+        margin-bottom: 0;
+    }}
+
+    DataTable {{
+        background: {MC_BLUE};
+        color: {MC_LIGHTGRAY};
+        background-tint: transparent;
+        scrollbar-background: {MC_BLACK};
+        scrollbar-color: #5F5F5F;
+        scrollbar-color-hover: #878787;
+        scrollbar-color-active: #AFAFAF;
+        scrollbar-corner-color: {MC_BLACK};
+    }}
+    DataTable:focus {{
+        background-tint: transparent;
+    }}
+    DataTable > .datatable--odd-row,
+    DataTable > .datatable--even-row {{
+        background: {MC_BLUE};
+        color: {MC_LIGHTGRAY};
+    }}
+    DataTable > .datatable--header {{
+        background: {MC_BLUE};
+        color: {MC_YELLOW};
+        text-style: bold;
+    }}
+    DataTable > .datatable--cursor,
+    DataTable:focus > .datatable--cursor {{
+        background: {MC_ACCENT};
+        color: {MC_WHITE};
+        text-style: none;
+    }}
+    DataTable > .datatable--hover {{
+        background: {MC_ACCENT};
+        color: {MC_WHITE};
+    }}
+    DataTable > .datatable--header-cursor,
+    DataTable > .datatable--header-hover {{
+        background: {MC_ACCENT};
+        color: {MC_WHITE};
+    }}
+
+    SelectOverlay {{
+        background: {MC_ACCENT};
+        color: {MC_WHITE};
+        border: solid {MC_WHITE};
+    }}
+    SelectOverlay > .option-list--option-highlighted {{
+        background: {MC_BLACK};
+        color: {MC_WHITE};
+        text-style: none;
+    }}
+
+    .mono {{ text-style: italic; }}
     """
 
     BINDINGS = [
@@ -760,11 +1060,11 @@ class ADCSApp(App):
         with Container(id="main"):
             with Vertical(id="left"):
                 yield Label("Certification Authority", id="lbl_ca")
-                yield Select(options=[], id="sel_ca")
+                yield _mc_select(options=[], id="sel_ca")
                 with Container(id="filters"):
                     yield Label("Search & Status")
                     yield Input(placeholder="Search… (/)", id="inp_q")
-                    yield Select(
+                    yield _mc_select(
                         options=[
                             ("(Status: any)", ""),
                             ("Expiring ≤ 30d", "expiring"),
@@ -772,17 +1072,18 @@ class ADCSApp(App):
                             ("Expired", "expired"),
                         ],
                         id="sel_status",
+                        value="",
                     )
-                    yield Button("Apply", id="btn_apply")
-                yield Button("New Certificate (Ctrl+N)", id="btn_newcert")
-                yield Button("Delete (Del)", id="btn_delete")
-                yield Button("Reload (F5)", id="btn_reload")
+                    yield _mc_button("Apply", id="btn_apply")
+                yield _mc_button("New Certificate (Ctrl+N)", id="btn_newcert")
+                yield _mc_button("Delete (Del)", id="btn_delete")
+                yield _mc_button("Reload (F5)", id="btn_reload")
                 with Container():
-                    yield Button("Revoke (R)", id="btn_revoke")
-                    yield Button("Unrevoke (U)", id="btn_unrevoke")
-                    yield Button("Re-sign CRL (Ctrl+R)", id="btn_resign_crl")
+                    yield _mc_button("Revoke (R)", id="btn_revoke")
+                    yield _mc_button("Unrevoke (U)", id="btn_unrevoke")
+                    yield _mc_button("Re-sign CRL (Ctrl+R)", id="btn_resign_crl")
             with Vertical(id="right"):
-                yield DataTable(id="table", zebra_stripes=True)
+                yield DataTable(id="table", zebra_stripes=False)
                 yield _TextLog(id="detail")
         yield Footer()
 
@@ -1107,6 +1408,13 @@ class ADCSApp(App):
 
         return sorted(rows, key=lambda r: (r.not_before))
 
+    @staticmethod
+    def _mc_cell(value: object, marked: bool = False) -> object:
+        """Render marked rows in Midnight Commander yellow."""
+        if not marked:
+            return value
+        return Text(str(value), style=MC_YELLOW)
+
     def refresh_table(self) -> None:
         """Rebuild the DataTable based on current (filtered/limited) rows, preserving focus."""
         table = self._table()
@@ -1136,30 +1444,30 @@ class ADCSApp(App):
 
             if self.compact_mode:
                 table.add_row(
-                    sel_mark,
-                    str(i),
-                    r.serial_nox,
-                    subj,
-                    r.not_after.strftime("%Y-%m-%dT%H:%M"),
-                    str(r.days_to_expiry),
-                    "yes" if r.revoked else "no",
-                    "yes" if r.is_ca else "no",
+                    self._mc_cell(sel_mark, selected),
+                    self._mc_cell(str(i), selected),
+                    self._mc_cell(r.serial_nox, selected),
+                    self._mc_cell(subj, selected),
+                    self._mc_cell(r.not_after.strftime("%Y-%m-%dT%H:%M"), selected),
+                    self._mc_cell(str(r.days_to_expiry), selected),
+                    self._mc_cell("yes" if r.revoked else "no", selected),
+                    self._mc_cell("yes" if r.is_ca else "no", selected),
                 )
             else:
                 table.add_row(
-                    sel_mark,
-                    str(i),
-                    r.serial_nox,
-                    subj,
-                    r.not_before.strftime("%Y-%m-%dT%H:%M"),
-                    r.not_after.strftime("%Y-%m-%dT%H:%M"),
-                    str(r.days_to_expiry),
-                    "yes" if r.revoked else "no",
-                    "yes" if r.is_ca else "no",
-                    r.sig_algo,
-                    f"{r.pubkey_type}{' '+str(r.pubkey_bits)+' bits' if r.pubkey_bits else ''}",
-                    r.sha256_fingerprint,
-                    r.filename,
+                    self._mc_cell(sel_mark, selected),
+                    self._mc_cell(str(i), selected),
+                    self._mc_cell(r.serial_nox, selected),
+                    self._mc_cell(subj, selected),
+                    self._mc_cell(r.not_before.strftime("%Y-%m-%dT%H:%M"), selected),
+                    self._mc_cell(r.not_after.strftime("%Y-%m-%dT%H:%M"), selected),
+                    self._mc_cell(str(r.days_to_expiry), selected),
+                    self._mc_cell("yes" if r.revoked else "no", selected),
+                    self._mc_cell("yes" if r.is_ca else "no", selected),
+                    self._mc_cell(r.sig_algo, selected),
+                    self._mc_cell(f"{r.pubkey_type}{' '+str(r.pubkey_bits)+' bits' if r.pubkey_bits else ''}", selected),
+                    self._mc_cell(r.sha256_fingerprint, selected),
+                    self._mc_cell(r.filename, selected),
                 )
 
         # --- reselect logic (NO forced row=0) ---
@@ -1638,7 +1946,7 @@ class ADCSApp(App):
             except Exception:
                 pass
         if not cert_path or not os.path.isfile(cert_path):
-            msg = "[red]File not found for details.[/red]"
+            msg = "[b]File not found for details.[/b]"
             if hasattr(log, "write"):
                 log.write(msg)
             elif hasattr(log, "write_line"):
@@ -1711,7 +2019,7 @@ class ADCSApp(App):
             else:
                 log.update(text)
         except Exception as e:
-            msg = f"[red]Parsing error: {e}[/red]"
+            msg = f"[b]Parsing error: {e}[/b]"
             if hasattr(log, "write"):
                 log.write(msg)
             elif hasattr(log, "write_line"):
