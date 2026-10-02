@@ -862,6 +862,9 @@ class ADCSApp(App):
         color: $accent;
         text-style: bold underline;
     }}
+    #actions {{
+        margin-top: 1;
+    }}
     #lbl_actions {{
         color: $warning;
         text-style: bold underline;
@@ -1121,7 +1124,7 @@ class ADCSApp(App):
                 yield Label("Certification Authority", id="lbl_ca")
                 yield _mc_select(options=[], id="sel_ca")
                 with Container(id="filters"):
-                    yield Label("Search & Status")
+                    yield Label("Search & Status", id="lbl_filters")
                     yield Input(placeholder="Search… (/)", id="inp_q")
                     yield _mc_select(
                         options=[
@@ -1133,14 +1136,15 @@ class ADCSApp(App):
                         id="sel_status",
                         value="",
                     )
-                yield Label("Actions", id="lbl_actions")
-                yield _mc_button("New Certificate (Ctrl+N)", id="btn_newcert")
-                yield _mc_button("Delete (Del)", id="btn_delete")
-                yield _mc_button("Reload (F5)", id="btn_reload")
-                with Container():
-                    yield _mc_button("Revoke (R)", id="btn_revoke")
-                    yield _mc_button("Unrevoke (U)", id="btn_unrevoke")
-                    yield _mc_button("Re-sign CRL (Ctrl+R)", id="btn_resign_crl")
+                with Container(id="actions"):
+                    yield Label("Actions", id="lbl_actions")
+                    yield _mc_button("New Certificate (Ctrl+N)", id="btn_newcert")
+                    yield _mc_button("Delete (Del)", id="btn_delete")
+                    yield _mc_button("Reload (F5)", id="btn_reload")
+                    with Container():
+                        yield _mc_button("Revoke (R)", id="btn_revoke")
+                        yield _mc_button("Unrevoke (U)", id="btn_unrevoke")
+                        yield _mc_button("Re-sign CRL (Ctrl+R)", id="btn_resign_crl")
             with Vertical(id="right"):
                 yield DataTable(id="table", zebra_stripes=False)
                 yield Label("Certificate details", id="lbl_detail")
@@ -1290,18 +1294,44 @@ class ADCSApp(App):
     def _apply_layout_mode(self) -> None:
         main = self.query_one("#main")
         left = self.query_one("#left")
+        right = self.query_one("#right")
         filters = self.query_one("#filters")
+        actions = self.query_one("#actions")
+        lbl_ca = self.query_one("#lbl_ca", Label)
+        lbl_filters = self.query_one("#lbl_filters", Label)
+        sel_ca = self.query_one("#sel_ca")
+        inp_q = self.query_one("#inp_q", Input)
+        sel_status = self.query_one("#sel_status")
 
         try:
             main.styles.layout = "vertical" if self.compact_mode else "horizontal"
         except Exception:
             pass
+
         try:
-            left.styles.width = 40 if not self.compact_mode else "auto"
+            left.styles.width = "1fr" if self.compact_mode else 40
+            left.styles.height = 4 if self.compact_mode else "1fr"
+            right.styles.height = "1fr"
         except Exception:
             pass
+
+        # Compact mode is deliberately minimal: one CA row + one search row.
+        # The surrounding border makes the complete top block four terminal rows.
         try:
-            filters.display = "none" if self.compact_mode else "block"
+            lbl_ca.display = "none" if self.compact_mode else "block"
+            lbl_filters.display = "none" if self.compact_mode else "block"
+            sel_status.display = "none" if self.compact_mode else "block"
+            actions.display = "none" if self.compact_mode else "block"
+            filters.display = "block"
+        except Exception:
+            pass
+
+        try:
+            filters.styles.padding = 0 if self.compact_mode else (1, 0, 0, 0)
+            filters.styles.margin = 0 if self.compact_mode else (1, 0)
+            filters.styles.height = 1 if self.compact_mode else "auto"
+            sel_ca.styles.margin = 0 if self.compact_mode else (0, 0, 1, 0)
+            inp_q.styles.margin = 0 if self.compact_mode else (0, 0, 1, 0)
         except Exception:
             pass
 
