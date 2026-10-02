@@ -16,6 +16,7 @@ from datetime import datetime, timezone, timedelta
 from cryptography import x509 as cx509
 from cryptography.x509.oid import NameOID, ObjectIdentifier
 from cryptography.hazmat.primitives import hashes, serialization
+from asn1crypto import core as a_core
 from cryptography.hazmat.primitives.asymmetric import (
     rsa,
     ec,
@@ -479,6 +480,69 @@ def issue_cert_with_new_key(
 
 
 # -----------------------------------------------------------------------------
+# Microsoft AD CS / Active Directory certificate OIDs
+# -----------------------------------------------------------------------------
+
+OID_MS_CERT_TEMPLATE_NAME = "1.3.6.1.4.1.311.20.2"
+OID_MS_CERT_TEMPLATE_INFO = "1.3.6.1.4.1.311.21.7"
+OID_MS_NTDS_CA_SECURITY = "1.3.6.1.4.1.311.25.2"
+OID_MS_NTDS_OBJECT_SID = "1.3.6.1.4.1.311.25.2.1"
+OID_MS_UPN = "1.3.6.1.4.1.311.20.2.3"
+OID_MS_AD_GUID = "1.3.6.1.4.1.311.25.1"
+OID_MS_APPLICATION_POLICIES = "1.3.6.1.4.1.311.21.10"
+
+_KNOWN_OID_NAMES = {
+    OID_MS_CERT_TEMPLATE_NAME: "Microsoft Certificate Template Name",
+    OID_MS_CERT_TEMPLATE_INFO: "Microsoft Certificate Template Information",
+    OID_MS_NTDS_CA_SECURITY: "Microsoft NTDS CA Security Extension",
+    OID_MS_NTDS_OBJECT_SID: "Microsoft NTDS Object SID",
+    OID_MS_UPN: "Microsoft User Principal Name",
+    OID_MS_AD_GUID: "Microsoft AD Object GUID",
+    OID_MS_APPLICATION_POLICIES: "Microsoft Application Policies",
+    "1.3.6.1.4.1.311.20.2.2": "Microsoft Smart Card Logon",
+    "1.3.6.1.4.1.311.10.3.4": "Microsoft Encrypting File System",
+}
+
+
+class _MsCertificateTemplateInfo(a_core.Sequence):
+    _fields = [
+        ("template_id", a_core.ObjectIdentifier),
+        ("major_version", a_core.Integer, {"optional": True}),
+        ("minor_version", a_core.Integer, {"optional": True}),
+    ]
+
+
+class _ExplicitOctetString0(a_core.Sequence):
+    class_ = 2
+    tag = 0
+    _fields = [("value", a_core.OctetString)]
+
+
+class _NtdsOtherName(a_core.Sequence):
+    class_ = 2
+    tag = 0
+    _fields = [
+        ("type_id", a_core.ObjectIdentifier),
+        ("value", _ExplicitOctetString0),
+    ]
+
+
+class _NtdsCASecurityExt(a_core.Sequence):
+    _fields = [("other_name", _NtdsOtherName)]
+
+
+class _ApplicationPolicyInfo(a_core.Sequence):
+    _fields = [
+        ("policy_identifier", a_core.ObjectIdentifier),
+        ("policy_qualifiers", a_core.Any, {"optional": True}),
+    ]
+
+
+class _ApplicationPolicyInfos(a_core.SequenceOf):
+    _child_spec = _ApplicationPolicyInfo
+
+
+# -----------------------------------------------------------------------------
 # Certificate file helpers (parsing and discovery)
 # -----------------------------------------------------------------------------
 
@@ -686,6 +750,398 @@ def get_public_key_info(cert: cx509.Certificate) -> Tuple[str, Optional[int]]:
     if isinstance(pk, ed448.Ed448PublicKey):
         return ("Ed448", None)
     return (pk.__class__.__name__, None)
+
+
+
+def oid_display(oid: Any) -> str:
+    """Return a readable OID label while preserving the dotted value."""
+    dotted = getattr(oid, "dotted_string", None) or str(oid)
+    friendly = _KNOWN_OID_NAMES.get(dotted)
+    if friendly:
+        return f"{friendly} ({dotted})"
+    name = getattr(oid, "_name", None)
+    if not name and isinstance(oid, str):
+        try:
+            name = getattr(ObjectIdentifier(oid), "_name", None)
+        except Exception:
+            name = None
+    if name and name != "Unknown OID":
+        return f"{name} ({dotted})"
+    return dotted
+
+
+def get_raw_extension_value(cert: cx509.Certificate, oid: str) -> Optional[bytes]:
+    """Return an extension's DER payload, including Microsoft/private OIDs."""
+    try:
+        value = cert.extensions.get_extension_for_oid(ObjectIdentifier(oid)).value
+    except Exception:
+        return None
+
+    raw = getattr(value, "value", None)
+    if isinstance(raw, (bytes, bytearray)):
+        return bytes(raw)
+
+    public_bytes = getattr(value, "public_bytes", None)
+    if callable(public_bytes):
+        try:
+            return bytes(public_bytes())
+        except Exception:
+            pass
+    return None
+
+
+def decode_asn1_text(data: bytes) -> Optional[str]:
+    """Decode a DER string used by Microsoft template/OtherName extensions."""
+    try:
+        native = a_core.Asn1Value.load(data).native
+        if isinstance(native, str):
+            return native
+        if isinstance(native, (bytes, bytearray)):
+            data = bytes(native)
+    except Exception:
+        pass
+
+    for encoding in ("utf-8", "utf-16-be", "utf-16-le", "ascii"):
+        try:
+            text = data.decode(encoding).strip("\x00")
+            if text:
+                return text
+        except Exception:
+            continue
+    return None
+
+
+def get_certificate_template_info(cert: cx509.Certificate) -> Dict[str, Any]:
+    """Return Microsoft certificate template name, OID and major/minor version."""
+    result: Dict[str, Any] = {
+        "name": None,
+        "oid": None,
+        "major": None,
+        "minor": None,
+    }
+
+    raw_name = get_raw_extension_value(cert, OID_MS_CERT_TEMPLATE_NAME)
+    if raw_name:
+        result["name"] = decode_asn1_text(raw_name)
+
+    raw_info = get_raw_extension_value(cert, OID_MS_CERT_TEMPLATE_INFO)
+    if not raw_info:
+        return result
+
+    try:
+        info = _MsCertificateTemplateInfo.load(raw_info)
+        result["oid"] = info["template_id"].dotted
+        major = info["major_version"].native
+        minor = info["minor_version"].native
+        result["major"] = int(major) if major is not None else None
+        result["minor"] = int(minor) if minor is not None else None
+        return result
+    except Exception:
+        pass
+
+    # Be tolerant of non-canonical encoders / omitted version fields.
+    try:
+        seq = a_core.Sequence.load(raw_info)
+        if len(seq) > 0:
+            first = seq[0].native
+            result["oid"] = str(first) if first is not None else None
+        if len(seq) > 1 and seq[1].native is not None:
+            result["major"] = int(seq[1].native)
+        if len(seq) > 2 and seq[2].native is not None:
+            result["minor"] = int(seq[2].native)
+    except Exception:
+        pass
+    return result
+
+
+
+def get_certificate_object_sid(cert: cx509.Certificate) -> Optional[str]:
+    """Return the Object SID from the Microsoft NTDS CA Security extension."""
+    raw = get_raw_extension_value(cert, OID_MS_NTDS_CA_SECURITY)
+    if not raw:
+        return None
+    try:
+        ntds = _NtdsCASecurityExt.load(raw)
+        other_name = ntds["other_name"]
+        if other_name["type_id"].dotted != OID_MS_NTDS_OBJECT_SID:
+            return None
+        sid_value = other_name["value"]["value"].native
+        if isinstance(sid_value, str):
+            return sid_value
+        if isinstance(sid_value, (bytes, bytearray)):
+            return bytes(sid_value).decode("ascii", "replace")
+    except Exception:
+        return None
+    return None
+
+
+def get_certificate_san_entries(cert: cx509.Certificate) -> List[Dict[str, Any]]:
+    """Return structured SAN entries, decoding Microsoft UPN and AD objectGUID."""
+    try:
+        san = cert.extensions.get_extension_for_class(cx509.SubjectAlternativeName).value
+    except Exception:
+        return []
+
+    result: List[Dict[str, Any]] = []
+    for name in san:
+        item: Dict[str, Any] = {"type": None, "value": None, "oid": None, "display": None}
+        if isinstance(name, cx509.DNSName):
+            item.update(type="DNS", value=name.value, display=f"DNS={name.value}")
+        elif isinstance(name, cx509.RFC822Name):
+            item.update(type="Email", value=name.value, display=f"Email={name.value}")
+        elif isinstance(name, cx509.UniformResourceIdentifier):
+            item.update(type="URI", value=name.value, display=f"URI={name.value}")
+        elif isinstance(name, cx509.IPAddress):
+            value = str(name.value)
+            item.update(type="IP", value=value, display=f"IP={value}")
+        elif isinstance(name, cx509.RegisteredID):
+            value = name.value.dotted_string
+            item.update(type="RID", value=value, oid=value, display=f"RID={value}")
+        elif isinstance(name, cx509.DirectoryName):
+            value = name.value.rfc4514_string()
+            item.update(type="DirectoryName", value=value, display=f"DirectoryName={value}")
+        elif isinstance(name, cx509.OtherName):
+            oid = name.type_id.dotted_string
+            item["oid"] = oid
+            if oid == OID_MS_UPN:
+                value = decode_asn1_text(name.value) or name.value.hex()
+                item.update(type="UPN", value=value, display=f"UPN={value}")
+            elif oid == OID_MS_AD_GUID:
+                value = None
+                try:
+                    raw_guid = a_core.OctetString.load(name.value).native
+                    if isinstance(raw_guid, (bytes, bytearray)) and len(raw_guid) == 16:
+                        value = str(uuid.UUID(bytes_le=bytes(raw_guid)))
+                except Exception:
+                    pass
+                value = value or name.value.hex()
+                item.update(type="AD-GUID", value=value, display=f"AD-GUID={value}")
+            else:
+                value = decode_asn1_text(name.value) or name.value.hex()
+                item.update(
+                    type="OtherName",
+                    value=value,
+                    display=f"OtherName[{oid}]={value}",
+                )
+        else:
+            value = str(getattr(name, "value", name))
+            item.update(type=name.__class__.__name__, value=value, display=value)
+        result.append(item)
+    return result
+
+
+def get_certificate_san_details(cert: cx509.Certificate) -> List[str]:
+    """Return display-ready SAN entries; use get_certificate_san_entries for structure."""
+    return [str(item["display"]) for item in get_certificate_san_entries(cert)]
+
+
+def get_certificate_application_policies(cert: cx509.Certificate) -> List[Dict[str, str]]:
+    """Decode Microsoft Application Policies (1.3.6.1.4.1.311.21.10)."""
+    raw = get_raw_extension_value(cert, OID_MS_APPLICATION_POLICIES)
+    if not raw:
+        return []
+    try:
+        infos = _ApplicationPolicyInfos.load(raw)
+    except Exception:
+        return []
+
+    result: List[Dict[str, str]] = []
+    for info in infos:
+        try:
+            dotted = info["policy_identifier"].dotted
+        except Exception:
+            continue
+        result.append({"oid": dotted, "display": oid_display(dotted)})
+    return result
+
+
+def get_certificate_key_usage(cert: cx509.Certificate) -> List[str]:
+    """Return enabled KeyUsage flags with X.509 spelling."""
+    try:
+        ku = cert.extensions.get_extension_for_class(cx509.KeyUsage).value
+    except Exception:
+        return []
+
+    values: List[str] = []
+    for attr, label in (
+        ("digital_signature", "digitalSignature"),
+        ("content_commitment", "contentCommitment"),
+        ("key_encipherment", "keyEncipherment"),
+        ("data_encipherment", "dataEncipherment"),
+        ("key_agreement", "keyAgreement"),
+        ("key_cert_sign", "keyCertSign"),
+        ("crl_sign", "cRLSign"),
+    ):
+        if getattr(ku, attr):
+            values.append(label)
+    if ku.key_agreement:
+        if ku.encipher_only:
+            values.append("encipherOnly")
+        if ku.decipher_only:
+            values.append("decipherOnly")
+    return values
+
+
+def get_certificate_extended_key_usage(cert: cx509.Certificate) -> List[Dict[str, str]]:
+    """Return EKUs as structured OID/display entries."""
+    try:
+        eku = cert.extensions.get_extension_for_class(cx509.ExtendedKeyUsage).value
+    except Exception:
+        return []
+    return [
+        {"oid": oid.dotted_string, "display": oid_display(oid)}
+        for oid in eku
+    ]
+
+
+def get_certificate_policies(cert: cx509.Certificate) -> List[Dict[str, str]]:
+    """Return standard X.509 Certificate Policies."""
+    try:
+        policies = cert.extensions.get_extension_for_class(cx509.CertificatePolicies).value
+    except Exception:
+        return []
+    result: List[Dict[str, str]] = []
+    for policy in policies:
+        oid = policy.policy_identifier
+        result.append({"oid": oid.dotted_string, "display": oid_display(oid)})
+    return result
+
+
+def get_certificate_aia(cert: cx509.Certificate) -> List[Dict[str, str]]:
+    """Return Authority Information Access entries."""
+    try:
+        aia = cert.extensions.get_extension_for_class(cx509.AuthorityInformationAccess).value
+    except Exception:
+        return []
+    result: List[Dict[str, str]] = []
+    for desc in aia:
+        location = str(getattr(desc.access_location, "value", desc.access_location))
+        result.append({
+            "method_oid": desc.access_method.dotted_string,
+            "method": oid_display(desc.access_method),
+            "location": location,
+        })
+    return result
+
+
+def get_certificate_crl_distribution_points(cert: cx509.Certificate) -> List[str]:
+    """Return all full-name CRL distribution point values."""
+    try:
+        cdp = cert.extensions.get_extension_for_class(cx509.CRLDistributionPoints).value
+    except Exception:
+        return []
+    result: List[str] = []
+    for point in cdp:
+        for general_name in point.full_name or []:
+            result.append(str(getattr(general_name, "value", general_name)))
+    return result
+
+
+def get_certificate_extension_summaries(cert: cx509.Certificate) -> List[Dict[str, Any]]:
+    """Return a generic inventory of every X.509 extension present in the certificate."""
+    result: List[Dict[str, Any]] = []
+    for ext in cert.extensions:
+        result.append({
+            "oid": ext.oid.dotted_string,
+            "name": oid_display(ext.oid),
+            "critical": bool(ext.critical),
+            "value_type": ext.value.__class__.__name__,
+        })
+    return result
+
+
+def parse_certificate_details(
+    cert: cx509.Certificate,
+) -> Dict[str, Any]:
+    """Parse a certificate into reusable structured details.
+
+    In addition to generic X.509 metadata, this decodes the Microsoft AD CS
+    extensions carried by the certificate itself: template information, NTDS
+    Object SID, UPN/AD objectGUID SAN OtherNames, and Application Policies.
+    No AD CS configuration or callback metadata is consulted.
+    """
+    try:
+        basic_constraints = cert.extensions.get_extension_for_class(cx509.BasicConstraints).value
+        is_ca = bool(basic_constraints.ca)
+        path_length = basic_constraints.path_length
+    except Exception:
+        is_ca = False
+        path_length = None
+
+    try:
+        sig_hash = cert.signature_hash_algorithm.name
+    except Exception:
+        sig_hash = None
+
+    try:
+        ski = cert.extensions.get_extension_for_class(cx509.SubjectKeyIdentifier).value.digest.hex()
+    except Exception:
+        ski = None
+
+    try:
+        aki_value = cert.extensions.get_extension_for_class(cx509.AuthorityKeyIdentifier).value
+        aki = aki_value.key_identifier.hex() if aki_value.key_identifier else None
+    except Exception:
+        aki = None
+
+    pk_type, pk_bits = get_public_key_info(cert)
+    template = get_certificate_template_info(cert)
+    app_policies = get_certificate_application_policies(cert)
+    eku = get_certificate_extended_key_usage(cert)
+    aia = get_certificate_aia(cert)
+
+    not_before = getattr(cert, "not_valid_before_utc", None) or cert.not_valid_before
+    not_after = getattr(cert, "not_valid_after_utc", None) or cert.not_valid_after
+
+    return {
+        "subject": cert.subject.rfc4514_string(),
+        "issuer": cert.issuer.rfc4514_string(),
+        "serial_number": cert.serial_number,
+        "serial_hex": format(cert.serial_number, "x"),
+        "version": getattr(cert.version, "name", str(cert.version)),
+        "not_valid_before": not_before,
+        "not_valid_after": not_after,
+        "basic_constraints": {
+            "is_ca": is_ca,
+            "path_length": path_length,
+        },
+        "signature": {
+            "oid": cert.signature_algorithm_oid.dotted_string,
+            "display": oid_display(cert.signature_algorithm_oid),
+            "hash": sig_hash,
+        },
+        "public_key": {
+            "type": pk_type,
+            "bits": pk_bits,
+        },
+        "fingerprints": {
+            "sha256": cert.fingerprint(hashes.SHA256()).hex(),
+        },
+        "subject_key_identifier": ski,
+        "authority_key_identifier": aki,
+        "microsoft": {
+            "template": template,
+            "object_sid": get_certificate_object_sid(cert),
+            "application_policies": app_policies,
+        },
+        "san": get_certificate_san_entries(cert),
+        "key_usage": get_certificate_key_usage(cert),
+        "extended_key_usage": eku,
+        "certificate_policies": get_certificate_policies(cert),
+        "aia": aia,
+        "crl_distribution_points": get_certificate_crl_distribution_points(cert),
+        "extensions": get_certificate_extension_summaries(cert),
+    }
+
+
+def parse_certificate_file(
+    path: str,
+) -> Dict[str, Any]:
+    """Load and parse a PEM/DER/base64 certificate file in one call."""
+    details = parse_certificate_details(load_certificate_file(path))
+    details["file"] = path
+    return details
+
 
 def scan_cert_paths(cert_dir: str) -> List[str]:
     """Return a sorted list of certificate file paths in `cert_dir` (recursive)."""

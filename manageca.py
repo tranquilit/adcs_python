@@ -98,7 +98,8 @@ from utils_crt import (
     _cmd_resign_crl,
     _cmd_create_ca,
     _cmd_create_ket_cert,
-    _compose_fullchain_pem
+    _compose_fullchain_pem,
+    parse_certificate_details,
 )
 
 # =============================
@@ -112,7 +113,6 @@ FULL_COLUMNS = ["Sel", "#", "Serial", "Subject", "Valid from", "Valid until",
 COMPACT_COLUMNS = ["Sel", "#", "Serial", "Subject", "Valid until", "Days", "Revoked", "Is CA"]
 
 MAX_ROWS_DEFAULT = 10000
-
 
 def _mc_select(*args, **kwargs):
     """Create a borderless compact Select when supported by Textual.
@@ -836,7 +836,7 @@ class ADCSApp(App):
         color: {TERMINAL_DEFAULT};
     }}
     #detail {{
-        height: 11;
+        height: 16;
         overflow: auto;
         border: solid $accent;
         padding: 0 1;
@@ -1957,60 +1957,93 @@ class ADCSApp(App):
             return
         try:
             cert = load_certificate_file(cert_path)  # utils
-            try:
-                serial_int = int(format(cert.serial_number, "x"), 16)
-            except ValueError:
-                serial_int = int(cert.serial_number)
-            is_revoked = serial_int in self.revoked_serials
+            details = parse_certificate_details(cert)
 
-            try:
-                bc = cert.extensions.get_extension_for_class(x509.BasicConstraints).value
-                is_ca = bool(bc.ca)
-                path_length = bc.path_length
-            except Exception:
-                is_ca = False
-                path_length = None
+            serial_int = int(details["serial_number"])
+            is_revoked = serial_int in self.revoked_serials
+            bc_info = details["basic_constraints"]
+            is_ca = bool(bc_info["is_ca"])
+            path_length = bc_info["path_length"]
 
             lines: List[str] = []
+            lines.append("=== Certificate ===")
             lines.append(f"File: {cert_path}")
-            lines.append(f"Subject: {cert.subject.rfc4514_string()}")
-            if self.compact_mode and len(lines[1]) > 96:
-                subj_prefix = "Subject: "
-                if lines[1].startswith(subj_prefix):
-                    rest = lines[1][len(subj_prefix):]
-                    lines[1] = subj_prefix + rest[:80] + "\n           " + rest[80:]
+            lines.append(f"Subject: {details['subject']}")
+            lines.append(f"Issuer: {details['issuer']}")
+            if self.compact_mode:
+                for idx, prefix in ((2, "Subject: "), (3, "Issuer: ")):
+                    if len(lines[idx]) > 96 and lines[idx].startswith(prefix):
+                        rest = lines[idx][len(prefix):]
+                        lines[idx] = prefix + rest[:80] + "\n" + (" " * len(prefix)) + rest[80:]
 
-            lines.append(f"Serial (hex): {format(cert.serial_number, 'x')}")
-            lines.append(f"Validity: {cert.not_valid_before} -> {cert.not_valid_after}")
+            lines.append(f"Serial (hex): {details['serial_hex']}")
+            lines.append(f"Version: {details['version']}")
+            lines.append(f"Validity: {details['not_valid_before']} -> {details['not_valid_after']}")
             lines.append(f"Revoked: {'yes' if is_revoked else 'no'}")
             lines.append(f"Is CA: {'yes' if is_ca else 'no'}")
             lines.append(f"Path length: {path_length if path_length is not None else '(none)'}")
             lines.append(f"Selected: {'yes' if r.filename in self.selected_filenames else 'no'}")
-            try:
-                sig_algo = cert.signature_hash_algorithm.name
-            except Exception:
-                sig_algo = "unknown"
-            pk_type, pk_bits = get_public_key_info(cert)  # utils
-            lines.append(f"Public Key: {pk_type}{' '+str(pk_bits)+' bits' if pk_bits else ''}")
-            fp = cert.fingerprint(hashes.SHA256()).hex()
-            lines.append(f"SHA-256: {fp}")
-            try:
-                san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
-                san_vals = ", ".join(str(n.value) for n in san)
-            except Exception:
-                san_vals = "(none)"
-            lines.append(f"SAN: {san_vals}")
-            try:
-                ku = cert.extensions.get_extension_for_class(x509.KeyUsage).value
-                lines.append(f"KeyUsage: DS={ku.digital_signature} KE={ku.key_encipherment} KCS={ku.key_cert_sign} CRL={ku.crl_sign}")
-            except Exception:
-                lines.append("KeyUsage: (n/a)")
-            try:
-                eku = cert.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
-                eku_vals = ", ".join(getattr(oid, "_name", oid.dotted_string) for oid in eku)
-            except Exception:
-                eku_vals = "(n/a)"
-            lines.append(f"EKU: {eku_vals}")
+
+            sig = details["signature"]
+            lines.append(f"Signature: {sig['display']}; hash={sig['hash'] or 'n/a'}")
+
+            pk = details["public_key"]
+            lines.append(f"Public Key: {pk['type']}{' '+str(pk['bits'])+' bits' if pk['bits'] else ''}")
+            lines.append(f"SHA-256: {details['fingerprints']['sha256']}")
+            lines.append(f"Subject Key ID: {details['subject_key_identifier'] or '(n/a)'}")
+            lines.append(f"Authority Key ID: {details['authority_key_identifier'] or '(n/a)'}")
+
+            lines.append("")
+            lines.append("=== AD CS / Active Directory ===")
+            ms = details["microsoft"]
+            template = ms["template"]
+            lines.append(f"Template name: {template.get('name') or '(n/a)'}")
+            lines.append(f"Template OID: {template.get('oid') or '(n/a)'}")
+            if template.get("major") is not None or template.get("minor") is not None:
+                lines.append(
+                    f"Template version: {template.get('major') if template.get('major') is not None else '?'}"
+                    f".{template.get('minor') if template.get('minor') is not None else '?'}"
+                )
+            else:
+                lines.append("Template version: (n/a)")
+
+            lines.append(f"Object SID: {ms.get('object_sid') or '(n/a)'}")
+
+            app_policies = ms.get("application_policies") or []
+            app_policy_text = ", ".join(item["display"] for item in app_policies)
+            lines.append(f"Application Policies: {app_policy_text or '(n/a)'}")
+
+            lines.append("")
+            lines.append("=== Subject Alternative Name ===")
+            san_entries = details.get("san") or []
+            if san_entries:
+                for item in san_entries:
+                    lines.append(f"  - {item['display']}")
+            else:
+                lines.append("  (none)")
+
+            lines.append("")
+            lines.append("=== Usage / Distribution ===")
+            ku_names = details.get("key_usage") or []
+            lines.append(f"Key Usage: {', '.join(ku_names) if ku_names else '(n/a)'}")
+
+            eku = details.get("extended_key_usage") or []
+            eku_text = ", ".join(item["display"] for item in eku)
+            lines.append(f"EKU: {eku_text or '(n/a)'}")
+
+            cert_policies = details.get("certificate_policies") or []
+            cert_policy_text = ", ".join(item["display"] for item in cert_policies)
+            lines.append(f"Certificate Policies: {cert_policy_text or '(n/a)'}")
+
+            aia = details.get("aia") or []
+            aia_text = ", ".join(f"{item['method']}={item['location']}" for item in aia)
+            lines.append(f"AIA: {aia_text or '(n/a)'}")
+
+            cdp = details.get("crl_distribution_points") or []
+            lines.append(f"CRL Distribution Points: {', '.join(cdp) if cdp else '(n/a)'}")
+
+            extensions = details.get("extensions") or []
+            lines.append(f"Extensions: {len(extensions)}")
             text = "\n".join(lines)
             if hasattr(log, "write"):
                 log.write(text)
