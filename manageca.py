@@ -8,7 +8,7 @@ ADCS TUI — Terminal application (SSH) à la “mc”
 • Unrevoke support via utils.unrevoke.
 • Re-sign CRL on demand (button + Ctrl+R) via utils.resign_crl.
 • New certificate generation (key + cert) opens a dedicated window and uses utils.issue_cert_with_new_key.
-• Delete certificate (button + Del; Shift+Del permanent). Moves to .trash by default.
+• Delete certificate (button + Del). Moves to .trash by default.
 • Shows whether a certificate is revoked (reads CRL).
 • Shows whether a certificate is a CA (reads BasicConstraints).
 
@@ -37,7 +37,6 @@ import uuid
 import shutil
 import os
 import sys
-import csv
 import textwrap
 import argparse
 import stat
@@ -899,7 +898,7 @@ class ADCSApp(App):
     }}
 
     /* Semantic action colors: all values come from the active theme. */
-    #btn_apply, #btn_reload {{
+    #btn_reload {{
         color: $accent;
     }}
     #btn_newcert, #btn_unrevoke {{
@@ -992,7 +991,6 @@ class ADCSApp(App):
         border: none;
         text-style: reverse bold;
     }}
-    #left #btn_apply:focus, #left #btn_apply:hover,
     #left #btn_reload:focus, #left #btn_reload:hover {{ color: $accent; }}
     #left #btn_newcert:focus, #left #btn_newcert:hover,
     #left #btn_unrevoke:focus, #left #btn_unrevoke:hover {{ color: $success; }}
@@ -1009,12 +1007,8 @@ class ADCSApp(App):
         margin: 0 0 1 0;
     }}
     #filters Input,
-    #filters Select,
-    #filters Button {{
+    #filters Select {{
         margin: 0 0 1 0;
-    }}
-    #filters Button {{
-        margin-bottom: 0;
     }}
 
     DataTable {{
@@ -1075,18 +1069,12 @@ class ADCSApp(App):
     BINDINGS = [
         Binding("?", "help", "Help"),
         Binding("/", "focus_search", "Search"),
-        Binding("f", "toggle_filters", "Filters"),
         Binding("F5", "reload", "Reload"),
-        Binding("enter", "open_detail", "Details"),
-        Binding("e", "export_csv", "Export CSV"),
         Binding("r", "revoke_current", "Revoke"),
         Binding("u", "unrevoke_current", "Unrevoke"),
         Binding("delete", "delete_current", "Delete"),
-        Binding("shift+delete", "delete_current_permanent", "Del!"),
         Binding("ctrl+r", "resign_crl", "Re-sign CRL"),
         Binding("ctrl+n", "open_new_certificate", "New cert"),
-        Binding("c", "toggle_compact", "Compact"),
-        Binding("A", "toggle_show_all_rows", "All rows"),
         Binding("tab", "next_pane", "Next"),
         Binding("shift+tab", "prev_pane", "Prev"),
         Binding("q", "quit", "Quit"),
@@ -1113,7 +1101,6 @@ class ADCSApp(App):
     filter_q: reactive[str] = reactive("")
     filter_status: reactive[str] = reactive("")
 
-    show_all_rows: reactive[bool] = reactive(False)
     max_rows: reactive[int] = reactive(MAX_ROWS_DEFAULT)
 
     # Keep-focus support: filename to reselect after refresh
@@ -1146,7 +1133,6 @@ class ADCSApp(App):
                         id="sel_status",
                         value="",
                     )
-                    yield _mc_button("Apply", id="btn_apply")
                 yield Label("Actions", id="lbl_actions")
                 yield _mc_button("New Certificate (Ctrl+N)", id="btn_newcert")
                 yield _mc_button("Delete (Del)", id="btn_delete")
@@ -1247,15 +1233,12 @@ class ADCSApp(App):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         return os.path.join(trash_dir, f"{os.path.basename(path)}.{ts}.trash")
 
-    def _delete_pair(self, cert_path: str, permanent: bool, ca: Dict[str, Any]) -> tuple[int, int]:
+    def _delete_pair(self, cert_path: str, ca: Dict[str, Any]) -> tuple[int, int]:
         n_cert = 0
         n_key = 0
         if os.path.isfile(cert_path):
             try:
-                if permanent:
-                    os.remove(cert_path)
-                else:
-                    os.replace(cert_path, self._trashify(cert_path))
+                os.replace(cert_path, self._trashify(cert_path))
                 n_cert = 1
             except Exception:
                 pass
@@ -1271,10 +1254,7 @@ class ADCSApp(App):
 
         if os.path.isfile(key_path):
             try:
-                if permanent:
-                    os.remove(key_path)
-                else:
-                    os.replace(key_path, self._trashify(key_path))
+                os.replace(key_path, self._trashify(key_path))
                 n_key = 1
             except Exception:
                 pass
@@ -1293,7 +1273,7 @@ class ADCSApp(App):
 
     def current_rows(self) -> List[CertRow]:
         all_rows = self.filtered_rows()
-        if self.show_all_rows or self.max_rows <= 0:
+        if self.max_rows <= 0:
             return all_rows
         return all_rows[: self.max_rows]
 
@@ -1577,8 +1557,8 @@ class ADCSApp(App):
         ca_name = (self.current_ca.get('display_name') if self.current_ca else '-')
         prefix = "Compact mode — " if self.compact_mode else ""
         limit_note = ""
-        if not self.show_all_rows and total > len(rows):
-            limit_note = f" (limited to {len(rows)}/{total}; press Shift+A to show all)"
+        if total > len(rows):
+            limit_note = f" (limited to {len(rows)}/{total})"
         sel_note = f" — selected: {len(self.selected_filenames)}"
         self.query_one(Status).set_text(f"{prefix}{len(rows)}/{total} certificates{sel_note} — CA: {ca_name}{limit_note}")
 
@@ -1588,8 +1568,6 @@ class ADCSApp(App):
         Keyboard shortcuts
         ------------------
         / : Quick search
-        f : Toggle filters
-        Enter : Show details for current row
 
         Space : Toggle selection [ ]/[X] on current row
         Ctrl+A : Select all (filtered)
@@ -1597,15 +1575,11 @@ class ADCSApp(App):
         Shift+Up/Down : Range select from anchor
         Shift+Home/End : Range select to start/end (visible)
 
-        e : Export (selected if any; else filtered) to CSV in cwd
         r : Revoke selected certificates (or current row if none selected)
         u : Unrevoke selected certificates (or current row if none selected)
         Del : Delete selected certificates (moves Cert & Key to .trash)
-        Shift+Del : Permanently delete selected certificates (and keys if found)
         Ctrl+R : Re-sign CRL (bump CRLNumber, refresh dates)
         Ctrl+N : New certificate (open form)
-        c : Toggle compact mode
-        Shift+A : Toggle show all rows (bypass max rows limit)
         F5 : Reload CA
         Tab / Shift+Tab : Move between left/right panes
         q : Quit
@@ -1615,14 +1589,6 @@ class ADCSApp(App):
     def action_focus_search(self) -> None:
         self.query_one("#inp_q", Input).focus()
 
-    def action_toggle_filters(self) -> None:
-        filters = self.query_one("#filters")
-        filters.display = ("none" if filters.display != "none" else "block")
-
-    def action_toggle_compact(self) -> None:
-        self.compact_mode = not self.compact_mode
-        self._apply_layout_mode()
-
     def action_reload(self) -> None:
         cursor_fn = self._remember_cursor_filename()
         ca = self.current_ca
@@ -1631,29 +1597,6 @@ class ADCSApp(App):
             self.revoked_serials = revoked_serials_set(crl_path)
         self._request_reselect(cursor_fn)
         self.load_certs()
-
-    def action_open_detail(self) -> None:
-        self._show_detail_current_row()
-
-    def action_export_csv(self) -> None:
-        if self.selected_filenames:
-            rows = [r for r in self.filtered_rows() if r.filename in self.selected_filenames]
-        else:
-            rows = self.filtered_rows()
-
-        fn = f"certs_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        with open(fn, "w", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            w.writerow(["serial", "subject", "valid_from", "valid_until", "days", "revoked", "is_ca",
-                        "signature", "pubkey", "pubkey_bits", "sha256", "filename"])
-            for r in rows:
-                w.writerow([
-                    r.serial_nox, r.subject, r.not_before.isoformat(), r.not_after.isoformat(), r.days_to_expiry,
-                    "yes" if r.revoked else "no",
-                    "yes" if r.is_ca else "no",
-                    r.sig_algo, r.pubkey_type, r.pubkey_bits or '', r.sha256_fingerprint, r.filename
-                ])
-        self.notify(f"Exported: {fn} ({len(rows)} rows)", severity="success")
 
     def _get_current_row(self) -> Optional[CertRow]:
         table = self._table()
@@ -1862,12 +1805,9 @@ class ADCSApp(App):
 
     # -------- Delete actions (multi-selection) --------
     def action_delete_current(self) -> None:
-        self._delete_selected(permanent=False)
+        self._delete_selected()
 
-    def action_delete_current_permanent(self) -> None:
-        self._delete_selected(permanent=True)
-
-    def _delete_selected(self, permanent: bool) -> None:
+    def _delete_selected(self) -> None:
         cursor_fn = self._remember_cursor_filename()
 
         ca = self.current_ca
@@ -1896,7 +1836,7 @@ class ADCSApp(App):
                 continue
 
             try:
-                n_cert, n_key = self._delete_pair(cert_path, permanent=permanent, ca=ca)
+                n_cert, n_key = self._delete_pair(cert_path, ca=ca)
                 cert_deleted += n_cert
                 key_deleted += n_key
                 deleted_ok += 1
@@ -1911,8 +1851,7 @@ class ADCSApp(App):
         except Exception:
             pass
 
-        where = "permanently deleted" if permanent else "moved to .trash"
-        msg = f"Delete: ok={deleted_ok}, failed={deleted_fail}, blocked={len(blocked)} — {where}. (cert:{cert_deleted}, key:{key_deleted})"
+        msg = f"Delete: ok={deleted_ok}, failed={deleted_fail}, blocked={len(blocked)} — moved to .trash. (cert:{cert_deleted}, key:{key_deleted})"
         severity = "success" if (deleted_fail == 0 and not blocked) else ("warning" if deleted_ok > 0 else "error")
         self.notify(msg, severity=severity, timeout=10)
 
@@ -1938,12 +1877,6 @@ class ADCSApp(App):
     def action_prev_pane(self) -> None:
         self.set_focus_previous()
 
-    def action_toggle_show_all_rows(self) -> None:
-        cursor_fn = self._remember_cursor_filename()
-        self.show_all_rows = not self.show_all_rows
-        self._request_reselect(cursor_fn)
-        self.refresh_table()
-
     # ---------- UI Events ----------
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "sel_ca" and event.value:
@@ -1965,13 +1898,7 @@ class ADCSApp(App):
             self.refresh_table()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn_apply":
-            cursor_fn = self._remember_cursor_filename()
-            q = self.query_one("#inp_q", Input).value or ""
-            self.filter_q = q
-            self._request_reselect(cursor_fn)
-            self.refresh_table()
-        elif event.button.id == "btn_reload":
+        if event.button.id == "btn_reload":
             self.action_reload()
         elif event.button.id == "btn_revoke":
             self.action_revoke_current()
