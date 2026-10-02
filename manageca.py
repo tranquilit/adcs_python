@@ -1345,10 +1345,12 @@ class ADCSApp(App):
                 detail_pane.styles.height = "1fr"
                 detail.styles.height = "1fr"
             elif self.compact_mode:
-                # In stacked compact mode, keep details deliberately shallow so
-                # the certificate table remains useful on low-height terminals.
-                # The detail widget is scrollable, so no information is lost.
-                pane_height = max(7, min(10, self.size.height // 3))
+                # In stacked compact mode, scale the details pane with the
+                # terminal height. Keep it shallow on short screens, but let it
+                # grow when vertical space is available. The detail widget is
+                # scrollable, so the lower bound can stay small without losing
+                # information.
+                pane_height = max(7, min(24, (self.size.height // 2) - 4))
                 detail_pane.styles.height = pane_height
                 detail.styles.height = max(6, pane_height - 1)
             else:
@@ -1429,14 +1431,18 @@ class ADCSApp(App):
         want_compact = (w < 120) or (h < 28)
         want_density = self._density_for_width(w, want_compact, want_side_by_side)
 
+        size_changed = getattr(self, "_last_layout_size", None) != (w, h)
+
         if (
             want_compact != self.compact_mode
             or want_side_by_side != self.details_side_by_side
             or want_density != self._table_density
+            or size_changed
         ):
             self.compact_mode = want_compact
             self.details_side_by_side = want_side_by_side
             self._table_density = want_density
+            self._last_layout_size = (w, h)
             self._apply_layout_mode()
 
     # ---------- Init ----------
