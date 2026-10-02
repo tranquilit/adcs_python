@@ -111,6 +111,8 @@ CERT_EXTS = {".crt", ".pem", ".cer"}
 FULL_COLUMNS = ["Sel", "#", "Serial", "Subject", "Valid from", "Valid until",
                 "Days", "Revoked", "Is CA", "Signature", "Public Key", "SHA-256", "File"]
 COMPACT_COLUMNS = ["Sel", "#", "Serial", "Subject", "Valid until", "Days", "Revoked", "Is CA"]
+NARROW_COLUMNS = ["Sel", "#", "Serial", "Subject", "Days", "Revoked"]
+TINY_COLUMNS = ["Sel", "#", "Subject", "Days", "Revoked"]
 
 MAX_ROWS_DEFAULT = 10000
 
@@ -835,6 +837,12 @@ class ADCSApp(App):
         background: {TERMINAL_DEFAULT};
         color: {TERMINAL_DEFAULT};
     }}
+    #detail_pane {{
+        width: 1fr;
+        height: 17;
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
+    }}
     #detail {{
         height: 16;
         overflow: auto;
@@ -1100,6 +1108,8 @@ class ADCSApp(App):
     revoked_serials: Set[int] = set()
 
     compact_mode: reactive[bool] = reactive(False)
+    details_side_by_side: reactive[bool] = reactive(False)
+    _table_density: str = "full"
 
     filter_q: reactive[str] = reactive("")
     filter_status: reactive[str] = reactive("")
@@ -1147,8 +1157,9 @@ class ADCSApp(App):
                         yield _mc_button("Re-sign CRL (Ctrl+R)", id="btn_resign_crl")
             with Vertical(id="right"):
                 yield DataTable(id="table", zebra_stripes=False)
-                yield Label("Certificate details", id="lbl_detail")
-                yield _TextLog(id="detail")
+                with Vertical(id="detail_pane"):
+                    yield Label("Certificate details", id="lbl_detail")
+                    yield _TextLog(id="detail")
         yield Footer()
 
     # ---------- helpers ----------
@@ -1295,6 +1306,9 @@ class ADCSApp(App):
         main = self.query_one("#main")
         left = self.query_one("#left")
         right = self.query_one("#right")
+        table = self.query_one("#table", DataTable)
+        detail_pane = self.query_one("#detail_pane")
+        detail = self.query_one("#detail")
         filters = self.query_one("#filters")
         actions = self.query_one("#actions")
         lbl_ca = self.query_one("#lbl_ca", Label)
@@ -1311,7 +1325,35 @@ class ADCSApp(App):
         try:
             left.styles.width = "1fr" if self.compact_mode else 40
             left.styles.height = 4 if self.compact_mode else "1fr"
+            right.styles.width = "1fr"
             right.styles.height = "1fr"
+        except Exception:
+            pass
+
+        # When height is scarce but width is still comfortable, keep the compact
+        # CA/search strip at the top and use the remaining area horizontally:
+        # certificate table on the left, certificate details on the right.
+        try:
+            right.styles.layout = "horizontal" if self.details_side_by_side else "vertical"
+            table.styles.width = "7fr" if self.details_side_by_side else "1fr"
+            table.styles.height = "1fr"
+            detail_pane.styles.width = "5fr" if self.details_side_by_side else "1fr"
+
+            if self.details_side_by_side:
+                # In short+wide mode the details pane is beside the table, so it
+                # can use the full available height without stealing table rows.
+                detail_pane.styles.height = "1fr"
+                detail.styles.height = "1fr"
+            elif self.compact_mode:
+                # In stacked compact mode, keep details deliberately shallow so
+                # the certificate table remains useful on low-height terminals.
+                # The detail widget is scrollable, so no information is lost.
+                pane_height = max(7, min(10, self.size.height // 3))
+                detail_pane.styles.height = pane_height
+                detail.styles.height = max(6, pane_height - 1)
+            else:
+                detail_pane.styles.height = 17
+                detail.styles.height = 16
         except Exception:
             pass
 
@@ -1341,11 +1383,60 @@ class ADCSApp(App):
         prefix = "Compact mode — " if self.compact_mode else ""
         self.query_one(Status).set_text(f"{prefix}{ca_name}")
 
+    @staticmethod
+    def _density_for_width(width: int, compact: bool, details_side_by_side: bool = False) -> str:
+        if not compact:
+            return "full"
+
+        # In short+wide mode only part of the terminal is available to the table.
+        # 7/12 mirrors the table/detail split used by _apply_layout_mode().
+        table_width = int(width * 7 / 12) if details_side_by_side else width
+        if table_width < 80:
+            return "tiny"
+        if table_width < 100:
+            return "narrow"
+        return "compact"
+
+    def _table_view_width(self) -> int:
+        try:
+            width = int(self._table().size.width)
+            if width > 0:
+                return width
+        except Exception:
+            pass
+        if self.details_side_by_side:
+            return max(1, int(self.size.width * 7 / 12))
+        return max(1, self.size.width)
+
+    def _detail_view_width(self) -> int:
+        try:
+            width = int(self.query_one("#detail").size.width)
+            if width > 0:
+                return width
+        except Exception:
+            pass
+        if self.details_side_by_side:
+            return max(24, int(self.size.width * 5 / 12))
+        return max(24, self.size.width)
+
     def _auto_pick_layout(self) -> None:
         w, h = self.size.width, self.size.height
+
+        # A short but wide terminal has enough horizontal room to move details
+        # beside the table. If width also becomes constrained, fall back to the
+        # stacked compact layout.
+        want_side_by_side = (h < 28) and (w >= 120)
         want_compact = (w < 120) or (h < 28)
-        if want_compact != self.compact_mode:
+        want_density = self._density_for_width(w, want_compact, want_side_by_side)
+
+        if (
+            want_compact != self.compact_mode
+            or want_side_by_side != self.details_side_by_side
+            or want_density != self._table_density
+        ):
             self.compact_mode = want_compact
+            self.details_side_by_side = want_side_by_side
+            self._table_density = want_density
             self._apply_layout_mode()
 
     # ---------- Init ----------
@@ -1387,9 +1478,18 @@ class ADCSApp(App):
             pass
 
     # ---------- DataTable columns ----------
+    def _expected_table_columns(self) -> List[str]:
+        if self._table_density == "tiny":
+            return TINY_COLUMNS
+        if self._table_density == "narrow":
+            return NARROW_COLUMNS
+        if self._table_density == "compact":
+            return COMPACT_COLUMNS
+        return FULL_COLUMNS
+
     def ensure_table_columns(self) -> None:
         table = self._table()
-        expected = FULL_COLUMNS if not self.compact_mode else COMPACT_COLUMNS
+        expected = self._expected_table_columns()
 
         current = 0
         if hasattr(table, "column_count"):
@@ -1523,14 +1623,47 @@ class ADCSApp(App):
             sel_mark = "[X]" if selected else "[ ]"
 
             subj = r.subject
-            if self.compact_mode and len(subj) > 48:
-                subj = subj[:45] + "…"
+            serial = r.serial_nox
+            table_width = self._table_view_width()
 
-            if self.compact_mode:
+            if self._table_density == "tiny":
+                subject_limit = max(12, min(28, table_width - 30))
+                if len(subj) > subject_limit:
+                    subj = subj[:max(1, subject_limit - 1)] + "…"
                 table.add_row(
                     self._mc_cell(sel_mark, selected),
                     self._mc_cell(str(i), selected),
-                    self._mc_cell(r.serial_nox, selected),
+                    self._mc_cell(subj, selected),
+                    self._mc_cell(str(r.days_to_expiry), selected),
+                    self._mc_cell("yes" if r.revoked else "no", selected),
+                )
+            elif self._table_density == "narrow":
+                if len(serial) > 14:
+                    serial = serial[:11] + "…"
+                subject_limit = max(18, min(28, table_width - 54))
+                if len(subj) > subject_limit:
+                    subj = subj[:max(1, subject_limit - 1)] + "…"
+                table.add_row(
+                    self._mc_cell(sel_mark, selected),
+                    self._mc_cell(str(i), selected),
+                    self._mc_cell(serial, selected),
+                    self._mc_cell(subj, selected),
+                    self._mc_cell(str(r.days_to_expiry), selected),
+                    self._mc_cell("yes" if r.revoked else "no", selected),
+                )
+            elif self._table_density == "compact":
+                if table_width < 120:
+                    if len(serial) > 18:
+                        serial = serial[:15] + "…"
+                    subject_limit = max(24, min(32, table_width - 82))
+                else:
+                    subject_limit = 48
+                if len(subj) > subject_limit:
+                    subj = subj[:max(1, subject_limit - 1)] + "…"
+                table.add_row(
+                    self._mc_cell(sel_mark, selected),
+                    self._mc_cell(str(i), selected),
+                    self._mc_cell(serial, selected),
                     self._mc_cell(subj, selected),
                     self._mc_cell(r.not_after.strftime("%Y-%m-%dT%H:%M"), selected),
                     self._mc_cell(str(r.days_to_expiry), selected),
@@ -1960,6 +2093,31 @@ class ADCSApp(App):
                 self.set_timer(0.05, self._show_detail_current_row)
 
     # ---------- Certificate detail panel ----------
+    @staticmethod
+    def _wrap_detail_lines(lines: List[str], width: int) -> List[str]:
+        """Wrap certificate detail text so narrow terminals never need horizontal scrolling."""
+        width = max(24, width)
+        wrapped: List[str] = []
+        for line in lines:
+            if not line or len(line) <= width:
+                wrapped.append(line)
+                continue
+
+            leading = len(line) - len(line.lstrip(" "))
+            indent = " " * leading
+            continuation = indent + "  "
+            parts = textwrap.wrap(
+                line,
+                width=width,
+                subsequent_indent=continuation,
+                break_long_words=True,
+                break_on_hyphens=False,
+                replace_whitespace=False,
+                drop_whitespace=True,
+            )
+            wrapped.extend(parts or [line])
+        return wrapped
+
     def show_detail(self, r: CertRow) -> None:
         ca = self.current_ca
         if not ca:
@@ -2073,6 +2231,11 @@ class ADCSApp(App):
 
             extensions = details.get("extensions") or []
             lines.append(f"Extensions: {len(extensions)}")
+
+            if self.compact_mode:
+                detail_width = max(24, self._detail_view_width() - 4)
+                lines = self._wrap_detail_lines(lines, detail_width)
+
             text = "\n".join(lines)
             if hasattr(log, "write"):
                 log.write(text)
