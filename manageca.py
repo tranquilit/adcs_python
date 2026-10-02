@@ -74,16 +74,11 @@ try:
 except Exception:
     from textual.screen import Screen as _BaseScreen  # type: ignore
 
-# --- Midnight Commander inspired xterm-256-safe colors ---
-# Main application background is intentionally pure black.
-MC_BLACK = "#000000"       # xterm-256 0
-MC_GRAY = "#5F5F5F"        # xterm-256 59
-MC_BLUE = "#000000"        # main background (black)
-MC_ACCENT = "#5F5F5F"      # neutral xterm-256 gray accent (no blue/green)
-MC_LIGHTGRAY = "#D7D7D7"   # xterm-256 188 - normal text / frames
-MC_WHITE = "#FFFFFF"       # xterm-256 white
-MC_YELLOW = "#D7AF00"      # xterm-256 178 - warm MC header yellow
-MC_RED = "#D70000"         # xterm-256 160 - errors
+# --- Terminal-native rendering ------------------------------------------------
+# No RGB, hex, theme, or ANSI palette color is selected by this application.
+# ``ansi_default`` means: use the terminal emulator's configured default
+# foreground/background. Focus and selection are indicated with reverse video.
+TERMINAL_DEFAULT = "ansi_default"
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -588,57 +583,63 @@ class NewCertScreen(_BaseScreen[None]):
         )
 
     CSS = f"""
-    /* GNU Midnight Commander standard dialog colors. */
+    /* Terminal-native monochrome UI. ansi_default is supplied by the terminal.
+       Focus is represented by reverse video, never by a chosen color. */
     Screen {{
-        background: {MC_BLUE};
-        color: {MC_LIGHTGRAY};
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
     }}
     #dlg_container {{
         width: 80%;
         height: auto;
-        border: solid {MC_BLACK};
+        border: solid $accent;
         padding: 1 2;
-        background: {MC_LIGHTGRAY};
-        color: {MC_BLACK};
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
         margin: 2 10;
     }}
     #dlg_title {{
         content-align: center middle;
-        height: 3;
-        text-style: bold;
-        color: {MC_BLUE};
-        background: {MC_LIGHTGRAY};
+        height: 1;
+        text-style: bold underline;
+        color: $primary;
+        background: {TERMINAL_DEFAULT};
         border: none;
     }}
     #dlg_form > * {{ margin: 0 0 1 0; }}
     #dlg_buttons {{
         height: auto;
         content-align: right middle;
-        background: {MC_LIGHTGRAY};
-        color: {MC_BLACK};
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
     }}
     #dlg_buttons Button {{ margin-left: 1; }}
     Input, Select {{
-        background: {MC_ACCENT};
-        color: {MC_WHITE};
-        border: solid {MC_LIGHTGRAY};
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
+        border: none;
     }}
     Input:focus, Select:focus {{
-        background: {MC_ACCENT};
-        color: {MC_WHITE};
-        border: solid {MC_BLACK};
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
+        border: none;
+        text-style: reverse;
     }}
     Button {{
-        background: {MC_LIGHTGRAY};
-        color: {MC_BLACK};
-        border: solid {MC_LIGHTGRAY};
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
+        border: none;
     }}
+    #nc_ok {{ color: $success; }}
+    #nc_cancel {{ color: $accent; }}
     Button:focus, Button:hover {{
-        background: {MC_ACCENT};
-        color: {MC_WHITE};
-        border: solid {MC_BLACK};
-        text-style: bold;
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
+        border: none;
+        text-style: reverse bold;
     }}
+    #nc_ok:focus, #nc_ok:hover {{ color: $success; }}
+    #nc_cancel:focus, #nc_cancel:hover {{ color: $accent; }}
     """
 
     BINDINGS = [
@@ -760,131 +761,155 @@ class ADCSApp(App):
     ENABLE_COMMAND_PALETTE = False
 
     CSS = f"""
-    /* GNU Midnight Commander standard skin:
-       normal     = lightgray;blue
-       selected   = white;gray
-       marked     = yellow;blue
-       markselect = yellow;gray
-       header     = yellow;blue
-       frame      = lightgray;blue
-       input      = white;gray
-       dialog     = black;lightgray
-       statusbar  = white;gray
-       menu       = white;gray, selected white;black
-       buttonbar  = hotkey white;black, button white;gray
-    */
+    /* Terminal-native polished UI: all foreground/background colors are ansi_default.
+       This follows PuTTY/terminal defaults (dark or light). Selection/focus
+       uses reverse video, so no application palette is required. */
     Screen {{
         layout: vertical;
-        background: {MC_BLUE};
-        color: {MC_LIGHTGRAY};
-        scrollbar-background: {MC_BLACK};
-        scrollbar-color: #5F5F5F;
-        scrollbar-color-hover: #878787;
-        scrollbar-color-active: #AFAFAF;
-        scrollbar-corner-color: {MC_BLACK};
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
+        scrollbar-background: {TERMINAL_DEFAULT};
+        scrollbar-color: {TERMINAL_DEFAULT};
+        scrollbar-color-hover: {TERMINAL_DEFAULT};
+        scrollbar-color-active: {TERMINAL_DEFAULT};
+        scrollbar-corner-color: {TERMINAL_DEFAULT};
     }}
 
     Header {{
-        background: {MC_ACCENT};
-        color: {MC_WHITE};
-        text-style: bold;
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
+        text-style: reverse bold;
     }}
     Footer {{
-        background: {MC_ACCENT};
-        color: {MC_WHITE};
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
     }}
-    Footer > .footer--key {{
-        background: {MC_BLACK};
-        color: {MC_WHITE};
+    .footer--key {{
+        background: {TERMINAL_DEFAULT};
+        color: $accent;
         text-style: bold;
     }}
-    Footer > .footer--description {{
-        background: {MC_ACCENT};
-        color: {MC_WHITE};
+    .footer--description {{
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
     }}
 
     #top {{
-        height: 3;
-        background: {MC_BLUE};
-        color: {MC_LIGHTGRAY};
+        height: 2;
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
     }}
     #status {{
         height: 1;
-        background: {MC_BLUE};
-        color: {MC_LIGHTGRAY};
+        background: {TERMINAL_DEFAULT};
+        color: $primary;
         text-style: bold;
+        padding: 0 1;
     }}
     #main {{
         layout: horizontal;
-        background: {MC_BLUE};
-        color: {MC_LIGHTGRAY};
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
     }}
     #left {{
         width: 40;
-        border: solid {MC_LIGHTGRAY};
-        background: {MC_BLUE};
-        color: {MC_LIGHTGRAY};
+        border: solid $accent;
+        padding: 0 1;
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
     }}
     #right {{
-        border: solid {MC_LIGHTGRAY};
-        background: {MC_BLUE};
-        color: {MC_LIGHTGRAY};
+        border: solid $accent;
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
     }}
     #filters {{
         border: none;
-        padding: 1 1 0 1;
+        padding: 1 0 0 0;
         margin: 1 0;
         height: auto;
-        background: {MC_BLUE};
-        color: {MC_LIGHTGRAY};
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
     }}
     #table {{
         height: 1fr;
-        background: {MC_BLUE};
-        color: {MC_LIGHTGRAY};
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
     }}
     #detail {{
-        height: 12;
+        height: 11;
         overflow: auto;
-        border: solid {MC_LIGHTGRAY};
-        background: {MC_BLUE};
-        color: {MC_LIGHTGRAY};
-        scrollbar-background: {MC_BLACK};
-        scrollbar-color: #5F5F5F;
-        scrollbar-color-hover: #878787;
-        scrollbar-color-active: #AFAFAF;
-        scrollbar-corner-color: {MC_BLACK};
+        border: solid $accent;
+        padding: 0 1;
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
+        scrollbar-background: {TERMINAL_DEFAULT};
+        scrollbar-color: {TERMINAL_DEFAULT};
+        scrollbar-color-hover: {TERMINAL_DEFAULT};
+        scrollbar-color-active: {TERMINAL_DEFAULT};
+        scrollbar-corner-color: {TERMINAL_DEFAULT};
     }}
 
     Label, Static, Container, Vertical, Horizontal {{
-        background: {MC_BLUE};
-        color: {MC_LIGHTGRAY};
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
     }}
-    #lbl_ca, #filters Label {{
-        color: {MC_YELLOW};
-        text-style: bold;
+    /* Semantic accents come only from the active Textual theme. */
+    #lbl_ca {{
+        color: $primary;
+        text-style: bold underline;
+    }}
+    #filters Label {{
+        color: $accent;
+        text-style: bold underline;
+    }}
+    #lbl_actions {{
+        color: $warning;
+        text-style: bold underline;
+        margin: 1 0 1 0;
+    }}
+    #lbl_detail {{
+        color: $primary;
+        text-style: bold underline;
+        height: 1;
+        padding: 0 1;
     }}
 
     Input, Select {{
-        background: {MC_ACCENT};
-        color: {MC_WHITE};
-        border: solid {MC_BLUE};
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
+        border: none;
     }}
     Input:focus, Select:focus {{
-        background: {MC_ACCENT};
-        color: {MC_WHITE};
-        border: solid {MC_BLACK};
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
+        border: none;
+        text-style: reverse;
     }}
     Button {{
-        background: {MC_ACCENT};
-        color: {MC_WHITE};
-        border: solid {MC_BLUE};
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
+        border: none;
     }}
     Button:focus, Button:hover {{
-        background: {MC_BLACK};
-        color: {MC_WHITE};
-        border: solid {MC_ACCENT};
-        text-style: bold;
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
+        border: none;
+        text-style: reverse bold;
+    }}
+
+    /* Semantic action colors: all values come from the active theme. */
+    #btn_apply, #btn_reload {{
+        color: $accent;
+    }}
+    #btn_newcert, #btn_unrevoke {{
+        color: $success;
+    }}
+    #btn_delete, #btn_revoke {{
+        color: $error;
+    }}
+    #btn_resign_crl {{
+        color: $warning;
     }}
 
     /* Left command pane: compact MC-like navigation.
@@ -895,26 +920,64 @@ class ADCSApp(App):
         width: 1fr;
         min-width: 0;
         height: 1;
-        background: {MC_BLUE};
-        color: {MC_LIGHTGRAY};
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
         border: none;
         padding: 0 1;
-        margin: 0 1;
+        margin: 0;
     }}
     #left Select {{
         width: 1fr;
         min-width: 0;
-        background: {MC_BLUE};
-        color: {MC_LIGHTGRAY};
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
         border: none;
         padding: 0 1;
-        margin: 0 1;
+        margin: 0;
     }}
     #left .mc-select-compact {{
         height: 1;
     }}
     #left .mc-select-legacy {{
-        height: 3;
+        height: 1;
+    }}
+
+    /* Older Textual versions style the internal SelectCurrent widget
+       independently. Override it explicitly so the default blue/tall
+       focus frame can never leak through. */
+    #left Select > SelectCurrent {{
+        height: 1;
+        border: none;
+        padding: 0 1;
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
+    }}
+    #left Select:focus > SelectCurrent {{
+        border: none;
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
+        text-style: reverse;
+    }}
+    #left Select > SelectCurrent Static#label {{
+        background: transparent;
+        color: {TERMINAL_DEFAULT};
+    }}
+    #left Select > SelectCurrent .arrow {{
+        background: transparent;
+        color: $accent;
+    }}
+    #left Select:focus > SelectCurrent Static#label {{
+        background: transparent;
+        color: {TERMINAL_DEFAULT};
+    }}
+    #left Select:focus > SelectCurrent .arrow {{
+        background: transparent;
+        color: $accent;
+    }}
+    #left Select > SelectOverlay {{
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
+        border: none;
     }}
     #left Button {{
         content-align: left middle;
@@ -924,16 +987,23 @@ class ADCSApp(App):
     #left Select:focus,
     #left Button:focus,
     #left Button:hover {{
-        background: {MC_ACCENT};
-        color: {MC_WHITE};
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
         border: none;
-        text-style: bold;
+        text-style: reverse bold;
     }}
+    #left #btn_apply:focus, #left #btn_apply:hover,
+    #left #btn_reload:focus, #left #btn_reload:hover {{ color: $accent; }}
+    #left #btn_newcert:focus, #left #btn_newcert:hover,
+    #left #btn_unrevoke:focus, #left #btn_unrevoke:hover {{ color: $success; }}
+    #left #btn_delete:focus, #left #btn_delete:hover,
+    #left #btn_revoke:focus, #left #btn_revoke:hover {{ color: $error; }}
+    #left #btn_resign_crl:focus, #left #btn_resign_crl:hover {{ color: $warning; }}
     #lbl_ca {{
-        margin: 0 1;
+        margin: 0 0 1 0;
     }}
     #sel_ca {{
-        margin: 0 1 1 1;
+        margin: 0 0 1 0;
     }}
     #filters Label {{
         margin: 0 0 1 0;
@@ -948,53 +1018,55 @@ class ADCSApp(App):
     }}
 
     DataTable {{
-        background: {MC_BLUE};
-        color: {MC_LIGHTGRAY};
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
         background-tint: transparent;
-        scrollbar-background: {MC_BLACK};
-        scrollbar-color: #5F5F5F;
-        scrollbar-color-hover: #878787;
-        scrollbar-color-active: #AFAFAF;
-        scrollbar-corner-color: {MC_BLACK};
+        scrollbar-background: {TERMINAL_DEFAULT};
+        scrollbar-color: {TERMINAL_DEFAULT};
+        scrollbar-color-hover: {TERMINAL_DEFAULT};
+        scrollbar-color-active: {TERMINAL_DEFAULT};
+        scrollbar-corner-color: {TERMINAL_DEFAULT};
     }}
     DataTable:focus {{
         background-tint: transparent;
     }}
     DataTable > .datatable--odd-row,
     DataTable > .datatable--even-row {{
-        background: {MC_BLUE};
-        color: {MC_LIGHTGRAY};
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
     }}
     DataTable > .datatable--header {{
-        background: {MC_BLUE};
-        color: {MC_YELLOW};
-        text-style: bold;
+        background: {TERMINAL_DEFAULT};
+        color: $accent;
+        text-style: bold underline;
     }}
     DataTable > .datatable--cursor,
     DataTable:focus > .datatable--cursor {{
-        background: {MC_ACCENT};
-        color: {MC_WHITE};
-        text-style: none;
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
+        text-style: reverse bold;
     }}
     DataTable > .datatable--hover {{
-        background: {MC_ACCENT};
-        color: {MC_WHITE};
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
+        text-style: reverse;
     }}
     DataTable > .datatable--header-cursor,
     DataTable > .datatable--header-hover {{
-        background: {MC_ACCENT};
-        color: {MC_WHITE};
+        background: {TERMINAL_DEFAULT};
+        color: $accent;
+        text-style: bold underline;
     }}
 
     SelectOverlay {{
-        background: {MC_ACCENT};
-        color: {MC_WHITE};
-        border: solid {MC_WHITE};
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
+        border: none;
     }}
     SelectOverlay > .option-list--option-highlighted {{
-        background: {MC_BLACK};
-        color: {MC_WHITE};
-        text-style: none;
+        background: {TERMINAL_DEFAULT};
+        color: {TERMINAL_DEFAULT};
+        text-style: reverse;
     }}
 
     .mono {{ text-style: italic; }}
@@ -1075,6 +1147,7 @@ class ADCSApp(App):
                         value="",
                     )
                     yield _mc_button("Apply", id="btn_apply")
+                yield Label("Actions", id="lbl_actions")
                 yield _mc_button("New Certificate (Ctrl+N)", id="btn_newcert")
                 yield _mc_button("Delete (Del)", id="btn_delete")
                 yield _mc_button("Reload (F5)", id="btn_reload")
@@ -1084,6 +1157,7 @@ class ADCSApp(App):
                     yield _mc_button("Re-sign CRL (Ctrl+R)", id="btn_resign_crl")
             with Vertical(id="right"):
                 yield DataTable(id="table", zebra_stripes=False)
+                yield Label("Certificate details", id="lbl_detail")
                 yield _TextLog(id="detail")
         yield Footer()
 
@@ -1410,10 +1484,10 @@ class ADCSApp(App):
 
     @staticmethod
     def _mc_cell(value: object, marked: bool = False) -> object:
-        """Render marked rows in Midnight Commander yellow."""
+        """Emphasize marked rows without imposing a color outside the theme."""
         if not marked:
             return value
-        return Text(str(value), style=MC_YELLOW)
+        return Text(str(value), style="bold")
 
     def refresh_table(self) -> None:
         """Rebuild the DataTable based on current (filtered/limited) rows, preserving focus."""
@@ -2281,4 +2355,7 @@ if __name__ == "__main__":
         )
         sys.exit(rc)
 
-    ADCSApp().run()
+    # Keep ANSI default colors native. ``ansi_default`` is emitted as the
+    # terminal default foreground/background, so PuTTY controls dark/light
+    # appearance. Reverse video is used for focus/selection.
+    ADCSApp(ansi_color=True).run()
