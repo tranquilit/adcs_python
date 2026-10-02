@@ -1982,7 +1982,6 @@ class ADCSApp(App):
             lines.append(f"Revoked: {'yes' if is_revoked else 'no'}")
             lines.append(f"Is CA: {'yes' if is_ca else 'no'}")
             lines.append(f"Path length: {path_length if path_length is not None else '(none)'}")
-            lines.append(f"Selected: {'yes' if r.filename in self.selected_filenames else 'no'}")
 
             sig = details["signature"]
             lines.append(f"Signature: {sig['display']}; hash={sig['hash'] or 'n/a'}")
