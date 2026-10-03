@@ -40,9 +40,12 @@ import sys
 import textwrap
 import argparse
 import stat
-from datetime import datetime, timezone
+import json
+import sqlite3
+import hashlib
+from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass
-from typing import List, Optional, Dict, Any, Set
+from typing import List, Optional, Dict, Any, Set, Callable
 import base64
 
 from callback_loader import load_func
@@ -57,6 +60,25 @@ from textual.widgets import (
 )
 from textual.reactive import reactive
 from textual import events  # to intercept keys
+try:
+    from textual import work
+except ImportError:
+    # Compatibility with Textual releases that expose run_worker() but not the
+    # @work decorator yet. The application still gets a background thread.
+    def work(*, thread: bool = False, exclusive: bool = False, group: Optional[str] = None):
+        def decorator(func):
+            def start_worker(self, *args, **kwargs):
+                runner = lambda: func(self, *args, **kwargs)
+                try:
+                    return self.run_worker(
+                        runner, thread=thread, exclusive=exclusive, group=group
+                    )
+                except TypeError:
+                    return self.run_worker(
+                        runner, thread=thread, exclusive=exclusive
+                    )
+            return start_worker
+        return decorator
 from rich.text import Text
 
 # --- Textual compatibility: TextLog, ModalScreen/Screen ---
@@ -113,7 +135,46 @@ COMPACT_COLUMNS = ["Sel", "#", "Serial", "Subject", "Valid until", "Days", "Revo
 NARROW_COLUMNS = ["Sel", "#", "Serial", "Subject", "Days", "Revoked"]
 TINY_COLUMNS = ["Sel", "#", "Subject", "Days", "Revoked"]
 
-MAX_ROWS_DEFAULT = 10000
+MAX_ROWS_DEFAULT = 1000
+
+# Per-CA immutable certificate cache. Certificate files are treated as frozen:
+# an existing cache key is never re-read from disk. Increment PARSER_VERSION
+# whenever parse_certificate_details() output used by this UI changes.
+#
+# SQLite files live in the current user's local profile, not beside certificates.
+# The filename is the SHA-256 hash of the canonical certificate-directory path.
+CERT_CACHE_APP_DIR = "adcs-tui"
+CERT_CACHE_SUBDIR = "cert-cache"
+CERT_CACHE_SCHEMA_VERSION = 2
+CERT_CACHE_PARSER_VERSION = 1
+
+# Sort keys accepted by the SQLite certificate query. Values are SQL fragments
+# from a fixed whitelist; user-provided text is never interpolated as SQL.
+CERT_CACHE_SORT_COLUMNS = {
+    "subject": ("subject COLLATE NOCASE",),
+    "not_before": ("not_before",),
+    "not_after": ("not_after",),
+    "days": ("not_after",),
+    "filename": ("filename COLLATE NOCASE",),
+    "signature": ("sig_algo COLLATE NOCASE",),
+    "public_key": ("pubkey_type COLLATE NOCASE", "COALESCE(pubkey_bits, -1)"),
+    "sha256": ("sha256 COLLATE NOCASE",),
+    "is_ca": ("is_ca",),
+}
+
+TABLE_HEADER_SORT_KEYS = {
+    "Serial": "serial",
+    "Subject": "subject",
+    "Valid from": "not_before",
+    "Valid until": "not_after",
+    "Days": "days",
+    "Revoked": "revoked",
+    "Is CA": "is_ca",
+    "Signature": "signature",
+    "Public Key": "public_key",
+    "SHA-256": "sha256",
+    "File": "filename",
+}
 
 def _mc_select(*args, **kwargs):
     """Create a borderless compact Select when supported by Textual.
@@ -154,6 +215,7 @@ class CertRow:
     pubkey_bits: Optional[int]
     sha256_fingerprint: str
     search_text: str = ""
+    cache_key: str = ""
     revoked: bool = False  # CRL status
     is_ca: bool = False
 
@@ -211,50 +273,556 @@ def _build_certificate_search_text(details: Dict[str, Any], filename: str) -> st
     return "\n".join(values).lower()
 
 
+def _ensure_utc_datetime(value: Any) -> datetime:
+    """Convert an ISO/datetime cache value to a timezone-aware datetime."""
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str) and value:
+        dt = datetime.fromisoformat(value)
+    else:
+        raise ValueError("missing datetime value")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _certificate_details_to_json(details: Dict[str, Any]) -> str:
+    """Serialize parse_certificate_details() output for the local UI cache."""
+    def default(value: Any) -> str:
+        if isinstance(value, datetime):
+            return value.isoformat()
+        return str(value)
+
+    return json.dumps(
+        details,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        default=default,
+    )
+
+
+def _certificate_details_from_json(payload: str) -> Dict[str, Any]:
+    """Restore cached details, including the two certificate validity dates."""
+    details = json.loads(payload)
+    for key in ("not_valid_before", "not_valid_after"):
+        value = details.get(key)
+        if isinstance(value, str) and value:
+            try:
+                details[key] = datetime.fromisoformat(value)
+            except ValueError:
+                pass
+    return details
+
+
+def _certificate_cache_path(cert_dir: str) -> str:
+    """Return the per-user SQLite cache path for a certificate directory.
+
+    No migration from the former ``<cert_dir>/.cert_cache.sqlite3`` location is
+    attempted: an old file there is simply ignored.
+    """
+    canonical_cert_dir = os.path.realpath(
+        os.path.abspath(os.path.expanduser(str(cert_dir)))
+    )
+    path_hash = hashlib.sha256(
+        canonical_cert_dir.encode("utf-8", errors="surrogateescape")
+    ).hexdigest()
+
+    data_home = os.environ.get("XDG_DATA_HOME")
+    if not data_home:
+        data_home = os.path.join(os.path.expanduser("~"), ".local", "share")
+    else:
+        data_home = os.path.abspath(os.path.expanduser(data_home))
+
+    cache_dir = os.path.join(data_home, CERT_CACHE_APP_DIR, CERT_CACHE_SUBDIR)
+    os.makedirs(cache_dir, mode=0o700, exist_ok=True)
+    return os.path.join(cache_dir, path_hash + ".sqlite3")
+
+
+def _open_certificate_cache(cert_dir: str) -> sqlite3.Connection:
+    """Open/create the SQLite cache in the current user's local profile."""
+    conn = sqlite3.connect(_certificate_cache_path(cert_dir), timeout=5.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """
+    )
+
+    metadata = {
+        str(row["key"]): str(row["value"])
+        for row in conn.execute("SELECT key, value FROM metadata")
+    }
+    expected_schema = str(CERT_CACHE_SCHEMA_VERSION)
+    expected_parser = str(CERT_CACHE_PARSER_VERSION)
+
+    if metadata.get("schema_version") != expected_schema:
+        # Schema changes are handled by rebuilding the local cache. No migration
+        # of existing cache contents is attempted.
+        conn.execute("DROP TABLE IF EXISTS certificate_search")
+        conn.execute("DROP TABLE IF EXISTS certificates")
+        conn.execute("DELETE FROM metadata")
+        conn.execute(
+            "INSERT INTO metadata(key, value) VALUES(?, ?)",
+            ("schema_version", expected_schema),
+        )
+        conn.execute(
+            "INSERT INTO metadata(key, value) VALUES(?, ?)",
+            ("parser_version", expected_parser),
+        )
+    elif metadata.get("parser_version") != expected_parser:
+        # Files are immutable, but the parser/index can evolve between releases.
+        # Rebuild both the certificate cache and its FTS index; no migration.
+        conn.execute("DROP TABLE IF EXISTS certificate_search")
+        conn.execute("DROP TABLE IF EXISTS certificates")
+        conn.execute(
+            "INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)",
+            ("parser_version", expected_parser),
+        )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS certificates (
+            relative_path TEXT PRIMARY KEY,
+            filename TEXT NOT NULL,
+            serial_hex TEXT,
+            subject TEXT,
+            not_before TEXT,
+            not_after TEXT,
+            sig_algo TEXT,
+            pubkey_type TEXT,
+            pubkey_bits INTEGER,
+            sha256 TEXT,
+            is_ca INTEGER NOT NULL DEFAULT 0,
+            search_text TEXT NOT NULL DEFAULT '',
+            details_json TEXT,
+            parse_error TEXT
+        )
+        """
+    )
+
+    # Fast arbitrary-substring search. The trigram tokenizer indexes every
+    # 3-character sequence in search_text, which preserves the current
+    # "contains" search semantics without scanning every certificate row.
+    # If the local SQLite build lacks FTS5/trigram, opening the cache fails and
+    # the existing direct-parsing fallback keeps the TUI functional.
+    conn.execute(
+        """
+        CREATE VIRTUAL TABLE IF NOT EXISTS certificate_search USING fts5(
+            relative_path UNINDEXED,
+            search_text,
+            tokenize='trigram'
+        )
+        """
+    )
+
+    # Small, persistent B-tree indexes for filtering and sorting. search_text is
+    # indexed separately by the FTS5 trigram table above.
+    for statement in (
+        "CREATE INDEX IF NOT EXISTS idx_cert_not_before ON certificates(not_before)",
+        "CREATE INDEX IF NOT EXISTS idx_cert_not_after ON certificates(not_after)",
+        "CREATE INDEX IF NOT EXISTS idx_cert_subject ON certificates(subject COLLATE NOCASE)",
+        "CREATE INDEX IF NOT EXISTS idx_cert_filename ON certificates(filename COLLATE NOCASE)",
+        "CREATE INDEX IF NOT EXISTS idx_cert_signature ON certificates(sig_algo COLLATE NOCASE)",
+        "CREATE INDEX IF NOT EXISTS idx_cert_public_key ON certificates(pubkey_type COLLATE NOCASE, pubkey_bits)",
+        "CREATE INDEX IF NOT EXISTS idx_cert_sha256 ON certificates(sha256 COLLATE NOCASE)",
+        "CREATE INDEX IF NOT EXISTS idx_cert_is_ca ON certificates(is_ca)",
+    ):
+        conn.execute(statement)
+
+    conn.commit()
+    return conn
+
+
+def _cache_record_from_certificate(cert_dir: str, path: str) -> Dict[str, Any]:
+    """Parse one new immutable certificate and build its persistent cache row."""
+    cert = load_certificate_file(path)
+    details = parse_certificate_details(cert)
+    filename = os.path.basename(path)
+    not_before = _ensure_utc_datetime(details.get("not_valid_before"))
+    not_after = _ensure_utc_datetime(details.get("not_valid_after"))
+    sig = details.get("signature") or {}
+    public_key = details.get("public_key") or {}
+
+    return {
+        "relative_path": os.path.relpath(path, cert_dir),
+        "filename": filename,
+        "serial_hex": str(details.get("serial_hex") or format(cert.serial_number, "x")),
+        "subject": str(details.get("subject") or ""),
+        "not_before": not_before.isoformat(),
+        "not_after": not_after.isoformat(),
+        "sig_algo": str(sig.get("hash") or sig.get("display") or "unknown"),
+        "pubkey_type": str(public_key.get("type") or "unknown"),
+        "pubkey_bits": public_key.get("bits"),
+        "sha256": str((details.get("fingerprints") or {}).get("sha256") or ""),
+        "is_ca": 1 if bool((details.get("basic_constraints") or {}).get("is_ca")) else 0,
+        "search_text": _build_certificate_search_text(details, filename),
+        "details_json": _certificate_details_to_json(details),
+        "parse_error": None,
+    }
+
+
+def _cache_error_record(cert_dir: str, path: str, exc: Exception) -> Dict[str, Any]:
+    filename = os.path.basename(path)
+    return {
+        "relative_path": os.path.relpath(path, cert_dir),
+        "filename": filename,
+        "serial_hex": "(error)",
+        "subject": "Error: %s" % exc,
+        "not_before": "",
+        "not_after": "",
+        "sig_algo": "-",
+        "pubkey_type": "-",
+        "pubkey_bits": None,
+        "sha256": "-",
+        "is_ca": 0,
+        "search_text": (filename + "\n" + str(exc)).lower(),
+        "details_json": None,
+        "parse_error": str(exc),
+    }
+
+
+def _sync_certificate_cache(
+    cert_dir: str,
+    progress: Optional[Callable[[int, int, int], None]] = None,
+) -> Dict[str, int]:
+    """Sync the per-CA cache without re-reading an already cached file.
+
+    Certificate files are immutable by design. Therefore:
+      * new path     -> parse once and INSERT;
+      * cached path  -> keep the SQLite row untouched;
+      * missing path -> DELETE from SQLite.
+
+    ``progress(done, new_total, certificate_total)`` is called while new
+    certificates are parsed. It is intentionally optional so CLI/non-TUI code
+    can keep using the cache without any UI dependency.
+
+    Filtering, searching and sorting are deliberately handled by
+    _query_certificate_cache() after synchronization.
+    """
+    paths = scan_cert_paths(cert_dir)
+    path_map = {os.path.relpath(path, cert_dir): path for path in paths}
+    current_keys = set(path_map)
+
+    conn = _open_certificate_cache(cert_dir)
+    try:
+        cached_keys = {
+            str(row["relative_path"])
+            for row in conn.execute("SELECT relative_path FROM certificates")
+        }
+
+        removed = cached_keys - current_keys
+        if removed:
+            conn.executemany(
+                "DELETE FROM certificate_search WHERE relative_path = ?",
+                ((key,) for key in removed),
+            )
+            conn.executemany(
+                "DELETE FROM certificates WHERE relative_path = ?",
+                ((key,) for key in removed),
+            )
+            # Keep the normal table and FTS index transactionally consistent.
+            conn.commit()
+
+        new_keys = sorted(current_keys - cached_keys)
+        new_total = len(new_keys)
+        certificate_total = len(current_keys)
+        if progress is not None:
+            # The UI keeps the certificate grid empty until synchronization is
+            # complete, but it can already show an accurate progress counter.
+            progress(0, new_total, certificate_total)
+
+        # Existing keys are deliberately not stat'ed, hashed, opened or parsed.
+        for index, key in enumerate(new_keys, start=1):
+            path = path_map[key]
+            try:
+                record = _cache_record_from_certificate(cert_dir, path)
+            except Exception as exc:
+                record = _cache_error_record(cert_dir, path, exc)
+
+            conn.execute(
+                """
+                INSERT INTO certificates (
+                    relative_path, filename, serial_hex, subject,
+                    not_before, not_after, sig_algo, pubkey_type, pubkey_bits,
+                    sha256, is_ca, search_text, details_json, parse_error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record["relative_path"], record["filename"],
+                    record["serial_hex"], record["subject"],
+                    record["not_before"], record["not_after"],
+                    record["sig_algo"], record["pubkey_type"],
+                    record["pubkey_bits"], record["sha256"],
+                    record["is_ca"], record["search_text"],
+                    record["details_json"], record["parse_error"],
+                ),
+            )
+
+            conn.execute(
+                "INSERT INTO certificate_search(relative_path, search_text) VALUES (?, ?)",
+                (record["relative_path"], record["search_text"]),
+            )
+
+            # Keep commits batched for SQLite/FTS efficiency and restartability.
+            # Progress reporting is intentionally independent from commits: the
+            # DataTable stays empty until the complete synchronization finishes,
+            # so the status counter can advance after every processed certificate.
+            publish_batch = (
+                index == 1 or index == new_total or index % 25 == 0
+            )
+            if publish_batch:
+                conn.commit()
+
+            if progress is not None:
+                progress(index, new_total, certificate_total)
+
+        conn.commit()
+        return {
+            "total": certificate_total,
+            "added": new_total,
+            "removed": len(removed),
+        }
+    finally:
+        conn.close()
+
+
+def _certificate_cache_order_by(sort_column: str, descending: bool) -> str:
+    """Return a safe ORDER BY clause for immutable certificate metadata."""
+    direction = "DESC" if descending else "ASC"
+
+    if sort_column == "serial" or sort_column == "revoked":
+        # Certificate serial numbers may be wider than SQLite's signed 64-bit
+        # INTEGER. Numeric order for hexadecimal text is therefore obtained by
+        # normalized digit count first, then hexadecimal lexical order.
+        terms = (
+            "length(ltrim(lower(serial_hex), '0'))",
+            "ltrim(lower(serial_hex), '0')",
+        )
+    else:
+        terms = CERT_CACHE_SORT_COLUMNS.get(
+            sort_column, CERT_CACHE_SORT_COLUMNS["not_before"]
+        )
+
+    ordered = ["%s %s" % (term, direction) for term in terms]
+    # Deterministic final tie-breaker regardless of the selected sort.
+    ordered.append("relative_path COLLATE NOCASE ASC")
+    return " ORDER BY " + ", ".join(ordered)
+
+
+def _fts5_literal_query(value: str) -> str:
+    """Return an FTS5 phrase that searches *value* as literal text.
+
+    Quoting prevents punctuation found in SIDs, OIDs, DNS names, hashes, etc.
+    from being interpreted as FTS5 query syntax. Doubling embedded quotes is
+    FTS5's escaping rule inside a quoted phrase.
+    """
+    return '"' + value.replace('"', '""') + '"'
+
+
+def _query_certificate_cache(
+    cert_dir: str,
+    query: str = "",
+    status: str = "",
+    sort_column: str = "not_before",
+    descending: bool = False,
+) -> List[Dict[str, Any]]:
+    """Query lightweight certificate rows directly from SQLite.
+
+    Search, status filtering and all immutable-certificate sorts are performed
+    by SQLite. No LIMIT is applied here: the caller receives the complete
+    matching set. Revocation is intentionally absent from the database and is
+    merged from the current CRL by the TUI afterwards.
+    """
+    where: List[str] = []
+    params: List[Any] = []
+
+    q = (query or "").strip().lower()
+    if q:
+        if len(q) >= 3:
+            # FTS5 trigram supports indexed arbitrary-substring matching for
+            # strings of at least three characters. Use a subquery so the main
+            # SELECT and its existing ORDER BY remain unchanged.
+            where.append(
+                "relative_path IN ("
+                "SELECT relative_path FROM certificate_search "
+                "WHERE search_text MATCH ?"
+                ")"
+            )
+            params.append(_fts5_literal_query(q))
+        else:
+            # Trigrams cannot index 1-2 character searches; preserve the old
+            # exact substring semantics for these tiny queries.
+            where.append("instr(search_text, ?) > 0")
+            params.append(q)
+
+    # Preserve the existing UI buckets based on integer days_to_expiry:
+    #   expired  -> 0 days (including less than 24h remaining)
+    #   expiring -> 1..30 days
+    #   valid    -> >30 days
+    now = datetime.now(timezone.utc)
+    cutoff_1d = (now + timedelta(days=1)).isoformat()
+    cutoff_31d = (now + timedelta(days=31)).isoformat()
+    if status == "expired":
+        where.append("not_after < ?")
+        params.append(cutoff_1d)
+    elif status == "expiring":
+        where.append("not_after >= ? AND not_after < ?")
+        params.extend((cutoff_1d, cutoff_31d))
+    elif status == "valid":
+        where.append("not_after >= ?")
+        params.append(cutoff_31d)
+
+    sql = """
+        SELECT relative_path, filename, serial_hex, subject,
+               not_before, not_after, sig_algo, pubkey_type, pubkey_bits,
+               sha256, is_ca, parse_error
+          FROM certificates
+    """
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += _certificate_cache_order_by(sort_column, descending)
+
+    conn = sqlite3.connect(_certificate_cache_path(cert_dir), timeout=5.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 5000")
+    try:
+        return [dict(row) for row in conn.execute(sql, params)]
+    finally:
+        conn.close()
+
+
+def _cert_row_serial_int(row: CertRow) -> int:
+    """Return an integer certificate serial, keeping malformed rows sortable."""
+    try:
+        return int(row.serial_nox, 16)
+    except (TypeError, ValueError):
+        try:
+            return int(row.serial_nox, 10)
+        except (TypeError, ValueError):
+            return -1
+
+
+def _sort_certificate_rows_in_memory(
+    rows: List[CertRow],
+    sort_column: str,
+    descending: bool,
+) -> List[CertRow]:
+    """Fallback sorter used only when the SQLite cache is unavailable.
+
+    Revoked is always an in-memory sort because that state comes from the CRL
+    and is intentionally never persisted in the certificate cache.
+    """
+    if sort_column == "serial":
+        key = lambda row: _cert_row_serial_int(row)
+    elif sort_column == "subject":
+        key = lambda row: row.subject.casefold()
+    elif sort_column == "not_after" or sort_column == "days":
+        key = lambda row: row.not_after
+    elif sort_column == "filename":
+        key = lambda row: row.filename.casefold()
+    elif sort_column == "signature":
+        key = lambda row: row.sig_algo.casefold()
+    elif sort_column == "public_key":
+        key = lambda row: (row.pubkey_type.casefold(), row.pubkey_bits or -1)
+    elif sort_column == "sha256":
+        key = lambda row: row.sha256_fingerprint.casefold()
+    elif sort_column == "is_ca":
+        key = lambda row: row.is_ca
+    elif sort_column == "revoked":
+        # Ascending intentionally presents revoked certificates first; serial
+        # number is the deterministic second key requested by the UI.
+        key = lambda row: (0 if row.revoked else 1, _cert_row_serial_int(row))
+    else:
+        key = lambda row: row.not_before
+
+    return sorted(rows, key=key, reverse=descending)
+
+def _cached_certificate_details(cert_dir: str, cache_key: str) -> Dict[str, Any]:
+    """Read parsed details from SQLite; cached files are not reopened."""
+    # load_certs() already synchronized/versioned the database. Detail browsing
+    # stays read-only and avoids schema work on every cursor movement.
+    conn = sqlite3.connect(_certificate_cache_path(cert_dir), timeout=5.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 5000")
+    try:
+        row = conn.execute(
+            "SELECT details_json, parse_error FROM certificates WHERE relative_path = ?",
+            (cache_key,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(cache_key)
+        if row["parse_error"]:
+            raise ValueError(str(row["parse_error"]))
+        if not row["details_json"]:
+            raise ValueError("cached certificate details are missing")
+        return _certificate_details_from_json(str(row["details_json"]))
+    finally:
+        conn.close()
+
+
+def _row_from_cache_record(record: Dict[str, Any]) -> CertRow:
+    """Create a live UI row from lightweight SQLite fields."""
+    now = datetime.now(timezone.utc)
+    parse_error = record.get("parse_error")
+
+    if parse_error:
+        not_before = now
+        not_after = now
+        filename = str(record.get("filename") or "") + " (ERROR)"
+    else:
+        not_before = _ensure_utc_datetime(record.get("not_before"))
+        not_after = _ensure_utc_datetime(record.get("not_after"))
+        filename = str(record.get("filename") or "")
+
+    return CertRow(
+        filename=filename,
+        serial_nox=str(record.get("serial_hex") or ""),
+        subject=str(record.get("subject") or ""),
+        not_before=not_before,
+        not_after=not_after,
+        days_to_expiry=max(0, (not_after - now).days),
+        sig_algo=str(record.get("sig_algo") or "-"),
+        pubkey_type=str(record.get("pubkey_type") or "-"),
+        pubkey_bits=record.get("pubkey_bits"),
+        sha256_fingerprint=str(record.get("sha256") or "-"),
+        # Cached rows do not carry the full search index in memory; searches
+        # are executed directly against SQLite.
+        search_text="",
+        cache_key=str(record.get("relative_path") or ""),
+        revoked=False,
+        is_ca=bool(record.get("is_ca")),
+    )
+
+
 def row_from_cert(path: str) -> CertRow:
-    """Build a table row and reusable search index from a certificate file."""
-    cert = load_certificate_file(path)  # utils
+    """Fallback path used only when the SQLite cache cannot be used."""
+    cert = load_certificate_file(path)
     details = parse_certificate_details(cert)
     now = datetime.now(timezone.utc)
 
-    subject = str(details.get("subject") or "")
-    serial_nox = str(details.get("serial_hex") or format(cert.serial_number, "x"))
-
-    not_before = details.get("not_valid_before")
-    if not isinstance(not_before, datetime):
-        not_before = cert.not_valid_before
-    if not_before.tzinfo is None:
-        not_before = not_before.replace(tzinfo=timezone.utc)
-
-    not_after = details.get("not_valid_after")
-    if not isinstance(not_after, datetime):
-        not_after = cert.not_valid_after
-    if not_after.tzinfo is None:
-        not_after = not_after.replace(tzinfo=timezone.utc)
-
-    days_to_expiry = max(0, (not_after - now).days)
+    not_before = _ensure_utc_datetime(details.get("not_valid_before"))
+    not_after = _ensure_utc_datetime(details.get("not_valid_after"))
     sig = details.get("signature") or {}
-    sig_algo = str(sig.get("hash") or sig.get("display") or "unknown")
     pk = details.get("public_key") or {}
-    pk_type = str(pk.get("type") or "unknown")
-    pk_bits = pk.get("bits")
-    fp = str((details.get("fingerprints") or {}).get("sha256") or "")
-    is_ca = bool((details.get("basic_constraints") or {}).get("is_ca"))
     filename = os.path.basename(path)
 
     return CertRow(
         filename=filename,
-        serial_nox=serial_nox,
-        subject=subject,
+        serial_nox=str(details.get("serial_hex") or format(cert.serial_number, "x")),
+        subject=str(details.get("subject") or ""),
         not_before=not_before,
         not_after=not_after,
-        days_to_expiry=days_to_expiry,
-        sig_algo=sig_algo,
-        pubkey_type=pk_type,
-        pubkey_bits=pk_bits,
-        sha256_fingerprint=fp,
+        days_to_expiry=max(0, (not_after - now).days),
+        sig_algo=str(sig.get("hash") or sig.get("display") or "unknown"),
+        pubkey_type=str(pk.get("type") or "unknown"),
+        pubkey_bits=pk.get("bits"),
+        sha256_fingerprint=str((details.get("fingerprints") or {}).get("sha256") or ""),
         search_text=_build_certificate_search_text(details, filename),
-        is_ca=is_ca,
+        is_ca=bool((details.get("basic_constraints") or {}).get("is_ca")),
     )
 
 
@@ -1170,13 +1738,31 @@ class ADCSApp(App):
     cert_rows: List[CertRow] = []
     revoked_serials: Set[int] = set()
 
+    # SQLite-backed view state. The query result is cached until search/status,
+    # sort, CA contents or CRL state changes, so cursor movement and selection
+    # never re-run the database query.
+    _cache_available: bool = False
+    _filtered_rows_cache_key: Optional[tuple] = None
+    _filtered_rows_cache: List[CertRow] = []
+    _visible_rows: List[CertRow] = []
+    _sort_column: str = "not_before"
+    _sort_descending: bool = False
+
+    # Generation counter for asynchronous certificate-cache loads. A result from
+    # an older CA/load is ignored if the user switches CA while a worker runs.
+    _certificate_load_generation: int = 0
+    _certificate_load_in_progress: bool = False
+
     compact_mode: reactive[bool] = reactive(False)
     details_side_by_side: reactive[bool] = reactive(False)
     _table_density: str = "full"
 
     filter_q: reactive[str] = reactive("")
     filter_status: reactive[str] = reactive("")
+    filter_revocation: reactive[str] = reactive("")
 
+    # Maximum number of rows materialized in the DataTable. 0 means unlimited.
+    # The value can be changed at runtime from the filters pane.
     max_rows: reactive[int] = reactive(MAX_ROWS_DEFAULT)
 
     # Keep-focus support: filename to reselect after refresh
@@ -1197,7 +1783,7 @@ class ADCSApp(App):
                 yield Label("Certification Authority", id="lbl_ca")
                 yield _mc_select(options=[], id="sel_ca")
                 with Container(id="filters"):
-                    yield Label("Search & Status", id="lbl_filters")
+                    yield Label("Search, Status & Limit", id="lbl_filters")
                     yield Input(placeholder="Search… (/)", id="inp_q")
                     yield _mc_select(
                         options=[
@@ -1208,6 +1794,21 @@ class ADCSApp(App):
                         ],
                         id="sel_status",
                         value="",
+                    )
+                    yield _mc_select(
+                        options=[
+                            ("(Revocation: any)", ""),
+                            ("Revoked", "revoked"),
+                            ("Not revoked", "not_revoked"),
+                        ],
+                        id="sel_revocation",
+                        value="",
+                    )
+                    yield Label("Max rows (0 = all)", id="lbl_max_rows")
+                    yield Input(
+                        value=str(MAX_ROWS_DEFAULT),
+                        placeholder="Max rows (0 = all)",
+                        id="inp_max_rows",
                     )
                 with Container(id="actions"):
                     yield Label("Actions", id="lbl_actions")
@@ -1350,10 +1951,8 @@ class ADCSApp(App):
         self.show_detail(rows[row_idx])
 
     def current_rows(self) -> List[CertRow]:
-        all_rows = self.filtered_rows()
-        if self.max_rows <= 0:
-            return all_rows
-        return all_rows[: self.max_rows]
+        """Return rows already materialized in the DataTable view."""
+        return self._visible_rows
 
     def _get_target_rows(self) -> List[CertRow]:
         if self.selected_filenames:
@@ -1379,6 +1978,9 @@ class ADCSApp(App):
         sel_ca = self.query_one("#sel_ca")
         inp_q = self.query_one("#inp_q", Input)
         sel_status = self.query_one("#sel_status")
+        sel_revocation = self.query_one("#sel_revocation")
+        lbl_max_rows = self.query_one("#lbl_max_rows", Label)
+        inp_max_rows = self.query_one("#inp_max_rows", Input)
 
         try:
             main.styles.layout = "vertical" if self.compact_mode else "horizontal"
@@ -1428,6 +2030,13 @@ class ADCSApp(App):
             lbl_ca.display = "none" if self.compact_mode else "block"
             lbl_filters.display = "none" if self.compact_mode else "block"
             sel_status.display = "none" if self.compact_mode else "block"
+            sel_revocation.display = "none" if self.compact_mode else "block"
+            # Max rows visibility depends on whether the current result set is
+            # actually truncated. refresh_table() updates these two widgets once
+            # it knows the matching row count. Keep them hidden in compact mode.
+            if self.compact_mode:
+                lbl_max_rows.display = "none"
+                inp_max_rows.display = "none"
             actions.display = "none" if self.compact_mode else "block"
             filters.display = "block"
         except Exception:
@@ -1439,6 +2048,7 @@ class ADCSApp(App):
             filters.styles.height = 1 if self.compact_mode else "auto"
             sel_ca.styles.margin = 0 if self.compact_mode else (0, 0, 1, 0)
             inp_q.styles.margin = 0 if self.compact_mode else (0, 0, 1, 0)
+            inp_max_rows.styles.margin = 0 if self.compact_mode else (0, 0, 1, 0)
         except Exception:
             pass
 
@@ -1446,7 +2056,8 @@ class ADCSApp(App):
         self.refresh_table()
         ca_name = (self.current_ca.get('display_name') if self.current_ca else '-')
         prefix = "Compact mode — " if self.compact_mode else ""
-        self.query_one(Status).set_text(f"{prefix}{ca_name}")
+        if not self._certificate_load_in_progress:
+            self.query_one(Status).set_text(f"{prefix}{ca_name}")
 
     @staticmethod
     def _density_for_width(width: int, compact: bool, details_side_by_side: bool = False) -> str:
@@ -1518,8 +2129,14 @@ class ADCSApp(App):
         except Exception:
             pass
 
+        # Reflect the effective startup value (constant or ADCS_MAX_ROWS) in the UI.
         try:
-            self.confadcs = load_yaml_conf(args.confadcs)
+            self.query_one("#inp_max_rows", Input).value = str(self.max_rows)
+        except Exception:
+            pass
+
+        try:
+            self.confadcs = load_yaml_conf(args.confadcs,bypass_read_only=True)
         except Exception as e:
             self.notify(f"Unable to load adcs.yaml: {e}", severity="error")
             raise
@@ -1538,7 +2155,8 @@ class ADCSApp(App):
         table.cursor_type = "row"
         self.ensure_table_columns()
         self._auto_pick_layout()
-        self.query_one(Status).set_text("Ready. Press '?' for help.")
+        if not self._certificate_load_in_progress:
+            self.query_one(Status).set_text("Ready. Press '?' for help.")
 
     def on_resize(self, event) -> None:
         try:
@@ -1608,28 +2226,29 @@ class ADCSApp(App):
     def _resolve_storage_paths(self, ca: Dict[str, Any]) -> tuple[str, str]:
         return _resolve_storage_paths_from_ca(ca)
 
-    def load_certs(self) -> None:
-        ca = self.current_ca
-        if not ca:
-            return
-        certs_dir, _private_dir = self._resolve_storage_paths(ca)
-        paths = scan_cert_paths(certs_dir)  # utils
-        self.cert_rows = []
-        for p in paths:
+    def _invalidate_filtered_rows_cache(self) -> None:
+        self._filtered_rows_cache_key = None
+        self._filtered_rows_cache = []
+
+    def _load_direct_certificate_rows(
+        self,
+        certs_dir: str,
+        revoked_serials: Optional[Set[int]] = None,
+    ) -> List[CertRow]:
+        """Fallback loader used only when the per-CA SQLite cache is unavailable."""
+        revoked = self.revoked_serials if revoked_serials is None else revoked_serials
+        rows: List[CertRow] = []
+        for path in scan_cert_paths(certs_dir):  # utils
             try:
-                row = row_from_cert(p)
-                try:
-                    serial_int = int(row.serial_nox, 16)
-                except ValueError:
-                    serial_int = int(row.serial_nox, 10)
-                row.revoked = serial_int in self.revoked_serials
-                self.cert_rows.append(row)
-            except Exception as e:
+                row = row_from_cert(path)
+                row.revoked = _cert_row_serial_int(row) in revoked
+                rows.append(row)
+            except Exception as exc:
                 now = datetime.now(timezone.utc)
-                self.cert_rows.append(CertRow(
-                    filename=os.path.basename(p) + " (ERROR)",
+                rows.append(CertRow(
+                    filename=os.path.basename(path) + " (ERROR)",
                     serial_nox="(error)",
-                    subject=f"Error: {e}",
+                    subject=f"Error: {exc}",
                     not_before=now, not_after=now,
                     days_to_expiry=0, sig_algo="-",
                     pubkey_type="-", pubkey_bits=None,
@@ -1637,26 +2256,241 @@ class ADCSApp(App):
                     revoked=False,
                     is_ca=False,
                 ))
+        return rows
+
+    def _certificate_load_is_current(self, generation: int, ca_refid: Any) -> bool:
+        current_refid = self.current_ca.get("__refid") if self.current_ca else None
+        return (
+            generation == self._certificate_load_generation
+            and current_refid == ca_refid
+        )
+
+    def _update_certificate_load_progress(
+        self,
+        generation: int,
+        ca_refid: Any,
+        done: int,
+        new_total: int,
+        certificate_total: int,
+    ) -> None:
+        """Update only the loading status; keep the certificate grid empty."""
+        if not self._certificate_load_is_current(generation, ca_refid):
+            return
+
+        # Do not expose a partially synchronized SQLite cache to the DataTable.
+        # The table is populated once, by _finish_certificate_load(), after the
+        # worker has completely finished synchronizing the database.
+        if new_total > 0:
+            self.query_one(Status).set_text(
+                f"Loading SQLite cache: {done}/{new_total} new certificate(s) "
+                f"— {certificate_total} total"
+            )
+        else:
+            self.query_one(Status).set_text(
+                f"Checking SQLite cache — {certificate_total} certificate(s)"
+            )
+
+    def _finish_certificate_load(
+        self,
+        generation: int,
+        ca_refid: Any,
+        cache_available: bool,
+        direct_rows: List[CertRow],
+        cache_error: Optional[str],
+    ) -> None:
+        """Apply a worker result only if it still belongs to the selected CA."""
+        if not self._certificate_load_is_current(generation, ca_refid):
+            return
+
+        self._certificate_load_in_progress = False
+        self._cache_available = cache_available
+        self.cert_rows = direct_rows
+        self._invalidate_filtered_rows_cache()
+
+        if cache_error:
+            self.notify(
+                f"Certificate cache unavailable; direct parsing used: {cache_error}",
+                severity="warning",
+                timeout=6,
+            )
+
         self.refresh_table()
+
+    @work(thread=True, exclusive=True, group="certificate-cache-load")
+    def _load_certs_worker(
+        self,
+        generation: int,
+        ca_refid: Any,
+        certs_dir: str,
+        revoked_serials: Set[int],
+    ) -> None:
+        """Synchronize/parse certificates off the Textual UI thread."""
+        cache_available = False
+        direct_rows: List[CertRow] = []
+        cache_error: Optional[str] = None
+
+        def progress(done: int, new_total: int, certificate_total: int) -> None:
+            self.call_from_thread(
+                self._update_certificate_load_progress,
+                generation,
+                ca_refid,
+                done,
+                new_total,
+                certificate_total,
+            )
+
+        try:
+            # Synchronization only discovers additions/removals. Existing
+            # immutable certificates are never reopened. Rows are fetched by
+            # filtered_rows() through one central SQLite query.
+            _sync_certificate_cache(certs_dir, progress=progress)
+            cache_available = True
+        except Exception as cache_exc:
+            cache_error = str(cache_exc)
+            direct_rows = self._load_direct_certificate_rows(
+                certs_dir,
+                revoked_serials=revoked_serials,
+            )
+
+        self.call_from_thread(
+            self._finish_certificate_load,
+            generation,
+            ca_refid,
+            cache_available,
+            direct_rows,
+            cache_error,
+        )
+
+    def load_certs(self) -> None:
+        ca = self.current_ca
+        if not ca:
+            return
+
+        certs_dir, _private_dir = self._resolve_storage_paths(ca)
+        ca_refid = ca.get("__refid")
+
+        self.cert_rows = []
+        self._visible_rows = []
+        self._cache_available = False
+        self._invalidate_filtered_rows_cache()
+
+        # Keep the UI deliberately empty while SQLite is being synchronized.
+        # This also clears rows from a previously selected CA/reload instead of
+        # leaving stale certificates visible during the background operation.
+        table = self._table()
+        try:
+            table.clear()
+        except TypeError:
+            while getattr(table, "row_count", 0):
+                table.remove_row(0)
+
+        try:
+            detail = self.query_one("#detail")
+            if hasattr(detail, "clear"):
+                detail.clear()
+            else:
+                detail.update("")
+        except Exception:
+            pass
+
+        self._certificate_load_generation += 1
+        generation = self._certificate_load_generation
+        self._certificate_load_in_progress = True
+
+        # This is set before starting the worker so Textual can paint it while
+        # SQLite/cache parsing continues in the background.
+        self.query_one(Status).set_text(
+            "Loading certificates into SQLite cache…"
+        )
+
+        self._load_certs_worker(
+            generation,
+            ca_refid,
+            certs_dir,
+            set(self.revoked_serials),
+        )
 
     # ---------- Filters & view ----------
     def filtered_rows(self) -> List[CertRow]:
         q = self.filter_q.lower().strip()
         status = self.filter_status
-        rows = self.cert_rows
+        revocation = self.filter_revocation
+
+        if self._cache_available and self.current_ca:
+            certs_dir, _private_dir = self._resolve_storage_paths(self.current_ca)
+            cache_key = (
+                certs_dir, q, status, revocation,
+                self._sort_column, self._sort_descending
+            )
+            if self._filtered_rows_cache_key == cache_key:
+                return self._filtered_rows_cache
+
+            try:
+                records = _query_certificate_cache(
+                    certs_dir,
+                    query=q,
+                    status=status,
+                    sort_column=self._sort_column,
+                    descending=self._sort_descending,
+                )
+                rows: List[CertRow] = []
+                for record in records:
+                    row = _row_from_cache_record(record)
+                    if not record.get("parse_error"):
+                        row.revoked = (
+                            _cert_row_serial_int(row) in self.revoked_serials
+                        )
+                    rows.append(row)
+
+                # Revocation belongs only to the CRL, never SQLite. Apply this
+                # independent filter only after live CRL state is merged.
+                if revocation == "revoked":
+                    rows = [row for row in rows if row.revoked]
+                elif revocation == "not_revoked":
+                    rows = [row for row in rows if not row.revoked]
+
+                # For revocation sorting, group in Python and use serial as tie-break.
+                if self._sort_column == "revoked":
+                    rows = _sort_certificate_rows_in_memory(
+                        rows, "revoked", self._sort_descending
+                    )
+
+                self._filtered_rows_cache_key = cache_key
+                self._filtered_rows_cache = rows
+                return rows
+            except (OSError, sqlite3.Error) as cache_exc:
+                # If SQLite disappears after synchronization, keep the UI
+                # functional by falling back to direct parsing for this CA.
+                self._cache_available = False
+                self._invalidate_filtered_rows_cache()
+                self.notify(
+                    f"Certificate cache query failed; direct parsing used: {cache_exc}",
+                    severity="warning",
+                    timeout=6,
+                )
+                self.cert_rows = self._load_direct_certificate_rows(certs_dir)
+
+        rows = list(self.cert_rows)
 
         if q:
             rows = [r for r in rows if q in r.search_text]
 
         if status:
-            if status == 'expiring':
+            if status == "expiring":
                 rows = [r for r in rows if 0 < r.days_to_expiry <= 30]
-            elif status == 'valid':
+            elif status == "valid":
                 rows = [r for r in rows if r.days_to_expiry > 30]
-            elif status == 'expired':
+            elif status == "expired":
                 rows = [r for r in rows if r.days_to_expiry == 0]
 
-        return sorted(rows, key=lambda r: (r.not_before))
+        if revocation == "revoked":
+            rows = [r for r in rows if r.revoked]
+        elif revocation == "not_revoked":
+            rows = [r for r in rows if not r.revoked]
+
+        return _sort_certificate_rows_in_memory(
+            rows, self._sort_column, self._sort_descending
+        )
 
     @staticmethod
     def _mc_cell(value: object, marked: bool = False) -> object:
@@ -1678,19 +2512,44 @@ class ADCSApp(App):
         all_rows = self.filtered_rows()
         total = len(all_rows)
 
+        # Max rows stays visible whenever the user is using a non-default
+        # limit (including 0 = all). With the default value, only show the
+        # control when the matching result set actually exceeds that limit.
+        # Compact mode always keeps it hidden.
+        try:
+            show_max_rows = (
+                not self.compact_mode
+                and (
+                    self.max_rows != MAX_ROWS_DEFAULT
+                    or (self.max_rows > 0 and total > self.max_rows)
+                )
+            )
+            self.query_one("#lbl_max_rows", Label).display = (
+                "block" if show_max_rows else "none"
+            )
+            self.query_one("#inp_max_rows", Input).display = (
+                "block" if show_max_rows else "none"
+            )
+        except Exception:
+            pass
+
         # keep selection consistent (drop missing files)
         visible_set = {r.filename for r in all_rows}
         self.selected_filenames = {fn for fn in self.selected_filenames if fn in visible_set}
 
-        rows = self.current_rows()
+        if self.max_rows <= 0:
+            rows = all_rows
+        else:
+            rows = all_rows[: self.max_rows]
+        self._visible_rows = rows
 
+        table_width = self._table_view_width()
         for i, r in enumerate(rows, start=1):
             selected = (r.filename in self.selected_filenames)
             sel_mark = "[X]" if selected else "[ ]"
 
             subj = r.subject
             serial = r.serial_nox
-            table_width = self._table_view_width()
 
             if self._table_density == "tiny":
                 subject_limit = max(12, min(28, table_width - 30))
@@ -1789,7 +2648,13 @@ class ADCSApp(App):
         if total > len(rows):
             limit_note = f" (limited to {len(rows)}/{total})"
         sel_note = f" — selected: {len(self.selected_filenames)}"
-        self.query_one(Status).set_text(f"{prefix}{len(rows)}/{total} certificates{sel_note} — CA: {ca_name}{limit_note}")
+        sort_arrow = "↓" if self._sort_descending else "↑"
+        sort_note = f" — sort: {self._sort_column} {sort_arrow}"
+        if not self._certificate_load_in_progress:
+            self.query_one(Status).set_text(
+                f"{prefix}{len(rows)}/{total} certificates{sel_note}"
+                f" — CA: {ca_name}{sort_note}{limit_note}"
+            )
 
     # ---------- Actions ----------
     def action_help(self) -> None:
@@ -1797,6 +2662,9 @@ class ADCSApp(App):
         Keyboard shortcuts
         ------------------
         / : Quick search
+        Click a column header : Sort ascending / descending
+        Revocation filter : any / revoked / not revoked
+        Max rows : enter a limit in the left pane (0 = all), then press Enter
 
         Space : Toggle selection [ ]/[X] on current row
         Ctrl+A : Select all (filtered)
@@ -2118,11 +2986,36 @@ class ADCSApp(App):
             self.filter_status = event.value or ""
             self._request_reselect(cursor_fn)
             self.refresh_table()
+        elif event.select.id == "sel_revocation":
+            cursor_fn = self._remember_cursor_filename()
+            self.filter_revocation = event.value or ""
+            self._request_reselect(cursor_fn)
+            self.refresh_table()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "inp_q":
             cursor_fn = self._remember_cursor_filename()
             self.filter_q = event.value or ""
+            self._request_reselect(cursor_fn)
+            self.refresh_table()
+        elif event.input.id == "inp_max_rows":
+            cursor_fn = self._remember_cursor_filename()
+            raw_value = (event.value or "").strip()
+            try:
+                value = int(raw_value)
+                if value < 0:
+                    raise ValueError
+            except ValueError:
+                self.notify(
+                    "Max rows must be a non-negative integer (0 = all).",
+                    severity="warning",
+                    timeout=5,
+                )
+                event.input.value = str(self.max_rows)
+                return
+
+            self.max_rows = value
+            event.input.value = str(value)
             self._request_reselect(cursor_fn)
             self.refresh_table()
 
@@ -2139,6 +3032,25 @@ class ADCSApp(App):
             self.action_open_new_certificate()
         elif event.button.id == "btn_delete":
             self.action_delete_current()
+
+    def on_data_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
+        """Sort table data when a sortable column header is clicked."""
+        label_obj = getattr(event, "label", "")
+        label = getattr(label_obj, "plain", None) or str(label_obj)
+        sort_column = TABLE_HEADER_SORT_KEYS.get(label)
+        if not sort_column:
+            return
+
+        cursor_fn = self._remember_cursor_filename()
+        if sort_column == self._sort_column:
+            self._sort_descending = not self._sort_descending
+        else:
+            self._sort_column = sort_column
+            self._sort_descending = False
+
+        self._invalidate_filtered_rows_cache()
+        self._request_reselect(cursor_fn)
+        self.refresh_table()
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         try:
@@ -2189,11 +3101,12 @@ class ADCSApp(App):
         if not ca:
             return
         certs_dir, _private_dir = self._resolve_storage_paths(ca)
-        cert_path = None
-        for p in scan_cert_paths(certs_dir):  # utils
-            if os.path.basename(p) == r.filename.replace(" (ERROR)", ""):
-                cert_path = p
-                break
+        cert_path = os.path.join(certs_dir, r.cache_key) if r.cache_key else None
+        if not cert_path:
+            for p in scan_cert_paths(certs_dir):  # fallback without SQLite cache
+                if os.path.basename(p) == r.filename.replace(" (ERROR)", ""):
+                    cert_path = p
+                    break
         log = self.query_one("#detail")
         if hasattr(log, "clear"):
             try:
@@ -2210,8 +3123,17 @@ class ADCSApp(App):
                 log.update(msg)
             return
         try:
-            cert = load_certificate_file(cert_path)  # utils
-            details = parse_certificate_details(cert)
+            if r.cache_key:
+                try:
+                    details = _cached_certificate_details(certs_dir, r.cache_key)
+                except (KeyError, sqlite3.Error):
+                    # Cache disappeared/became unavailable after load: preserve
+                    # functionality by parsing this certificate directly.
+                    cert = load_certificate_file(cert_path)
+                    details = parse_certificate_details(cert)
+            else:
+                cert = load_certificate_file(cert_path)
+                details = parse_certificate_details(cert)
 
             serial_int = int(details["serial_number"])
             is_revoked = serial_int in self.revoked_serials
