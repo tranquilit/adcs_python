@@ -80,7 +80,7 @@ except Exception:
 TERMINAL_DEFAULT = "ansi_default"
 
 from cryptography import x509
-from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives import serialization
 
 # Your utilities
 from adcs_config import load_yaml_conf
@@ -90,7 +90,6 @@ from utils_crt import (
     resign_crl,
     issue_cert_with_new_key,
     load_certificate_file,
-    get_public_key_info,
     scan_cert_paths,
     revoked_serials_set,
     _cmd_rotate_if_expiring,
@@ -154,34 +153,97 @@ class CertRow:
     pubkey_type: str
     pubkey_bits: Optional[int]
     sha256_fingerprint: str
+    search_text: str = ""
     revoked: bool = False  # CRL status
     is_ca: bool = False
 
 
-def row_from_cert(path: str) -> CertRow:
-    """Build a table row from a certificate file path."""
-    cert = load_certificate_file(path)  # utils
-    now = datetime.now(timezone.utc)
-    subject = cert.subject.rfc4514_string()
-    serial_nox = format(cert.serial_number, "x")
-    not_before = cert.not_valid_before.replace(tzinfo=timezone.utc)
-    not_after = cert.not_valid_after.replace(tzinfo=timezone.utc)
-    days_to_expiry = max(0, (not_after - now).days)
-    try:
-        sig_algo = cert.signature_hash_algorithm.name  # type: ignore
-    except Exception:
-        sig_algo = "unknown"
-    pk_type, pk_bits = get_public_key_info(cert)  # utils
-    fp = cert.fingerprint(hashes.SHA256()).hex()
+def _build_certificate_search_text(details: Dict[str, Any], filename: str) -> str:
+    """Build a lower-case search index from certificate-only metadata.
 
-    try:
-        bc = cert.extensions.get_extension_for_class(x509.BasicConstraints).value
-        is_ca = bool(bc.ca)
-    except Exception:
-        is_ca = False
+    The index is computed once when the certificate row is loaded so filtering
+    remains a cheap substring lookup while typing/searching.
+    """
+    values: List[str] = []
+
+    def add(value: Any) -> None:
+        if value is None:
+            return
+        value_s = str(value).strip()
+        if value_s:
+            values.append(value_s)
+
+    add(filename)
+    add(details.get("subject"))
+    add(details.get("issuer"))
+    add(details.get("serial_hex"))
+    add(details.get("serial_number"))
+    add((details.get("fingerprints") or {}).get("sha256"))
+
+    microsoft = details.get("microsoft") or {}
+    template = microsoft.get("template") or {}
+    add(template.get("name"))
+    add(template.get("oid"))
+    add(microsoft.get("object_sid"))
+
+    for item in details.get("san") or []:
+        if isinstance(item, dict):
+            add(item.get("display"))
+            add(item.get("value"))
+            add(item.get("oid"))
+        else:
+            add(item)
+
+    for item in details.get("extended_key_usage") or []:
+        if isinstance(item, dict):
+            add(item.get("display"))
+            add(item.get("oid"))
+        else:
+            add(item)
+
+    for item in microsoft.get("application_policies") or []:
+        if isinstance(item, dict):
+            add(item.get("display"))
+            add(item.get("oid"))
+        else:
+            add(item)
+
+    return "\n".join(values).lower()
+
+
+def row_from_cert(path: str) -> CertRow:
+    """Build a table row and reusable search index from a certificate file."""
+    cert = load_certificate_file(path)  # utils
+    details = parse_certificate_details(cert)
+    now = datetime.now(timezone.utc)
+
+    subject = str(details.get("subject") or "")
+    serial_nox = str(details.get("serial_hex") or format(cert.serial_number, "x"))
+
+    not_before = details.get("not_valid_before")
+    if not isinstance(not_before, datetime):
+        not_before = cert.not_valid_before
+    if not_before.tzinfo is None:
+        not_before = not_before.replace(tzinfo=timezone.utc)
+
+    not_after = details.get("not_valid_after")
+    if not isinstance(not_after, datetime):
+        not_after = cert.not_valid_after
+    if not_after.tzinfo is None:
+        not_after = not_after.replace(tzinfo=timezone.utc)
+
+    days_to_expiry = max(0, (not_after - now).days)
+    sig = details.get("signature") or {}
+    sig_algo = str(sig.get("hash") or sig.get("display") or "unknown")
+    pk = details.get("public_key") or {}
+    pk_type = str(pk.get("type") or "unknown")
+    pk_bits = pk.get("bits")
+    fp = str((details.get("fingerprints") or {}).get("sha256") or "")
+    is_ca = bool((details.get("basic_constraints") or {}).get("is_ca"))
+    filename = os.path.basename(path)
 
     return CertRow(
-        filename=os.path.basename(path),
+        filename=filename,
         serial_nox=serial_nox,
         subject=subject,
         not_before=not_before,
@@ -191,6 +253,7 @@ def row_from_cert(path: str) -> CertRow:
         pubkey_type=pk_type,
         pubkey_bits=pk_bits,
         sha256_fingerprint=fp,
+        search_text=_build_certificate_search_text(details, filename),
         is_ca=is_ca,
     )
 
@@ -1583,10 +1646,7 @@ class ADCSApp(App):
         rows = self.cert_rows
 
         if q:
-            rows = [r for r in rows if q in r.subject.lower()
-                    or q in r.serial_nox.lower()
-                    or q in r.sha256_fingerprint.lower()
-                    or q in r.filename.lower()]
+            rows = [r for r in rows if q in r.search_text]
 
         if status:
             if status == 'expiring':
