@@ -333,7 +333,7 @@ def _load_ca_key(ca: dict):
     )
 
 
-def load_yaml_conf(path="adcs.yaml"):
+def load_yaml_conf(path="adcs.yaml", bypass_read_only=False):
     """
     Load adcs.yaml, read global config and CAs, and record
     ONLY template declarations (callbacks) without building them.
@@ -459,7 +459,12 @@ def load_yaml_conf(path="adcs.yaml"):
         ca["__certificate_der"] = base64.b64decode(cert_b64)
 
         # CA private key: PEM (legacy) or HSM (new)
-        ca["__key_obj"] = _load_ca_key(ca)
+        try:
+            ca["__key_obj"] = _load_ca_key(ca)
+        except Exception:
+            if not bypass_read_only:
+                raise
+            ca["__key_obj"] = None
 
         ces_path = ca.get("urls", {}).get("ces_path")
         if not ces_path:
@@ -484,23 +489,27 @@ def load_yaml_conf(path="adcs.yaml"):
         if ca.get("default"):
             default_ca = ca
 
-        if ca.get('ket_cert_pem'):
-            ket_cert_path = ca.get('ket_cert_pem')
-            if not os.path.isfile(ket_cert_path):
-                raise ValueError(f"KET certificate file not found: {ket_cert_path}")
-            with open(ket_cert_path, "r", encoding="utf-8") as f:
-                ket_cert_pem = f.read()
-            cert_b64 = _pem_to_inner_b64(ket_cert_pem)
-            ca["__ket_certificate_pem"] = ket_cert_pem
-            ca["__ket_certificate_b64"] = cert_b64
+        try:
+            if ca.get('ket_cert_pem'):
+                ket_cert_path = ca.get('ket_cert_pem')
+                if not os.path.isfile(ket_cert_path):
+                    raise ValueError(f"KET certificate file not found: {ket_cert_path}")
+                with open(ket_cert_path, "r", encoding="utf-8") as f:
+                    ket_cert_pem = f.read()
+                cert_b64 = _pem_to_inner_b64(ket_cert_pem)
+                ca["__ket_certificate_pem"] = ket_cert_pem
+                ca["__ket_certificate_b64"] = cert_b64
 
-        if ca.get('ket_key_pem'):
-            ket_key_path = ca.get('ket_key_pem')
-            if not os.path.isfile(ket_key_path):
-                raise ValueError(f"KET private key file not found: {ket_key_path}")
-            with open(ket_key_path, "r", encoding="utf-8") as f:
-                ket_key_pem = f.read()
-            ca["__ket_key_pem"] = ket_key_pem
+            if ca.get('ket_key_pem'):
+                ket_key_path = ca.get('ket_key_pem')
+                if not os.path.isfile(ket_key_path):
+                    raise ValueError(f"KET private key file not found: {ket_key_path}")
+                with open(ket_key_path, "r", encoding="utf-8") as f:
+                    ket_key_pem = f.read()
+                ca["__ket_key_pem"] = ket_key_pem
+        except Exception:
+            if not bypass_read_only:
+                raise
     
     if conf["cas_list"]:
         conf["default_ca"] = default_ca or conf["cas_list"][0]
