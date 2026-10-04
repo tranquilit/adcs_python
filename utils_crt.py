@@ -1144,11 +1144,13 @@ def parse_certificate_file(
 
 
 def scan_cert_paths(cert_dir: str) -> List[str]:
-    """Return a sorted list of certificate file paths in `cert_dir` (recursive)."""
-    files: List[str] = []
-    for ext in _CERT_EXTS:
-        files.extend(glob.glob(os.path.join(cert_dir, f"**/*{ext}"), recursive=True))
-    return sorted(set(files))
+    return [
+        os.path.join(root, name)
+        for root, _, files in os.walk(cert_dir)
+        for name in files
+        if os.path.splitext(name)[1].lower() in _CERT_EXTS
+    ]
+
 
 def revoked_serials_set(crl_path: Optional[str]) -> Set[int]:
     """Return the set of revoked serial numbers (as ints) from the CRL at `crl_path`."""
