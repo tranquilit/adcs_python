@@ -2848,7 +2848,7 @@ class ADCSApp(App):
         table = self._table()
         rows = self.current_rows()
         if not rows:
-            self.notify("No certificates to operate on.", severity="warning")
+            #self.notify("No certificates to operate on.", severity="warning")
             return None
         row_idx = getattr(table, "cursor_row", None)
         if row_idx is None or row_idx < 0 or row_idx >= len(rows):
