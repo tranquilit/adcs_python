@@ -544,7 +544,7 @@ def _sync_certificate_cache(
             # Keep the normal table and FTS index transactionally consistent.
             conn.commit()
 
-        new_keys = sorted(current_keys - cached_keys)
+        new_keys = current_keys - cached_keys
         new_total = len(new_keys)
         if progress is not None:
             # The UI keeps the certificate grid empty until synchronization is
