@@ -429,6 +429,7 @@ def _open_certificate_cache(cert_dir: str) -> sqlite3.Connection:
         "CREATE INDEX IF NOT EXISTS idx_cert_signature ON certificates(sig_algo COLLATE NOCASE)",
         "CREATE INDEX IF NOT EXISTS idx_cert_public_key ON certificates(pubkey_type COLLATE NOCASE, pubkey_bits)",
         "CREATE INDEX IF NOT EXISTS idx_cert_sha256 ON certificates(sha256 COLLATE NOCASE)",
+        "CREATE INDEX IF NOT EXISTS idx_cert_serial ON certificates(serial_hex COLLATE NOCASE)",
         "CREATE INDEX IF NOT EXISTS idx_cert_is_ca ON certificates(is_ca)",
     ):
         conn.execute(statement)
@@ -488,6 +489,7 @@ def _cache_error_record(cert_dir: str, path: str, exc: Exception) -> Dict[str, A
 def _sync_certificate_cache(
     cert_dir: str,
     progress: Optional[Callable[[int, int, int], None]] = None,
+    status: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, int]:
     """Sync the per-CA cache without re-reading an already cached file.
 
@@ -497,18 +499,33 @@ def _sync_certificate_cache(
       * missing path -> DELETE from SQLite.
 
     ``progress(done, new_total, certificate_total)`` is called while new
-    certificates are parsed. It is intentionally optional so CLI/non-TUI code
-    can keep using the cache without any UI dependency.
+    certificates are parsed. ``status(message)`` reports the coarse phases
+    before the per-certificate counter is available. Both callbacks are optional
+    so CLI/non-TUI code can keep using the cache without any UI dependency.
 
     Filtering, searching and sorting are deliberately handled by
     _query_certificate_cache() after synchronization.
     """
+    if status is not None:
+        status("Scanning certificate files...")
+
     paths = scan_cert_paths(cert_dir)
     path_map = {os.path.relpath(path, cert_dir): path for path in paths}
     current_keys = set(path_map)
+    certificate_total = len(current_keys)
+
+    if status is not None:
+        status(
+            f"Found {certificate_total} certificate file(s) — opening SQLite cache..."
+        )
 
     conn = _open_certificate_cache(cert_dir)
     try:
+        if status is not None:
+            status(
+                f"Checking SQLite cache — {certificate_total} certificate file(s) found"
+            )
+
         cached_keys = {
             str(row["relative_path"])
             for row in conn.execute("SELECT relative_path FROM certificates")
@@ -529,7 +546,6 @@ def _sync_certificate_cache(
 
         new_keys = sorted(current_keys - cached_keys)
         new_total = len(new_keys)
-        certificate_total = len(current_keys)
         if progress is not None:
             # The UI keeps the certificate grid empty until synchronization is
             # complete, but it can already show an accurate progress counter.
@@ -627,15 +643,19 @@ def _query_certificate_cache(
     cert_dir: str,
     query: str = "",
     status: str = "",
+    revocation: str = "",
+    revoked_serials: Optional[Set[int]] = None,
     sort_column: str = "not_before",
     descending: bool = False,
-) -> List[Dict[str, Any]]:
+    limit: int = 0,
+) -> tuple[List[Dict[str, Any]], int]:
     """Query lightweight certificate rows directly from SQLite.
 
-    Search, status filtering and all immutable-certificate sorts are performed
-    by SQLite. No LIMIT is applied here: the caller receives the complete
-    matching set. Revocation is intentionally absent from the database and is
-    merged from the current CRL by the TUI afterwards.
+    Search, status filtering and immutable-certificate sorts are performed by
+    SQLite. Revocation is never persisted in SQLite: when the UI explicitly
+    requests ``revoked`` or ``not_revoked``, current CRL serial numbers are
+    supplied only as query parameters. ``limit`` limits rows returned to the UI;
+    a separate COUNT keeps the full matching total available for the status bar.
     """
     where: List[str] = []
     params: List[Any] = []
@@ -643,9 +663,6 @@ def _query_certificate_cache(
     q = (query or "").strip().lower()
     if q:
         if len(q) >= 3:
-            # FTS5 trigram supports indexed arbitrary-substring matching for
-            # strings of at least three characters. Use a subquery so the main
-            # SELECT and its existing ORDER BY remain unchanged.
             where.append(
                 "relative_path IN ("
                 "SELECT relative_path FROM certificate_search "
@@ -654,15 +671,10 @@ def _query_certificate_cache(
             )
             params.append(_fts5_literal_query(q))
         else:
-            # Trigrams cannot index 1-2 character searches; preserve the old
-            # exact substring semantics for these tiny queries.
             where.append("instr(search_text, ?) > 0")
             params.append(q)
 
-    # Preserve the existing UI buckets based on integer days_to_expiry:
-    #   expired  -> 0 days (including less than 24h remaining)
-    #   expiring -> 1..30 days
-    #   valid    -> >30 days
+    # Preserve the existing UI buckets based on integer days_to_expiry.
     now = datetime.now(timezone.utc)
     cutoff_1d = (now + timedelta(days=1)).isoformat()
     cutoff_31d = (now + timedelta(days=31)).isoformat()
@@ -676,21 +688,50 @@ def _query_certificate_cache(
         where.append("not_after >= ?")
         params.append(cutoff_31d)
 
-    sql = """
+    # Revocation remains CRL-only. Only explicit revoked/not_revoked filters
+    # inject CRL serials into the transient SELECT; nothing is stored in SQLite.
+    crl_serials = sorted({
+        format(int(serial), "x").lower()
+        for serial in (revoked_serials or set())
+    })
+    if revocation == "revoked":
+        if crl_serials:
+            placeholders = ",".join("?" for _ in crl_serials)
+            where.append(f"serial_hex COLLATE NOCASE IN ({placeholders})")
+            params.extend(crl_serials)
+        else:
+            where.append("0")
+    elif revocation == "not_revoked" and crl_serials:
+        placeholders = ",".join("?" for _ in crl_serials)
+        where.append(f"serial_hex COLLATE NOCASE NOT IN ({placeholders})")
+        params.extend(crl_serials)
+
+    where_sql = ""
+    if where:
+        where_sql = " WHERE " + " AND ".join(where)
+
+    select_sql = """
         SELECT relative_path, filename, serial_hex, subject,
                not_before, not_after, sig_algo, pubkey_type, pubkey_bits,
                sha256, is_ca, parse_error
           FROM certificates
-    """
-    if where:
-        sql += " WHERE " + " AND ".join(where)
-    sql += _certificate_cache_order_by(sort_column, descending)
+    """ + where_sql
+    select_sql += _certificate_cache_order_by(sort_column, descending)
+
+    select_params = list(params)
+    if limit > 0:
+        select_sql += " LIMIT ?"
+        select_params.append(int(limit))
+
+    count_sql = "SELECT COUNT(*) FROM certificates" + where_sql
 
     conn = sqlite3.connect(_certificate_cache_path(cert_dir), timeout=5.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout = 5000")
     try:
-        return [dict(row) for row in conn.execute(sql, params)]
+        total = int(conn.execute(count_sql, params).fetchone()[0])
+        rows = [dict(row) for row in conn.execute(select_sql, select_params)]
+        return rows, total
     finally:
         conn.close()
 
@@ -1744,6 +1785,7 @@ class ADCSApp(App):
     _cache_available: bool = False
     _filtered_rows_cache_key: Optional[tuple] = None
     _filtered_rows_cache: List[CertRow] = []
+    _filtered_rows_total: int = 0
     _visible_rows: List[CertRow] = []
     _sort_column: str = "not_before"
     _sort_descending: bool = False
@@ -1956,7 +1998,7 @@ class ADCSApp(App):
 
     def _get_target_rows(self) -> List[CertRow]:
         if self.selected_filenames:
-            rows = self.filtered_rows()
+            rows = self.filtered_rows(apply_limit=False)
             targets = [r for r in rows if r.filename in self.selected_filenames]
             if targets:
                 return targets
@@ -2229,6 +2271,68 @@ class ADCSApp(App):
     def _invalidate_filtered_rows_cache(self) -> None:
         self._filtered_rows_cache_key = None
         self._filtered_rows_cache = []
+        self._filtered_rows_total = 0
+
+    def _apply_crl_state_without_certificate_reload(
+        self,
+        revoked_serials: Set[int],
+        cursor_filename: Optional[str],
+    ) -> None:
+        """Apply freshly-read CRL state to the current UI without reloading certs."""
+        self.revoked_serials = set(revoked_serials)
+
+        # Update every certificate row that is already materialized in memory.
+        # Do not rescan files and do not requery SQLite just to refresh CRL state.
+        seen: Set[int] = set()
+        for collection in (self._visible_rows, self._filtered_rows_cache, self.cert_rows):
+            for row in collection:
+                row_id = id(row)
+                if row_id in seen:
+                    continue
+                seen.add(row_id)
+                row.revoked = _cert_row_serial_int(row) in self.revoked_serials
+
+        # If an explicit revocation filter is active, rows changed by the action
+        # may no longer belong in the current view. Remove those rows locally; do
+        # not fetch replacement rows from SQLite until the next normal refresh.
+        removed_filenames: Set[str] = set()
+        if self.filter_revocation == "revoked":
+            kept = []
+            for row in self._visible_rows:
+                if row.revoked:
+                    kept.append(row)
+                else:
+                    removed_filenames.add(row.filename)
+            self._visible_rows = kept
+        elif self.filter_revocation == "not_revoked":
+            kept = []
+            for row in self._visible_rows:
+                if not row.revoked:
+                    kept.append(row)
+                else:
+                    removed_filenames.add(row.filename)
+            self._visible_rows = kept
+
+        if removed_filenames:
+            self._filtered_rows_total = max(
+                0, self._filtered_rows_total - len(removed_filenames)
+            )
+            self.selected_filenames.difference_update(removed_filenames)
+
+        # Revoked sorting is CRL-only. Re-sort the rows already on screen locally
+        # rather than issuing another database query.
+        if self._sort_column == "revoked":
+            self._visible_rows = _sort_certificate_rows_in_memory(
+                self._visible_rows, "revoked", self._sort_descending
+            )
+
+        # Any future normal refresh must query again because its cached rows were
+        # built with the previous CRL state. Keep the current total for this local
+        # repaint, however.
+        self._filtered_rows_cache_key = None
+        self._filtered_rows_cache = []
+        self._request_reselect(cursor_filename)
+        self.refresh_table(reuse_visible=True)
 
     def _load_direct_certificate_rows(
         self,
@@ -2264,6 +2368,17 @@ class ADCSApp(App):
             generation == self._certificate_load_generation
             and current_refid == ca_refid
         )
+
+    def _update_certificate_load_stage(
+        self,
+        generation: int,
+        ca_refid: Any,
+        message: str,
+    ) -> None:
+        """Show a coarse cache-loading phase before numeric progress is known."""
+        if not self._certificate_load_is_current(generation, ca_refid):
+            return
+        self.query_one(Status).set_text(message)
 
     def _update_certificate_load_progress(
         self,
@@ -2329,6 +2444,14 @@ class ADCSApp(App):
         direct_rows: List[CertRow] = []
         cache_error: Optional[str] = None
 
+        def stage(message: str) -> None:
+            self.call_from_thread(
+                self._update_certificate_load_stage,
+                generation,
+                ca_refid,
+                message,
+            )
+
         def progress(done: int, new_total: int, certificate_total: int) -> None:
             self.call_from_thread(
                 self._update_certificate_load_progress,
@@ -2343,7 +2466,11 @@ class ADCSApp(App):
             # Synchronization only discovers additions/removals. Existing
             # immutable certificates are never reopened. Rows are fetched by
             # filtered_rows() through one central SQLite query.
-            _sync_certificate_cache(certs_dir, progress=progress)
+            _sync_certificate_cache(
+                certs_dir,
+                progress=progress,
+                status=stage,
+            )
             cache_available = True
         except Exception as cache_exc:
             cache_error = str(cache_exc)
@@ -2400,7 +2527,7 @@ class ADCSApp(App):
         # This is set before starting the worker so Textual can paint it while
         # SQLite/cache parsing continues in the background.
         self.query_one(Status).set_text(
-            "Loading certificates into SQLite cache…"
+            "Preparing certificate cache..."
         )
 
         self._load_certs_worker(
@@ -2411,27 +2538,42 @@ class ADCSApp(App):
         )
 
     # ---------- Filters & view ----------
-    def filtered_rows(self) -> List[CertRow]:
+    def filtered_rows(self, apply_limit: bool = True) -> List[CertRow]:
         q = self.filter_q.lower().strip()
         status = self.filter_status
         revocation = self.filter_revocation
 
         if self._cache_available and self.current_ca:
             certs_dir, _private_dir = self._resolve_storage_paths(self.current_ca)
+
+            # Normal display queries are limited directly by SQLite. Sorting by
+            # Revoked without a revocation filter is the exception: Revoked is
+            # CRL-only, so preserve the existing global sort in Python.
+            query_limit = self.max_rows if (apply_limit and self.max_rows > 0) else 0
+            sort_revoked_in_python = (
+                self._sort_column == "revoked" and not revocation
+            )
+            if sort_revoked_in_python:
+                query_limit = 0
+
             cache_key = (
                 certs_dir, q, status, revocation,
-                self._sort_column, self._sort_descending
+                self._sort_column, self._sort_descending, query_limit,
+                apply_limit, self.max_rows if apply_limit else 0,
             )
             if self._filtered_rows_cache_key == cache_key:
                 return self._filtered_rows_cache
 
             try:
-                records = _query_certificate_cache(
+                records, total = _query_certificate_cache(
                     certs_dir,
                     query=q,
                     status=status,
+                    revocation=revocation,
+                    revoked_serials=self.revoked_serials,
                     sort_column=self._sort_column,
                     descending=self._sort_descending,
+                    limit=query_limit,
                 )
                 rows: List[CertRow] = []
                 for record in records:
@@ -2442,25 +2584,18 @@ class ADCSApp(App):
                         )
                     rows.append(row)
 
-                # Revocation belongs only to the CRL, never SQLite. Apply this
-                # independent filter only after live CRL state is merged.
-                if revocation == "revoked":
-                    rows = [row for row in rows if row.revoked]
-                elif revocation == "not_revoked":
-                    rows = [row for row in rows if not row.revoked]
-
-                # For revocation sorting, group in Python and use serial as tie-break.
-                if self._sort_column == "revoked":
+                if sort_revoked_in_python:
                     rows = _sort_certificate_rows_in_memory(
                         rows, "revoked", self._sort_descending
                     )
+                    if apply_limit and self.max_rows > 0:
+                        rows = rows[: self.max_rows]
 
+                self._filtered_rows_total = total
                 self._filtered_rows_cache_key = cache_key
                 self._filtered_rows_cache = rows
                 return rows
             except (OSError, sqlite3.Error) as cache_exc:
-                # If SQLite disappears after synchronization, keep the UI
-                # functional by falling back to direct parsing for this CA.
                 self._cache_available = False
                 self._invalidate_filtered_rows_cache()
                 self.notify(
@@ -2488,9 +2623,13 @@ class ADCSApp(App):
         elif revocation == "not_revoked":
             rows = [r for r in rows if not r.revoked]
 
-        return _sort_certificate_rows_in_memory(
+        rows = _sort_certificate_rows_in_memory(
             rows, self._sort_column, self._sort_descending
         )
+        self._filtered_rows_total = len(rows)
+        if apply_limit and self.max_rows > 0:
+            rows = rows[: self.max_rows]
+        return rows
 
     @staticmethod
     def _mc_cell(value: object, marked: bool = False) -> object:
@@ -2499,8 +2638,8 @@ class ADCSApp(App):
             return value
         return Text(str(value), style="bold")
 
-    def refresh_table(self) -> None:
-        """Rebuild the DataTable based on current (filtered/limited) rows, preserving focus."""
+    def refresh_table(self, reuse_visible: bool = False) -> None:
+        """Rebuild the DataTable, optionally reusing rows already in memory."""
         table = self._table()
         self.ensure_table_columns()
         try:
@@ -2509,8 +2648,13 @@ class ADCSApp(App):
             while getattr(table, "row_count", 0):
                 table.remove_row(0)
 
-        all_rows = self.filtered_rows()
-        total = len(all_rows)
+        if reuse_visible:
+            # Used after revoke/unrevoke: only repaint the rows whose CRL state
+            # was updated in memory. No filesystem scan and no SQLite query.
+            all_rows = list(self._visible_rows)
+        else:
+            all_rows = self.filtered_rows()
+        total = self._filtered_rows_total
 
         # Max rows stays visible whenever the user is using a non-default
         # limit (including 0 = all). With the default value, only show the
@@ -2533,9 +2677,14 @@ class ADCSApp(App):
         except Exception:
             pass
 
-        # keep selection consistent (drop missing files)
-        visible_set = {r.filename for r in all_rows}
-        self.selected_filenames = {fn for fn in self.selected_filenames if fn in visible_set}
+        # Keep hidden Ctrl+A selections when SQL returned only the visible slice.
+        # If the full filtered result fits in memory, stale selections can still
+        # be removed exactly as before.
+        if total <= len(all_rows):
+            visible_set = {r.filename for r in all_rows}
+            self.selected_filenames = {
+                fn for fn in self.selected_filenames if fn in visible_set
+            }
 
         if self.max_rows <= 0:
             rows = all_rows
@@ -2735,7 +2884,7 @@ class ADCSApp(App):
 
     def action_select_all_filtered(self) -> None:
         cursor_fn = self._remember_cursor_filename()
-        for r in self.filtered_rows():
+        for r in self.filtered_rows(apply_limit=False):
             self.selected_filenames.add(r.filename)
         # keep anchor as-is (or set to cursor)
         if not self._range_anchor_filename:
@@ -2771,8 +2920,8 @@ class ADCSApp(App):
             self.notify(f"Failed to load CA cert (DER): {e}", severity="error", timeout=6)
             return
 
-        ok, fail = 0, 0
         failed_serials: List[str] = []
+        operation_ok: List[CertRow] = []
 
         for r in targets:
             try:
@@ -2783,21 +2932,37 @@ class ADCSApp(App):
                     crl_path=crl_path,
                     next_update_hours=self.confadcs['next_update_hours_crl']
                 )
-                ok += 1
+                operation_ok.append(r)
             except Exception:
-                fail += 1
                 failed_serials.append(r.serial_nox)
 
+        # Reload only the CRL. A successful revoke is trusted by the UI only if
+        # the serial is actually present in the freshly-read CRL.
         try:
-            self.revoked_serials = revoked_serials_set(crl_path)
-        except Exception:
-            pass
+            refreshed_revoked = revoked_serials_set(crl_path)
+        except Exception as exc:
+            self.notify(
+                f"Revoke completed but CRL verification failed: {exc}",
+                severity="error",
+                timeout=8,
+            )
+            return
 
-        self._request_reselect(cursor_fn)
-        self.load_certs()
+        verified_ok: List[CertRow] = []
+        for r in operation_ok:
+            if _cert_row_serial_int(r) in refreshed_revoked:
+                verified_ok.append(r)
+            else:
+                failed_serials.append(r.serial_nox)
 
+        self._apply_crl_state_without_certificate_reload(
+            refreshed_revoked, cursor_fn
+        )
+
+        ok = len(verified_ok)
+        fail = len(failed_serials)
         if fail == 0:
-            self.notify(f"Revoked: {ok} certificate(s) — CRL updated: {crl_path}", severity="success", timeout=6)
+            self.notify(f"Revoked: {ok} certificate(s) — CRL verified: {crl_path}", severity="success", timeout=6)
         else:
             self.notify(
                 f"Revoke: ok={ok}, failed={fail} — failed serials: {', '.join(failed_serials[:10])}"
@@ -2833,8 +2998,8 @@ class ADCSApp(App):
             self.notify(f"Failed to load CA cert (DER): {e}", severity="error", timeout=6)
             return
 
-        ok, fail = 0, 0
         failed_serials: List[str] = []
+        operation_ok: List[CertRow] = []
 
         for r in targets:
             try:
@@ -2845,21 +3010,37 @@ class ADCSApp(App):
                     crl_path=crl_path,
                     next_update_hours=self.confadcs['next_update_hours_crl']
                 )
-                ok += 1
+                operation_ok.append(r)
             except Exception:
-                fail += 1
                 failed_serials.append(r.serial_nox)
 
+        # Reload only the CRL. A successful unrevoke is trusted by the UI only
+        # if the serial is absent from the freshly-read CRL.
         try:
-            self.revoked_serials = revoked_serials_set(crl_path)
-        except Exception:
-            pass
+            refreshed_revoked = revoked_serials_set(crl_path)
+        except Exception as exc:
+            self.notify(
+                f"Unrevoke completed but CRL verification failed: {exc}",
+                severity="error",
+                timeout=8,
+            )
+            return
 
-        self._request_reselect(cursor_fn)
-        self.load_certs()
+        verified_ok: List[CertRow] = []
+        for r in operation_ok:
+            if _cert_row_serial_int(r) not in refreshed_revoked:
+                verified_ok.append(r)
+            else:
+                failed_serials.append(r.serial_nox)
 
+        self._apply_crl_state_without_certificate_reload(
+            refreshed_revoked, cursor_fn
+        )
+
+        ok = len(verified_ok)
+        fail = len(failed_serials)
         if fail == 0:
-            self.notify(f"Unrevoked: {ok} certificate(s) — CRL updated: {crl_path}", severity="success", timeout=6)
+            self.notify(f"Unrevoked: {ok} certificate(s) — CRL verified: {crl_path}", severity="success", timeout=6)
         else:
             self.notify(
                 f"Unrevoke: ok={ok}, failed={fail} — failed serials: {', '.join(failed_serials[:10])}"
