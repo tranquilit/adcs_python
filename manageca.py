@@ -2334,9 +2334,23 @@ class ADCSApp(App):
             return COMPACT_COLUMNS
         return FULL_COLUMNS
 
-    def ensure_table_columns(self) -> None:
+    def _display_table_columns(self) -> List[str]:
+        """Return visible headers with the sort arrow on the active column."""
+        columns = list(self._expected_table_columns())
+        arrow = "↓" if self._sort_descending else "↑"
+        active_header = next(
+            (label for label, key in TABLE_HEADER_SORT_KEYS.items()
+             if key == self._sort_column),
+            None,
+        )
+        if active_header in columns:
+            columns[columns.index(active_header)] = f"{active_header} {arrow}"
+        return columns
+
+    def ensure_table_columns(self, force: bool = False) -> None:
         table = self._table()
         expected = self._expected_table_columns()
+        displayed = self._display_table_columns()
 
         current = 0
         if hasattr(table, "column_count"):
@@ -2349,7 +2363,7 @@ class ADCSApp(App):
             if ordered is not None:
                 current = len(ordered)
 
-        if current != len(expected):
+        if force or current != len(expected):
             try:
                 table.clear(columns=True)
             except Exception:
@@ -2358,9 +2372,9 @@ class ADCSApp(App):
                 except Exception:
                     pass
             try:
-                table.add_columns(*expected)
+                table.add_columns(*displayed)
             except Exception:
-                for col in expected:
+                for col in displayed:
                     try:
                         table.add_column(col)
                     except Exception:
@@ -3441,9 +3455,17 @@ class ADCSApp(App):
             self.action_delete_current()
 
     def on_data_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
-        """Sort table data when a sortable column header is clicked."""
+        """Sort table data and show the direction arrow in the active header."""
         label_obj = getattr(event, "label", "")
         label = getattr(label_obj, "plain", None) or str(label_obj)
+
+        # The active header itself contains the visual sort marker. Strip it
+        # before looking up the logical sort key so repeated clicks still toggle.
+        for suffix in (" ↑", " ↓"):
+            if label.endswith(suffix):
+                label = label[:-len(suffix)]
+                break
+
         sort_column = TABLE_HEADER_SORT_KEYS.get(label)
         if not sort_column:
             return
@@ -3457,6 +3479,10 @@ class ADCSApp(App):
 
         self._invalidate_filtered_rows_cache()
         self._request_reselect(cursor_fn)
+
+        # Recreate only the headers so the arrow moves immediately to the
+        # newly selected column / direction. refresh_table() repopulates rows.
+        self.ensure_table_columns(force=True)
         self.refresh_table()
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
