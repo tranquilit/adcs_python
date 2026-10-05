@@ -51,6 +51,8 @@ from samba.dcerpc import nbt
 from pyasn1.type import univ, namedtype, namedval, char, useful, constraint
 from pyasn1.codec.der.encoder import encode as der_encode
 
+#dns
+import dns.resolver
 
 # -----------------------------------------------------------------------------
 # Useful OIDs
@@ -1428,7 +1430,7 @@ BAD_LDAP_CHARS_RE = re.compile(r'[\x00()*\\]')
 _dc_cache = {}
 
 
-def get_dc_fqdn(realm: str,dc_cache_ttl_seconds = 300):
+def get_dc_fqdn(realm: str,dc_cache_ttl_seconds = 3600):
     """Return the DC FQDN, caching the lookup for 5 minutes per realm."""
     now = time.monotonic()
 
@@ -1447,11 +1449,27 @@ def get_dc_fqdn(realm: str,dc_cache_ttl_seconds = 300):
     creds.set_machine_account(lp)
 
     net = Net(creds=creds, lp=lp)
-    dc_info = net.finddc(domain=realm, flags=nbt.NBT_SERVER_LDAP)
-    dc_fqdn = str(dc_info.pdc_dns_name)
 
-    _dc_cache[realm] = (dc_fqdn, now + dc_cache_ttl_seconds)
-    return dc_fqdn
+    flags = nbt.NBT_SERVER_LDAP
+
+    initial = net.finddc(domain=realm, flags=flags)
+    site = str(initial.client_site)
+
+    query = f"_ldap._tcp.{site}._sites.dc._msdcs.{realm}"
+    records = dns.resolver.resolve(query, "SRV")
+    records = sorted(records, key=lambda r: r.priority)
+
+    for record in records:
+        dc = str(record.target).rstrip(".")
+        try:
+            info = net.finddc(address=dc, flags=flags)
+            _dc_cache[realm] = (str(info.pdc_dns_name), now + dc_cache_ttl_seconds)
+            return str(info.pdc_dns_name)
+        except Exception:
+            continue
+
+    _dc_cache[realm] = (str(initial.pdc_dns_name), now + dc_cache_ttl_seconds)
+    return str(initial.pdc_dns_name)
 
 def search_user(userauth: str,ldap_filter='',dc_fqdn=None,basedn=None,password=None,bind_user=None,dc_cache_ttl_seconds=300):
     """
