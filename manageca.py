@@ -1807,8 +1807,12 @@ class ADCSApp(App):
     # The value can be changed at runtime from the filters pane.
     max_rows: reactive[int] = reactive(MAX_ROWS_DEFAULT)
 
-    # Keep-focus support: filename to reselect after refresh
+    # Keep-focus support: filename to reselect after refresh. When a row
+    # disappears (revocation filter / deletion), also remember the previous
+    # viewport so the replacement row stays at roughly the same screen height
+    # instead of being auto-scrolled to the bottom of the DataTable.
     _pending_select_filename: Optional[str] = None
+    _pending_table_viewport: Optional[tuple[float, int]] = None
 
     # Multi-selection state
     selected_filenames: reactive[Set[str]] = reactive(set)
@@ -1882,8 +1886,122 @@ class ADCSApp(App):
         r = self._get_current_row()
         return r.filename if r else None
 
-    def _request_reselect(self, filename: Optional[str]) -> None:
+    def _remember_table_viewport(self) -> Optional[tuple[float, int]]:
+        """Return (scroll_y, cursor_row) for restoring the visual neighborhood."""
+        table = self._maybe_table()
+        if table is None:
+            return None
+        try:
+            scroll_y = float(getattr(table, "scroll_y", 0) or 0)
+        except Exception:
+            scroll_y = 0.0
+        try:
+            cursor_row = int(getattr(table, "cursor_row", 0) or 0)
+        except Exception:
+            cursor_row = 0
+        return (scroll_y, cursor_row)
+
+    def _request_reselect(
+        self,
+        filename: Optional[str],
+        viewport: Optional[tuple[float, int]] = None,
+    ) -> None:
         self._pending_select_filename = filename
+        # Normal refreshes intentionally clear any old pending viewport. Only
+        # callers that are replacing/removing a row opt in to scroll restoration.
+        self._pending_table_viewport = viewport
+
+    def _restore_table_viewport(
+        self,
+        viewport: Optional[tuple[float, int]],
+        target_idx: int,
+    ) -> None:
+        """Restore cursor's previous screen height after a table rebuild.
+
+        DataTable.move_cursor() scrolls just enough to reveal an off-screen row,
+        which tends to place it at the bottom. Compensate for any row-index shift
+        caused by removed rows so the new focused row stays where the old cursor
+        was visually.
+        """
+        if viewport is None:
+            return
+
+        old_scroll_y, old_cursor_row = viewport
+        desired_y = max(0.0, old_scroll_y + (target_idx - old_cursor_row))
+        table = self._maybe_table()
+        if table is None:
+            return
+
+        scroll_to = getattr(table, "scroll_to", None)
+        if callable(scroll_to):
+            try:
+                scroll_to(y=desired_y, animate=False, force=True)
+                return
+            except TypeError:
+                try:
+                    scroll_to(y=desired_y, animate=False)
+                    return
+                except TypeError:
+                    try:
+                        scroll_to(y=desired_y)
+                        return
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        # Last-resort compatibility path for older Textual versions.
+        try:
+            table.scroll_y = desired_y
+        except Exception:
+            pass
+
+    @staticmethod
+    def _nearest_surviving_filename(
+        visible_order_before: List[str],
+        cursor_filename: Optional[str],
+        surviving_filenames: Set[str],
+    ) -> Optional[str]:
+        """Return the closest surviving row to the previous cursor position.
+
+        Prefer the row below the removed cursor (it naturally slides into the same
+        visual position). If none survives below, use the nearest row above.
+        """
+        if not surviving_filenames:
+            return None
+
+        if cursor_filename and cursor_filename in surviving_filenames:
+            return cursor_filename
+
+        if not visible_order_before:
+            return None
+
+        try:
+            cursor_idx = visible_order_before.index(cursor_filename)
+        except (ValueError, TypeError):
+            # The old cursor is unknown; keep a deterministic visible survivor.
+            for filename in visible_order_before:
+                if filename in surviving_filenames:
+                    return filename
+            return None
+
+        # Search outward from the old cursor. At equal distance prefer below.
+        for distance in range(1, len(visible_order_before) + 1):
+            below = cursor_idx + distance
+            if below < len(visible_order_before):
+                filename = visible_order_before[below]
+                if filename in surviving_filenames:
+                    return filename
+
+            above = cursor_idx - distance
+            if above >= 0:
+                filename = visible_order_before[above]
+                if filename in surviving_filenames:
+                    return filename
+
+        return None
 
     # ---------- range selection helpers ----------
     def _ensure_range_anchor(self) -> Optional[str]:
@@ -2279,6 +2397,13 @@ class ADCSApp(App):
         cursor_filename: Optional[str],
     ) -> None:
         """Apply freshly-read CRL state to the current UI without reloading certs."""
+        # Snapshot the current visible layout and viewport before mutating CRL
+        # state. If a revocation filter removes the focused row, the replacement
+        # row can later be restored at the same screen height.
+        viewport_before = self._remember_table_viewport()
+        visible_order_before = [row.filename for row in self._visible_rows]
+        revoked_before = {row.filename: row.revoked for row in self._visible_rows}
+
         self.revoked_serials = set(revoked_serials)
 
         # Update every certificate row that is already materialized in memory.
@@ -2331,7 +2456,28 @@ class ADCSApp(App):
         # repaint, however.
         self._filtered_rows_cache_key = None
         self._filtered_rows_cache = []
-        self._request_reselect(cursor_filename)
+
+        # Fast path: if the visible rows are still exactly the same and in the same
+        # order, do not clear/rebuild the DataTable. Updating just the Revoked cell
+        # preserves focus, scroll position and terminal contents, eliminating the
+        # flash seen after revoke/unrevoke. If the Textual version does not support
+        # in-place cell updates, or a filter/sort changed the layout, fall back to
+        # the normal full repaint.
+        if self._refresh_revocation_cells_in_place(
+            visible_order_before, revoked_before
+        ):
+            self._pending_select_filename = None
+            self._show_detail_current_row()
+            return
+
+        # A revocation filter can make the current row disappear. Do not fall
+        # back to row 0: keep the same visual neighborhood by selecting the next
+        # surviving row, or the previous one when the cursor was at the bottom.
+        surviving_filenames = {row.filename for row in self._visible_rows}
+        focus_filename = self._nearest_surviving_filename(
+            visible_order_before, cursor_filename, surviving_filenames
+        )
+        self._request_reselect(focus_filename, viewport=viewport_before)
         self.refresh_table(reuse_visible=True)
 
     def _load_direct_certificate_rows(
@@ -2638,6 +2784,60 @@ class ADCSApp(App):
             return value
         return Text(str(value), style="bold")
 
+    def _refresh_revocation_cells_in_place(
+        self,
+        visible_order_before: List[str],
+        revoked_before: Dict[str, bool],
+    ) -> bool:
+        """Update only visible Revoked cells when the table layout is unchanged.
+
+        Returns True when no full table rebuild is needed. Returns False when row
+        membership/order changed or when the installed Textual doesn't expose the
+        coordinate-based cell update API.
+        """
+        rows = self._visible_rows
+        if [row.filename for row in rows] != visible_order_before:
+            return False
+
+        table = self._table()
+        update_cell_at = getattr(table, "update_cell_at", None)
+        if not callable(update_cell_at):
+            return False
+
+        try:
+            if int(getattr(table, "row_count", len(rows))) != len(rows):
+                return False
+        except Exception:
+            return False
+
+        try:
+            revoked_col = self._expected_table_columns().index("Revoked")
+            coordinate_type = type(table.cursor_coordinate)
+        except Exception:
+            return False
+
+        for row_idx, row in enumerate(rows):
+            previous = revoked_before.get(row.filename)
+            if previous is None or previous == row.revoked:
+                continue
+
+            selected = row.filename in self.selected_filenames
+            value = self._mc_cell("yes" if row.revoked else "no", selected)
+            coordinate = coordinate_type(row_idx, revoked_col)
+            try:
+                update_cell_at(coordinate, value, update_width=False)
+            except TypeError:
+                # Compatibility with older Textual releases where update_width
+                # may not be accepted by update_cell_at().
+                try:
+                    update_cell_at(coordinate, value)
+                except Exception:
+                    return False
+            except Exception:
+                return False
+
+        return True
+
     def refresh_table(self, reuse_visible: bool = False) -> None:
         """Rebuild the DataTable, optionally reusing rows already in memory."""
         table = self._table()
@@ -2762,6 +2962,10 @@ class ADCSApp(App):
                 )
 
         # --- reselect logic (NO forced row=0) ---
+        # Keep any requested viewport restoration until after move_cursor(), since
+        # move_cursor() itself may auto-scroll the selected row to the bottom.
+        pending_viewport = self._pending_table_viewport
+        self._pending_table_viewport = None
         target_idx = 0
         if self._pending_select_filename:
             for idx, r in enumerate(rows):
@@ -2789,6 +2993,17 @@ class ADCSApp(App):
                 table.focus()
             except Exception:
                 pass
+
+            # Run after the current refresh/layout pass so DataTable's own cursor
+            # auto-scroll has already happened and cannot overwrite our position.
+            if pending_viewport is not None:
+                try:
+                    self.call_after_refresh(
+                        self._restore_table_viewport, pending_viewport, target_idx
+                    )
+                except Exception:
+                    self._restore_table_viewport(pending_viewport, target_idx)
+
             self._show_detail_current_row()
 
         ca_name = (self.current_ca.get('display_name') if self.current_ca else '-')
@@ -3087,6 +3302,8 @@ class ADCSApp(App):
 
     def _delete_selected(self) -> None:
         cursor_fn = self._remember_cursor_filename()
+        viewport_before = self._remember_table_viewport()
+        visible_order_before = [row.filename for row in self._visible_rows]
 
         ca = self.current_ca
         if not ca:
@@ -3102,6 +3319,7 @@ class ADCSApp(App):
         deleted_fail = 0
         cert_deleted = 0
         key_deleted = 0
+        deleted_filenames: Set[str] = set()
 
         for r in targets:
             if not r.revoked and r.days_to_expiry > 0:
@@ -3118,12 +3336,20 @@ class ADCSApp(App):
                 cert_deleted += n_cert
                 key_deleted += n_key
                 deleted_ok += 1
+                if n_cert:
+                    deleted_filenames.add(r.filename)
                 if r.filename in self.selected_filenames:
                     self.selected_filenames.remove(r.filename)
             except Exception:
                 deleted_fail += 1
 
-        self._request_reselect(cursor_fn)
+        # If the cursor row was deleted, focus its closest surviving neighbor
+        # instead of letting the subsequent reload select the first row.
+        surviving_filenames = set(visible_order_before) - deleted_filenames
+        focus_filename = self._nearest_surviving_filename(
+            visible_order_before, cursor_fn, surviving_filenames
+        )
+        self._request_reselect(focus_filename, viewport=viewport_before)
         try:
             self.load_certs()
         except Exception:
