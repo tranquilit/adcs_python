@@ -263,7 +263,7 @@ written to stderr. For a custom configuration file, pass
 Launch the Textual interface with:
 
 ```bash
-adcs-gui --confadcs /etc/adcs/adcs.yaml
+adcs-gui
 ```
 
 Create a CA certificate from an existing CSR public key
@@ -445,7 +445,6 @@ Re-sign / Re-issue a Certificate (GUI)
 Launch the admin GUI, then select the target certificate to re-sign/re-issue:
 
 ```bash
-cd /opt/adcs_python
 adcs-gui
 ```  
 ![Demo TERMINAL UI](demo/ui_terminal.png "DEMO TERMINAL UI")
