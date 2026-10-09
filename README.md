@@ -125,20 +125,20 @@ cp -r /opt/adcs_python/callbacks /etc/adcs/callbacks
 Create a local CA (for testing)
 ---------------------------------------------------------
  
-By default, `./adcs-tool ca create` generates an RSA CA:
+By default, `adcs-tool ca create` generates an RSA CA:
 
 ```
-./adcs-tool ca create --cn "CA Root Test" --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
-./adcs-tool ket create --ca-id "CA Root Test" >> /etc/adcs/adcs.yaml
-./adcs-tool ca create --signer-ca-id "CA Root Test" --cn "CA Inter Test" --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
-./adcs-tool ket create --ca-id "CA Inter Test" >> /etc/adcs/adcs.yaml
-./adcs-tool certificate issue --signer-ca-id "CA Inter Test" --cn testadcs.mydomain.lan --san testadcs.mydomain.lan --crt-path /etc/nginx/crt.pem --key-path /etc/nginx/key.pem
+adcs-tool ca create --cn "CA Root Test" --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
+adcs-tool ket create --ca-id "CA Root Test" >> /etc/adcs/adcs.yaml
+adcs-tool ca create --signer-ca-id "CA Root Test" --cn "CA Inter Test" --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
+adcs-tool ket create --ca-id "CA Inter Test" >> /etc/adcs/adcs.yaml
+adcs-tool certificate issue --signer-ca-id "CA Inter Test" --cn testadcs.mydomain.lan --san testadcs.mydomain.lan --crt-path /etc/nginx/crt.pem --key-path /etc/nginx/key.pem
 ```
 
 To generate an ECC CA instead, use `--key-type ec` and select the curve with `--ec-curve`:
 
 ```
-./adcs-tool ca create --cn "CA Root ECC Test" --key-type ec --ec-curve secp384r1 --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
+adcs-tool ca create --cn "CA Root ECC Test" --key-type ec --ec-curve secp384r1 --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
 ```
 
 Supported ECC curves are `secp256r1`, `secp384r1`, and `secp521r1`. Aliases such as `prime256v1`, `p-256`, `p-384`, and `p-521` are also accepted.
@@ -149,8 +149,8 @@ ADCS CLI, SQLite cache and optional Textual interface
 
 There are **two** independent entry points:
 
-* `./adcs-tool`: non-interactive command-line administration.
-* `./adcs-gui`: optional Textual interface.
+* `adcs-tool`: non-interactive command-line administration.
+* `adcs-gui`: optional Textual interface.
 
 To run the tools from any directory, create symbolic links (as root, assuming
 the project was cloned into `/opt/adcs_python`):
@@ -161,26 +161,26 @@ ln -s /opt/adcs_python/adcs-gui /usr/bin/adcs-gui
 ```
 
 ```bash
-./adcs-tool ca list
-./adcs-tool ca list --json
-./adcs-tool ca show ca_inter_test
-./adcs-tool ca show ca_inter_test --json
-./adcs-tool callback list
-./adcs-tool callback list --json
-./adcs-tool config show --json  # secrets are redacted
+adcs-tool ca list
+adcs-tool ca list --json
+adcs-tool ca show ca_inter_test
+adcs-tool ca show ca_inter_test --json
+adcs-tool callback list
+adcs-tool callback list --json
+adcs-tool config show --json  # secrets are redacted
 ```
 
 List certificates from any CA, applying the same 30-day expiration and
 revocation filters as the UI:
 
 ```bash
-./adcs-tool certificate list --ca ca_inter_test
-./adcs-tool certificate list --ca ca_inter_test --search example.org --status expiring
-./adcs-tool certificate list --ca ca_inter_test --filter --status expired --revocation revoked
-./adcs-tool certificate list --ca ca_inter_test --revocation revoked --limit 0
-./adcs-tool certificate list --ca ca_inter_test --order-by "expiration_date ASC, serial DESC" --limit 200
-./adcs-tool certificate list --ca ca_inter_test --order-by "revoked DESC, not_after ASC" --json
-./adcs-tool certificate list --help  # complete list of permitted ORDER BY fields
+adcs-tool certificate list --ca ca_inter_test
+adcs-tool certificate list --ca ca_inter_test --search example.org --status expiring
+adcs-tool certificate list --ca ca_inter_test --filter --status expired --revocation revoked
+adcs-tool certificate list --ca ca_inter_test --revocation revoked --limit 0
+adcs-tool certificate list --ca ca_inter_test --order-by "expiration_date ASC, serial DESC" --limit 200
+adcs-tool certificate list --ca ca_inter_test --order-by "revoked DESC, not_after ASC" --json
+adcs-tool certificate list --help  # complete list of permitted ORDER BY fields
 # --filter is optional for certificate list; status/revocation/search work without it.
 ```
 
@@ -195,15 +195,15 @@ scripting.
 View and manage a particular certificate, using its **hexadecimal serial**:
 
 ```bash
-./adcs-tool certificate show --ca ca_inter_test --serial 0x1234 --json
-./adcs-tool certificate revoke --ca ca_inter_test --serial 0x1234
-./adcs-tool certificate revoke --ca ca_inter_test --serial 0x1234 --dry-run
-./adcs-tool certificate unrevoke --ca ca_inter_test --serial 0x1234
-./adcs-tool certificate unrevoke --ca ca_inter_test --serial 0x1234 --dry-run
-./adcs-tool certificate delete --ca ca_inter_test --serial 0x1234
-./adcs-tool certificate delete --ca ca_inter_test --serial 0x1234 --dry-run
-./adcs-tool crl resign --ca ca_inter_test
-./adcs-tool crl resign-all
+adcs-tool certificate show --ca ca_inter_test --serial 0x1234 --json
+adcs-tool certificate revoke --ca ca_inter_test --serial 0x1234
+adcs-tool certificate revoke --ca ca_inter_test --serial 0x1234 --dry-run
+adcs-tool certificate unrevoke --ca ca_inter_test --serial 0x1234
+adcs-tool certificate unrevoke --ca ca_inter_test --serial 0x1234 --dry-run
+adcs-tool certificate delete --ca ca_inter_test --serial 0x1234
+adcs-tool certificate delete --ca ca_inter_test --serial 0x1234 --dry-run
+adcs-tool crl resign --ca ca_inter_test
+adcs-tool crl resign-all
 ```
 
 Filtered bulk revocation and unrevocation use the same SQLite-backed filtering,
@@ -215,13 +215,13 @@ state are skipped. `--serial` continues to perform an individual operation.
 
 ```bash
 # Preview revoking valid, currently unrevoked certificates matching "radius"
-./adcs-tool certificate revoke --ca ca_inter_test --filter --status valid --revocation not_revoked --search radius --order-by "not_after ASC" --limit 100
+adcs-tool certificate revoke --ca ca_inter_test --filter --status valid --revocation not_revoked --search radius --order-by "not_after ASC" --limit 100
 # Execute after reviewing the preview
-./adcs-tool certificate revoke --ca ca_inter_test --filter --status valid --revocation not_revoked --search radius --order-by "not_after ASC" --limit 100 --yes
+adcs-tool certificate revoke --ca ca_inter_test --filter --status valid --revocation not_revoked --search radius --order-by "not_after ASC" --limit 100 --yes
 # Preview removing revocation for revoked certificates matching "radius"
-./adcs-tool certificate unrevoke --ca ca_inter_test --filter --revocation revoked --search radius --dry-run
+adcs-tool certificate unrevoke --ca ca_inter_test --filter --revocation revoked --search radius --dry-run
 # Execute
-./adcs-tool certificate unrevoke --ca ca_inter_test --filter --revocation revoked --search radius --yes
+adcs-tool certificate unrevoke --ca ca_inter_test --filter --revocation revoked --search radius --yes
 ```
 
 Bulk certificate cleanup uses the same SQLite-backed filters as the listing
@@ -230,14 +230,14 @@ certificates selected without moving files:
 
 ```bash
 # Expired OR revoked certificates (including expired non-revoked)
-./adcs-tool certificate delete --ca ca_inter_test --eligible
+adcs-tool certificate delete --ca ca_inter_test --eligible
 # Only certificates BOTH expired AND revoked
-./adcs-tool certificate delete --ca ca_inter_test --filter --status expired --revocation revoked
+adcs-tool certificate delete --ca ca_inter_test --filter --status expired --revocation revoked
 # Optional search, sorting and limit
-./adcs-tool certificate delete --ca ca_inter_test --filter --status expired --search example.org --order-by "not_after ASC" --limit 100
+adcs-tool certificate delete --ca ca_inter_test --filter --status expired --search example.org --order-by "not_after ASC" --limit 100
 # Execute the operation after reviewing the preview
-./adcs-tool certificate delete --ca ca_inter_test --eligible --dry-run
-./adcs-tool certificate delete --ca ca_inter_test --eligible --yes
+adcs-tool certificate delete --ca ca_inter_test --eligible --dry-run
+adcs-tool certificate delete --ca ca_inter_test --eligible --yes
 ```
 
 `--eligible` selects the union (expired **or** revoked); `--filter` combines
@@ -263,13 +263,13 @@ written to stderr. For a custom configuration file, pass
 Launch the Textual interface with:
 
 ```bash
-./adcs-gui --confadcs /etc/adcs/adcs.yaml
+adcs-gui --confadcs /etc/adcs/adcs.yaml
 ```
 
 Create a CA certificate from an existing CSR public key
 ---------------------------------------------------------
 
-`./adcs-tool ca create` can also create a CA certificate from an existing CSR with `--csr-path`.
+`adcs-tool ca create` can also create a CA certificate from an existing CSR with `--csr-path`.
 This is useful when the future CA private key is generated and kept outside this tool, for example in an HSM.
 
 Only the public key is read from the CSR. The CSR subject, SANs, attributes, and requested extensions are ignored.
@@ -287,7 +287,7 @@ openssl req -new \
 
 # Issue the new CA certificate with the public key from the CSR.
 # The certificate subject below is "CA Inter HSM Test", not the CSR subject.
-./adcs-tool ca create \
+adcs-tool ca create \
   --signer-ca-id "CA Root Test" \
   --cn "CA Inter HSM Test" \
   --csr-path subca.csr.pem \
@@ -422,7 +422,7 @@ Regenerate and re-sign the CRL
 
 ```bash
 cd /opt/adcs_python
-./adcs-tool crl resign-all
+adcs-tool crl resign-all
 ```
 
 Add cron 
@@ -434,7 +434,7 @@ Rotate adcs Certificate When Expiring Soon
 
 ```bash
 cd /opt/adcs_python
-./adcs-tool certificate rotate --signer-ca-id "CA Inter Test" --crt-path /etc/nginx/crt.pem  --key-path /etc/nginx/key.pem --threshold-days 30 --valid-days 365
+adcs-tool certificate rotate --signer-ca-id "CA Inter Test" --crt-path /etc/nginx/crt.pem  --key-path /etc/nginx/key.pem --threshold-days 30 --valid-days 365
 ```
 
 - `--signer-ca-id` is the CA identifier (e.g., `"CA Inter Test"`).
@@ -446,7 +446,7 @@ Launch the admin GUI, then select the target certificate to re-sign/re-issue:
 
 ```bash
 cd /opt/adcs_python
-./adcs-gui
+adcs-gui
 ```  
 ![Demo TERMINAL UI](demo/ui_terminal.png "DEMO TERMINAL UI")
 
@@ -631,7 +631,7 @@ Yes, this project can be used as a stateless gateway in front of another PKI, as
 To enable interactive Tab completion in the current Bash session from the project directory:
 
 ```bash
-source ./adcs-tool.bash-completion
+source adcs-tool.bash-completion
 ```
 
 To enable it for every Bash session, install the completion file (as root, on systems with `bash-completion`):
@@ -640,7 +640,7 @@ To enable it for every Bash session, install the completion file (as root, on sy
 install -Dm644 adcs-tool.bash-completion /usr/share/bash-completion/completions/adcs-tool
 ```
 
-If invoking the command as `./adcs-tool`, load the script with `source` in your shell profile if the automatic completion loader does not load it.
+If invoking the command as `adcs-tool`, load the script with `source` in your shell profile if the automatic completion loader does not load it.
 
 Tab completes command groups, subcommands, options, enumerated values (`--status`, `--revocation`, `--key-type`), sorting fields for `--order-by`, filesystem paths and `--ca` identifiers from `adcs.yaml`. The CA config path defaults to `/etc/adcs/adcs.yaml` and can be changed via `--confadcs`. Completion reads configuration only: it never performs certificate operations or changes SQLite. Bash completion requires Bash; other shells are not configured by this script.
 
@@ -655,10 +655,10 @@ provides machine-readable output. The existing `--json` flag remains available
 for read-only commands and takes precedence over `--format`.
 
 ```bash
-./adcs-tool certificate list --ca ca-auth --format accessible
-./adcs-tool certificate show --ca ca-auth --serial 0x1234 --format accessible
-./adcs-tool certificate revoke --ca ca-auth --filter --status expired --dry-run --format accessible
-./adcs-tool ca list --format json
+adcs-tool certificate list --ca ca-auth --format accessible
+adcs-tool certificate show --ca ca-auth --serial 0x1234 --format accessible
+adcs-tool certificate revoke --ca ca-auth --filter --status expired --dry-run --format accessible
+adcs-tool ca list --format json
 export ADCS_OUTPUT_FORMAT=accessible  # optional default for supported commands
 ```
 
