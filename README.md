@@ -124,6 +124,14 @@ cp -r /opt/adcs_python/callbacks /etc/adcs/callbacks
 
 Create a local CA (for testing)
 ---------------------------------------------------------
+
+To run the tools from any directory, create symbolic links (as root, assuming
+the project was cloned into `/opt/adcs_python`):
+
+```bash
+ln -s /opt/adcs_python/adcs-tool /usr/bin/adcs-tool
+ln -s /opt/adcs_python/adcs-gui /usr/bin/adcs-gui
+```
  
 By default, `adcs-tool ca create` generates an RSA CA:
 
@@ -151,14 +159,6 @@ There are **two** independent entry points:
 
 * `adcs-tool`: non-interactive command-line administration.
 * `adcs-gui`: optional Textual interface.
-
-To run the tools from any directory, create symbolic links (as root, assuming
-the project was cloned into `/opt/adcs_python`):
-
-```bash
-ln -s /opt/adcs_python/adcs-tool /usr/bin/adcs-tool
-ln -s /opt/adcs_python/adcs-gui /usr/bin/adcs-gui
-```
 
 ```bash
 adcs-tool ca list
