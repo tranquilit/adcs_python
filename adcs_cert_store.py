@@ -508,19 +508,31 @@ def _sync_certificate_cache(
 def _certificate_cache_order_by(
     sort_column: str, descending: bool,
     *, order_by: Optional[str] = None,
+    revoked_sql: str = "0",
 ) -> str:
     """Build an injection-safe SQL ORDER BY from approved expressions only."""
     clauses = []
-    for column, reverse in parse_order_by(
+    order_terms = parse_order_by(
         order_by, sort_column=sort_column, descending=descending,
-    ):
+    )
+    serial_terms = (
+        "CASE WHEN parse_error IS NOT NULL THEN -1 ELSE length(ltrim(lower(serial_hex), '0')) END",
+        "ltrim(lower(serial_hex), '0')",
+    )
+    for index, (column, reverse) in enumerate(order_terms):
         direction = "DESC" if reverse else "ASC"
-        if column in ("serial", "revoked"):
+        if column == "revoked":
+            # CRL membership is supplied only for this SELECT, not persisted.
+            # This puts ORDER BY and LIMIT in the same SQL query even when the
+            # user sorts on the mutable revocation status.
+            terms = (f"CASE WHEN {revoked_sql} THEN 0 ELSE 1 END",)
+            # Preserve the old deterministic serial tie-breaker for a lone
+            # revoked sort; do not override subsequent explicit ORDER BY keys.
+            if index == len(order_terms) - 1:
+                terms += serial_terms
+        elif column == "serial":
             # Arbitrary-width hex serials cannot fit in SQLite INTEGER.
-            terms = (
-                "length(ltrim(lower(serial_hex), '0'))",
-                "ltrim(lower(serial_hex), '0')",
-            )
+            terms = serial_terms
         else:
             terms = CERT_CACHE_SORT_COLUMNS[column]
         clauses.extend(f"{term} {direction}" for term in terms)
@@ -548,6 +560,7 @@ def _query_certificate_cache(
     descending: bool = False,
     limit: int = 0,
     order_by: Optional[str] = None,
+    eligible_for: str = "",
 ) -> tuple[List[Dict[str, Any]], int]:
     """Query lightweight certificate rows directly from SQLite.
 
@@ -588,23 +601,38 @@ def _query_certificate_cache(
         where.append("not_after >= ?")
         params.append(cutoff_31d)
 
-    # Revocation remains CRL-only. Only explicit revoked/not_revoked filters
-    # inject CRL serials into the transient SELECT; nothing is stored in SQLite.
+    # Revocation remains CRL-only. Use a temporary indexed SQLite table, not
+    # one SQL bind parameter per revoked serial: a large CRL can exceed SQLite's
+    # variable limit, especially for bulk filters combined with ORDER BY.
+    terms = parse_order_by(order_by, sort_column=sort_column, descending=descending)
+    needs_crl_lookup = bool(revocation or eligible_for or any(
+        column == "revoked" for column, _ in terms
+    ))
     crl_serials = sorted({
         format(int(serial), "x").lower()
         for serial in (revoked_serials or set())
-    })
+    }) if needs_crl_lookup else []
+    revoked_sql = ("serial_hex COLLATE NOCASE IN ("
+                   "SELECT serial_hex FROM current_crl_serials)" if crl_serials else "0")
     if revocation == "revoked":
-        if crl_serials:
-            placeholders = ",".join("?" for _ in crl_serials)
-            where.append(f"serial_hex COLLATE NOCASE IN ({placeholders})")
-            params.extend(crl_serials)
+        where.append(revoked_sql)
+    elif revocation == "not_revoked":
+        where.append(f"NOT ({revoked_sql})")
+
+    if eligible_for:
+        # Guard the requested LIMIT against CA certificates, unparsable files
+        # and certificates that are already in the target revocation state.
+        # These checks must occur in WHERE before ORDER BY and LIMIT.
+        where.extend(("is_ca = 0", "parse_error IS NULL"))
+        if eligible_for == "revoke":
+            where.append(f"NOT ({revoked_sql})")
+        elif eligible_for == "unrevoke":
+            where.append(revoked_sql)
+        elif eligible_for == "delete":
+            where.append(f"(not_after <= ? OR {revoked_sql})")
+            params.append(now.isoformat())
         else:
-            where.append("0")
-    elif revocation == "not_revoked" and crl_serials:
-        placeholders = ",".join("?" for _ in crl_serials)
-        where.append(f"serial_hex COLLATE NOCASE NOT IN ({placeholders})")
-        params.extend(crl_serials)
+            raise ValueError(f"Unsupported bulk operation: {eligible_for}")
 
     where_sql = ""
     if where:
@@ -617,7 +645,7 @@ def _query_certificate_cache(
           FROM certificates
     """ + where_sql
     select_sql += _certificate_cache_order_by(
-        sort_column, descending, order_by=order_by,
+        sort_column, descending, order_by=order_by, revoked_sql=revoked_sql,
     )
 
     select_params = list(params)
@@ -631,6 +659,17 @@ def _query_certificate_cache(
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout = 5000")
     try:
+        if crl_serials:
+            # TEMP table is connection-local; it is never persisted in the
+            # per-CA certificate database and never marks revocation as cached.
+            conn.execute(
+                "CREATE TEMP TABLE current_crl_serials ("
+                "serial_hex TEXT PRIMARY KEY COLLATE NOCASE) WITHOUT ROWID"
+            )
+            conn.executemany(
+                "INSERT INTO current_crl_serials(serial_hex) VALUES (?)",
+                ((serial,) for serial in crl_serials),
+            )
         total = int(conn.execute(count_sql, params).fetchone()[0])
         rows = [dict(row) for row in conn.execute(select_sql, select_params)]
         return rows, total
@@ -643,15 +682,15 @@ def list_certificate_rows(
     revocation: str = "", revoked_serials: Optional[Set[int]] = None,
     sort_column: str = "not_before", descending: bool = False,
     order_by: Optional[str] = None, limit: int = 0,
-    synchronize: bool = False,
+    synchronize: bool = False, eligible_for: str = "",
 ) -> tuple[List[CertRow], int]:
     """Shared filter/search/sort/limit implementation for CLI and Textual UI.
 
     Only the immutable certificate index is stored in SQLite. Revocation is
-    supplied by the current CRL; if sorting on it, the complete result is
-    sorted in memory before limiting to keep the ordering globally correct.
+    supplied by the current CRL for the SELECT only. Eligibility and the
+    complete ordering are applied in SQLite before LIMIT, even for bulk actions.
     """
-    order_terms = parse_order_by(
+    parse_order_by(
         order_by, sort_column=sort_column, descending=descending,
     )
     if status not in ("", "valid", "expiring", "expired"):
@@ -660,15 +699,15 @@ def list_certificate_rows(
         raise ValueError(f"Unsupported revocation filter: {revocation}")
     if limit < 0:
         raise ValueError("limit must be >= 0 (0 = unlimited)")
+    if eligible_for not in ("", "revoke", "unrevoke", "delete"):
+        raise ValueError(f"Unsupported bulk operation: {eligible_for}")
     if synchronize:
         _sync_certificate_cache(cert_dir)
-    contains_revoked_sort = any(col == "revoked" for col, _ in order_terms)
     raw, total = _query_certificate_cache(
         cert_dir, query=query, status=status, revocation=revocation,
         revoked_serials=revoked_serials, sort_column=sort_column,
         descending=descending,
-        order_by=(order_by if not contains_revoked_sort else None),
-        limit=(0 if contains_revoked_sort else limit),
+        order_by=order_by, limit=limit, eligible_for=eligible_for,
     )
     crl_serials = revoked_serials or set()
     rows = []
@@ -678,13 +717,6 @@ def list_certificate_rows(
             row.revoked = _cert_row_serial_int(row) in crl_serials
         rows.append(row)
 
-    if contains_revoked_sort:
-        # Multi-field sorting must be stable: the rightmost ORDER BY term is
-        # lowest priority. Do not reimplement this in the Textual event layer.
-        for col, reverse in reversed(order_terms):
-            rows = _sort_certificate_rows_in_memory(rows, col, reverse)
-        if limit > 0:
-            rows = rows[:limit]
     return rows, total
 
 
@@ -731,17 +763,16 @@ def _sort_certificate_rows_in_memory(
     sort_column: str,
     descending: bool,
 ) -> List[CertRow]:
-    """Sort transient CRL-derived state shared by both interfaces.
-
-    SQLite stores immutable certificate metadata only. Revocation comes from
-    the CRL, so sorting by that field must use this shared function.
-    """
+    """Sort transient rows (e.g. UI CRL updates or direct-scan fallback)."""
     if sort_column == "serial":
         key = lambda row: _cert_row_serial_int(row)
     elif sort_column == "subject":
         key = lambda row: row.subject.casefold()
     elif sort_column == "not_after" or sort_column == "days":
-        key = lambda row: row.not_after
+        # An unparsable certificate has NULL dates in SQLite. Match SQLite's
+        # NULL-first ASC / NULL-last DESC ordering in the direct-scan fallback.
+        key = lambda row: (datetime.min.replace(tzinfo=timezone.utc)
+                           if row.filename.endswith(" (ERROR)") else row.not_after)
     elif sort_column == "filename":
         key = lambda row: row.filename.casefold()
     elif sort_column == "signature":
@@ -757,9 +788,93 @@ def _sort_certificate_rows_in_memory(
         # number is the deterministic second key requested by the UI.
         key = lambda row: (0 if row.revoked else 1, _cert_row_serial_int(row))
     else:
-        key = lambda row: row.not_before
+        key = lambda row: (datetime.min.replace(tzinfo=timezone.utc)
+                           if row.filename.endswith(" (ERROR)") else row.not_before)
 
     return sorted(rows, key=key, reverse=descending)
+
+
+def scan_certificate_rows_without_sqlite(
+    cert_dir: str, revoked_serials: Optional[Set[int]] = None,
+) -> List[CertRow]:
+    """Emergency, read-only direct scan for the Textual GUI if SQLite fails.
+
+    Parsing happens once in the background worker, never for every search or
+    cursor movement. Reuse the normal cache-record parser to keep the metadata
+    and full-text search fields identical to the SQLite implementation.
+    """
+    revoked_serials = revoked_serials or set()
+    rows = []
+    for path in scan_cert_paths(cert_dir):
+        try:
+            record = _cache_record_from_certificate(cert_dir, path)
+        except Exception as exc:
+            record = _cache_error_record(cert_dir, path, exc)
+        row = _row_from_cache_record(record)
+        row.search_text = str(record.get("search_text") or "")
+        if not record.get("parse_error"):
+            row.revoked = _cert_row_serial_int(row) in revoked_serials
+        rows.append(row)
+    return rows
+
+
+def filter_certificate_rows_without_sqlite(
+    source: List[CertRow], *, query: str = "", status: str = "",
+    revocation: str = "", revoked_serials: Optional[Set[int]] = None,
+    sort_column: str = "not_before", descending: bool = False,
+    order_by: Optional[str] = None, limit: int = 0,
+) -> tuple[List[CertRow], int]:
+    """Fallback equivalent of the shared SQLite listing, for UI-only outages.
+
+    It is intentionally not the normal path. The same public filter/sort/limit
+    semantics are implemented here so that Textual never maintains a second
+    local version of the filtering rules.
+    """
+    terms = parse_order_by(order_by, sort_column=sort_column, descending=descending)
+    if status not in ("", "valid", "expiring", "expired"):
+        raise ValueError(f"Unsupported status filter: {status}")
+    if revocation not in ("", "revoked", "not_revoked"):
+        raise ValueError(f"Unsupported revocation filter: {revocation}")
+    if limit < 0:
+        raise ValueError("limit must be >= 0 (0 = unlimited)")
+
+    now = datetime.now(timezone.utc)
+    cutoff_1d = now + timedelta(days=1)
+    cutoff_31d = now + timedelta(days=31)
+    q = (query or "").strip().lower()
+    crl_serials = revoked_serials or set()
+    rows = []
+    for item in source:
+        # Keep this mutable CRL status fresh even after an in-place UI action.
+        if item.serial_nox != "":
+            item.revoked = _cert_row_serial_int(item) in crl_serials
+        if q and q not in item.search_text:
+            continue
+        if status == "expired" and item.not_after >= cutoff_1d:
+            continue
+        if status == "expiring" and not (cutoff_1d <= item.not_after < cutoff_31d):
+            continue
+        if status == "valid" and item.not_after < cutoff_31d:
+            continue
+        if revocation == "revoked" and not item.revoked:
+            continue
+        if revocation == "not_revoked" and item.revoked:
+            continue
+        rows.append(item)
+
+    # SQLite uses relative_path as the final deterministic tie-breaker.
+    rows.sort(key=lambda row: row.cache_key.casefold())
+    for index in range(len(terms) - 1, -1, -1):
+        column, reverse = terms[index]
+        if column == "revoked" and index != len(terms) - 1:
+            # Keep lower-priority explicit fields (e.g. serial DESC) intact.
+            rows.sort(key=lambda row: 0 if row.revoked else 1, reverse=reverse)
+        else:
+            rows = _sort_certificate_rows_in_memory(rows, column, reverse)
+    total = len(rows)
+    if limit:
+        rows = rows[:limit]
+    return rows, total
 
 def _cached_certificate_details(cert_dir: str, cache_key: str) -> Dict[str, Any]:
     """Read parsed details from SQLite; cached files are not reopened."""
@@ -821,7 +936,7 @@ def _row_from_cache_record(record: Dict[str, Any]) -> CertRow:
 def _resolve_storage_paths_from_ca(ca: Dict[str, Any]) -> tuple[str, str]:
     sp = ca.get("storage_paths", {}) or {}
     certs_dir = sp.get("certs_dir") or sp.get("cert_dir") or ca.get("__path_cert") or "."
-    private_dir = sp.get("private_dir") or certs_dir
+    private_dir = sp.get("private_dir") or ca.get("__path_private") or certs_dir
     return str(certs_dir), str(private_dir)
 
 

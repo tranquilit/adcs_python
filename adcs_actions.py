@@ -22,7 +22,7 @@ from callback_loader import load_func
 from utils_crt import (
     _cli_find_ca_by_id, _cmd_resign_crl, _compose_fullchain_pem,
     issue_cert_with_new_key, revoke, unrevoke, resign_crl,
-    revoked_serials_set,
+    revoked_serials_set, load_certificate_file,
 )
 from adcs_cert_store import _resolve_storage_paths_from_ca
 
@@ -443,14 +443,15 @@ def _trashify(path: str) -> str:
     return os.path.join(trash_dir, f'{os.path.basename(path)}.{timestamp}.{uuid.uuid4().hex[:8]}.trash')
 
 
-def delete_certificate(
+def validate_certificate_deletion(
     ca: Dict[str, Any], *, cert_path: str, revoked: bool,
     expires_at: datetime,
-) -> tuple[int, int]:
-    """Move certificate and corresponding key to .trash if revoked or expired.
+) -> tuple[str, str]:
+    """Check a deletion against live certificate data without changing files.
 
-    Fails *closed*: a currently valid and non-revoked certificate is never
-    removed. The filesystem path must remain inside the selected CA cert dir.
+    Fails *closed*: a CA certificate or a currently valid and non-revoked
+    certificate is never removed. This check must live in the shared action,
+    not only in the CLI or GUI previews. The path must remain inside the CA dir.
     """
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
@@ -463,6 +464,35 @@ def delete_certificate(
         raise ValueError('Certificate path is outside the CA storage directory')
     if not os.path.isfile(cert_real):
         raise FileNotFoundError(cert_real)
+    # Re-read the actual certificate rather than trusting potentially stale
+    # SQLite metadata or the CLI-provided eligibility flags. Missing/invalid
+    # certificate data must not silently bypass this protection.
+    cert = load_certificate_file(cert_real)
+    try:
+        constraints = cert.extensions.get_extension_for_class(x509.BasicConstraints).value
+    except x509.ExtensionNotFound:
+        constraints = None
+    ca_public_path = ((ca.get('pem') or {}).get('certificate_path_pem'))
+    if (constraints is not None and constraints.ca) or (
+        ca_public_path and os.path.realpath(str(ca_public_path)) == cert_real
+    ):
+        raise PermissionError('CA certificates cannot be deleted through certificate delete')
+    actual_expiration = getattr(cert, 'not_valid_after_utc', None)
+    if actual_expiration is None:
+        actual_expiration = cert.not_valid_after.replace(tzinfo=timezone.utc)
+    if not revoked and actual_expiration > datetime.now(timezone.utc):
+        raise PermissionError('Certificate must be revoked or expired before deletion')
+    return cert_real, private_dir
+
+
+def delete_certificate(
+    ca: Dict[str, Any], *, cert_path: str, revoked: bool,
+    expires_at: datetime,
+) -> tuple[int, int]:
+    """Move an eligible leaf certificate and its key to .trash."""
+    cert_real, private_dir = validate_certificate_deletion(
+        ca, cert_path=cert_path, revoked=revoked, expires_at=expires_at,
+    )
     fname = os.path.basename(cert_real)
     if fname.endswith('.crt.pem'):
         key_name = fname[:-8] + '.key.pem'
@@ -496,9 +526,13 @@ def public_ca_configuration(
         })
         sp = ca.get('storage_paths') or {}
         item['effective_storage_paths'] = {
-            'cert_dir': sp.get('cert_dir') or global_storage.get('cert_dir', '/tmp/certs'),
+            'cert_dir': (sp.get('cert_dir') or sp.get('certs_dir')
+                         or global_storage.get('cert_dir', '/tmp/certs')),
             'csr_dir': sp.get('csr_dir') or global_storage.get('csr_dir', '/tmp/csr'),
-            'private_dir': (sp.get('private_dir') or sp.get('cert_dir')
+            'private_dir': (sp.get('private_dir')
+                            or global_storage.get('private_dir')
+                            or sp.get('cert_dir')
+                            or sp.get('certs_dir')
                             or global_storage.get('cert_dir', '/tmp/certs')),
         }
         item['parent'] = ca.get('issuer_ca_id') or '(self-signed/root)'

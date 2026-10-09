@@ -1319,6 +1319,7 @@ def _resolve_storage_paths_from_ca(ca: Dict[str, Any]) -> Tuple[str, str]:
     )
     private_dir = (
         storage.get("private_dir")
+        or ca.get("__path_private")
         or os.path.dirname(ca.get("__path_key") or "")
     )
 

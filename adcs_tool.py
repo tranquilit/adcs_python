@@ -496,8 +496,9 @@ def run(args: argparse.Namespace) -> int:
             revocation='' if args.revocation == 'any' else args.revocation,
             revoked_serials=revocations, order_by=args.order_by,
             limit=args.limit, synchronize=True,
+            eligible_for='revoke' if revoke_it else 'unrevoke',
         )
-        candidates = [row for row in rows if not row.is_ca and row.revoked != revoke_it]
+        candidates = rows
         _table(['Serial', 'Expires', 'Current state', 'Planned state', 'Subject'], [
             [row.serial_nox, row.not_after.isoformat(),
              'revoked' if row.revoked else 'not revoked',
@@ -533,13 +534,13 @@ def run(args: argparse.Namespace) -> int:
             path = os.path.join(cert_dir, record['relative_path'])
             expires_at = datetime.fromisoformat(record['not_after'])
             if args.dry_run:
+                from adcs_actions import validate_certificate_deletion
+                validate_certificate_deletion(
+                    ca, cert_path=path, revoked=serial in revocations, expires_at=expires_at,
+                )
                 from datetime import timezone
                 expiry = expires_at.replace(tzinfo=timezone.utc) if expires_at.tzinfo is None else expires_at
                 revoked = serial in revocations
-                if not revoked and expiry > datetime.now(timezone.utc):
-                    raise PermissionError('Certificate must be revoked or expired before deletion')
-                if record.get('is_ca'):
-                    raise PermissionError('CA certificates cannot be deleted through certificate delete')
                 _table(['CA', 'Serial', 'Expires', 'Revoked', 'Certificate'], [[
                     ca['id'], record['serial_hex'], expiry.isoformat(),
                     'yes' if revoked else 'no', path,
@@ -559,30 +560,20 @@ def run(args: argparse.Namespace) -> int:
         if args.limit < 0:
             raise ValueError('--limit must be >= 0')
         parse_order_by(args.order_by)
-        rows, _ = list_certificate_rows(
+        rows, total = list_certificate_rows(
             cert_dir, query=args.search,
             status='' if args.eligible or args.status == 'any' else args.status,
             revocation='' if args.eligible or args.revocation == 'any' else args.revocation,
             revoked_serials=revocations, order_by=args.order_by,
-            limit=args.limit, synchronize=True,
+            limit=args.limit, synchronize=True, eligible_for='delete',
         )
-        from datetime import timezone
-        now = datetime.now(timezone.utc)
-        candidates = []
-        for row in rows:
-            expiration = row.not_after
-            if expiration.tzinfo is None:
-                expiration = expiration.replace(tzinfo=timezone.utc)
-            expired = expiration <= now
-            if row.is_ca or not (expired or row.revoked):
-                continue
-            candidates.append((row, expiration))
+        candidates = [(row, row.not_after) for row in rows]
         _table(['Serial', 'Expires', 'Revoked', 'Subject', 'File'], [
             [r.serial_nox, e.isoformat(), 'yes' if r.revoked else 'no', r.subject, r.filename]
             for r, e in candidates
         ], _format(args), title='Certificate')
         if not args.yes:
-            print(f'DRY RUN: {len(candidates)} eligible certificate(s). Add --yes to move to .trash.', file=sys.stderr if _format(args) == 'json' else sys.stdout)
+            print(f'DRY RUN: {len(candidates)} of {total} eligible certificate(s). Add --yes to move to .trash.', file=sys.stderr if _format(args) == 'json' else sys.stdout)
             return 0
         successes = 0
         failures = 0

@@ -89,7 +89,7 @@ except Exception:
 TERMINAL_DEFAULT = "ansi_default"
 
 from adcs_config import load_yaml_conf
-from utils_crt import revoked_serials_set
+from utils_crt import revoked_serials_set, load_certificate_file, parse_certificate_details
 
 from adcs_cert_store import (
     TABLE_HEADER_SORT_KEYS, MAX_ROWS_DEFAULT, CertRow,
@@ -97,6 +97,7 @@ from adcs_cert_store import (
     _sync_certificate_cache, list_certificate_rows,
     _sort_certificate_rows_in_memory,
     _cached_certificate_details,
+    scan_certificate_rows_without_sqlite, filter_certificate_rows_without_sqlite,
 )
 from adcs_actions import (
     issue_certificate, change_revocation, resign_ca_crl, delete_certificate,
@@ -671,6 +672,7 @@ class ADCSApp(App):
     # sort, CA contents or CRL state changes, so cursor movement and selection
     # never re-run the database query.
     _cache_available: bool = False
+    cert_rows: List[CertRow] = []  # Directly parsed rows only if SQLite is unavailable.
     _certificate_cache_error: Optional[str] = None
     _filtered_rows_cache_key: Optional[tuple] = None
     _filtered_rows_cache: List[CertRow] = []
@@ -1270,7 +1272,7 @@ class ADCSApp(App):
         # Update every certificate row that is already materialized in memory.
         # Do not rescan files and do not requery SQLite just to refresh CRL state.
         seen: Set[int] = set()
-        for collection in (self._visible_rows, self._filtered_rows_cache):
+        for collection in (self._visible_rows, self._filtered_rows_cache, self.cert_rows):
             for row in collection:
                 row_id = id(row)
                 if row_id in seen:
@@ -1389,28 +1391,25 @@ class ADCSApp(App):
         generation: int,
         ca_refid: Any,
         cache_error: Optional[str],
+        direct_rows: Optional[List[CertRow]],
+        direct_error: Optional[str],
     ) -> None:
-        """Apply only the most recent SQLite synchronization result.
-
-        The visible-grid focus state is independent from the persistent SQLite
-        certificate index. No direct certificate parsing is needed as fallback.
-        """
+        """Apply the current SQLite or direct-scan worker result to Textual."""
         if not self._certificate_load_is_current(generation, ca_refid):
             return
         self._certificate_load_in_progress = False
         self._cache_available = cache_error is None
         self._certificate_cache_error = cache_error
+        self.cert_rows = direct_rows or []
         self._invalidate_filtered_rows_cache()
 
         if cache_error:
-            # load_certs already emptied the grid: never display partial or
-            # stale certificate results after a database failure.
-            self.query_one(Status).set_text(f"SQLite certificate cache error: {cache_error}")
             self.notify(
-                f"Unable to load certificates from SQLite: {cache_error}",
-                severity="error", timeout=8,
+                f"SQLite unavailable; using direct certificate scan: {cache_error}",
+                severity="warning" if direct_error is None else "error", timeout=8,
             )
-            return
+            if direct_error:
+                self.notify(f"Direct scan also failed: {direct_error}", severity="error", timeout=8)
         self.refresh_table()
 
     @work(thread=True, exclusive=True, group="certificate-cache-load")
@@ -1420,9 +1419,12 @@ class ADCSApp(App):
         ca_refid: Any,
         certs_dir: str,
         revoked_serials: Set[int],
+        force_direct: bool = False,
     ) -> None:
-        """Synchronize/parse new certificates off the Textual UI thread."""
+        """Try SQLite, falling back to a single direct scan off the UI thread."""
         cache_error: Optional[str] = None
+        direct_rows: Optional[List[CertRow]] = None
+        direct_error: Optional[str] = None
 
         def stage(message: str) -> None:
             self.call_from_thread(
@@ -1436,16 +1438,29 @@ class ADCSApp(App):
                 generation, ca_refid, done, new_total, certificate_total,
             )
 
-        try:
-            _sync_certificate_cache(certs_dir, progress=progress, status=stage)
-        except Exception as exc:
-            cache_error = str(exc)
+        if not force_direct:
+            try:
+                _sync_certificate_cache(certs_dir, progress=progress, status=stage)
+            except Exception as exc:
+                cache_error = str(exc)
+        else:
+            cache_error = self._certificate_cache_error or "SQLite query failed"
+
+        if cache_error is not None:
+            stage("SQLite unavailable; scanning certificate files directly...")
+            try:
+                direct_rows = scan_certificate_rows_without_sqlite(
+                    certs_dir, revoked_serials,
+                )
+            except Exception as exc:
+                direct_error = str(exc)
 
         self.call_from_thread(
-            self._finish_certificate_load, generation, ca_refid, cache_error,
+            self._finish_certificate_load, generation, ca_refid,
+            cache_error, direct_rows, direct_error,
         )
 
-    def load_certs(self) -> None:
+    def load_certs(self, force_direct: bool = False) -> None:
         ca = self.current_ca
         if not ca:
             return
@@ -1455,7 +1470,9 @@ class ADCSApp(App):
 
         self._visible_rows = []
         self._cache_available = False
-        self._certificate_cache_error = None
+        self.cert_rows = []
+        if not force_direct:
+            self._certificate_cache_error = None
         self._invalidate_filtered_rows_cache()
 
         # Keep the UI deliberately empty while SQLite is being synchronized.
@@ -1492,47 +1509,52 @@ class ADCSApp(App):
             ca_refid,
             certs_dir,
             set(self.revoked_serials),
+            force_direct,
         )
 
     # ---------- Filters & view ----------
     def filtered_rows(self, apply_limit: bool = True) -> List[CertRow]:
-        """Query SQLite; keep only a UI-local snapshot for focus/selection.
-
-        Search, filtering and ordering are not reimplemented in this class.
-        """
-        if not self._cache_available or not self.current_ca:
+        """Use shared SQLite filters, or the shared direct-scan fallback."""
+        if not self.current_ca:
             return []
-        certs_dir, _private_dir = self._resolve_storage_paths(self.current_ca)
         certs_dir, _private_dir = self._resolve_storage_paths(self.current_ca)
         query_limit = self.max_rows if (apply_limit and self.max_rows > 0) else 0
         cache_key = (
             certs_dir, self.filter_q.lower().strip(), self.filter_status,
             self.filter_revocation, self._sort_column, self._sort_descending,
-            query_limit,
+            query_limit, self._cache_available,
         )
         if self._filtered_rows_cache_key == cache_key:
             return self._filtered_rows_cache
         try:
-            rows, total = list_certificate_rows(
-                certs_dir, query=self.filter_q, status=self.filter_status,
-                revocation=self.filter_revocation,
-                revoked_serials=self.revoked_serials,
-                sort_column=self._sort_column,
-                descending=self._sort_descending, limit=query_limit,
+            kwargs = dict(
+                query=self.filter_q, status=self.filter_status,
+                revocation=self.filter_revocation, revoked_serials=self.revoked_serials,
+                sort_column=self._sort_column, descending=self._sort_descending,
+                limit=query_limit,
             )
+            if self._cache_available:
+                rows, total = list_certificate_rows(certs_dir, **kwargs)
+            else:
+                rows, total = filter_certificate_rows_without_sqlite(self.cert_rows, **kwargs)
             self._filtered_rows_total = total
             self._filtered_rows_cache_key = cache_key
             self._filtered_rows_cache = rows
             return rows
         except (OSError, sqlite3.Error) as exc:
-            self._cache_available = False
             self._certificate_cache_error = str(exc)
             self._invalidate_filtered_rows_cache()
             self._filtered_rows_total = 0
             self.notify(
-                f"SQLite certificate query failed: {exc}",
-                severity="error", timeout=8,
+                f"SQLite query failed; switching to direct scan: {exc}",
+                severity="warning", timeout=8,
             )
+            # Preserve the previous row/viewport across the asynchronous
+            # database-to-direct-scan transition whenever possible.
+            focus_filename = self._pending_select_filename or self._remember_cursor_filename()
+            focus_viewport = self._pending_table_viewport or self._remember_table_viewport()
+            self._request_reselect(focus_filename, viewport=focus_viewport)
+            self.load_certs(force_direct=True)
             return []
 
     @staticmethod
@@ -1773,9 +1795,10 @@ class ADCSApp(App):
         sort_arrow = "↓" if self._sort_descending else "↑"
         sort_note = f" — sort: {self._sort_column} {sort_arrow}"
         if not self._certificate_load_in_progress:
-            if self._certificate_cache_error:
+            if self._certificate_cache_error and not self._certificate_load_in_progress:
                 self.query_one(Status).set_text(
-                    f"SQLite certificate cache error: {self._certificate_cache_error}"
+                    f"Direct scan (SQLite unavailable) — "
+                    f"{len(rows)}/{total} certificates{sel_note} — CA: {ca_name}{sort_note}{limit_note}"
                 )
             else:
                 self.query_one(Status).set_text(
@@ -2044,6 +2067,9 @@ class ADCSApp(App):
         deleted_filenames: Set[str] = set()
 
         for r in targets:
+            if r.is_ca:
+                blocked.append(r.filename)
+                continue
             if not r.revoked and r.not_after > datetime.now(timezone.utc):
                 blocked.append(r.filename)
                 continue
@@ -2086,7 +2112,7 @@ class ADCSApp(App):
 
         if blocked:
             self.notify(
-                "Blocked (must be revoked or expired): " + ", ".join(blocked[:10]) + ("…" if len(blocked) > 10 else ""),
+                "Blocked (CA certificate or must be revoked/expired): " + ", ".join(blocked[:10]) + ("…" if len(blocked) > 10 else ""),
                 severity="warning",
                 timeout=10,
             )
@@ -2262,7 +2288,13 @@ class ADCSApp(App):
                 log.update(msg)
             return
         try:
-            details = _cached_certificate_details(certs_dir, r.cache_key)
+            if self._cache_available:
+                try:
+                    details = _cached_certificate_details(certs_dir, r.cache_key)
+                except (KeyError, sqlite3.Error, OSError):
+                    details = parse_certificate_details(load_certificate_file(cert_path))
+            else:
+                details = parse_certificate_details(load_certificate_file(cert_path))
 
             serial_int = int(details["serial_number"])
             is_revoked = serial_int in self.revoked_serials

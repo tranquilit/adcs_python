@@ -473,8 +473,11 @@ def load_yaml_conf(path="adcs.yaml", bypass_read_only=False):
             ca["__ces_path"] = ces_path
 
         sp = ca.get("storage_paths", {}) or {}
-        ca["__path_cert"] = sp.get("cert_dir", conf["path_cert_fallback"])
+        ca["__path_cert"] = sp.get("cert_dir") or sp.get("certs_dir") or conf["path_cert_fallback"]
         ca["__path_csr"]  = sp.get("csr_dir",  conf["path_csr_fallback"])
+        # Inherit an explicitly configured global private directory only when
+        # the CA does not override it, as also reported by `adcs-tool ca show`.
+        ca["__path_private"] = sp.get("private_dir") or storage_paths_global.get("private_dir")
 
         refid = next_ca_refid
         next_ca_refid += 1
