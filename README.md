@@ -148,6 +148,7 @@ revocation filters as the UI:
 ```bash
 ./adcs-tool certificate list --ca ca_inter_test
 ./adcs-tool certificate list --ca ca_inter_test --search example.org --status expiring
+./adcs-tool certificate list --ca ca_inter_test --filter --status expired --revocation revoked
 ./adcs-tool certificate list --ca ca_inter_test --revocation revoked --limit 0
 ./adcs-tool certificate list --ca ca_inter_test --order-by "expiration_date ASC, serial DESC" --limit 200
 ./adcs-tool certificate list --ca ca_inter_test --order-by "revoked DESC, not_after ASC" --json
@@ -167,11 +168,55 @@ View and manage a particular certificate, using its **hexadecimal serial**:
 ```bash
 ./adcs-tool certificate show --ca ca_inter_test --serial 0x1234 --json
 ./adcs-tool certificate revoke --ca ca_inter_test --serial 0x1234
+./adcs-tool certificate revoke --ca ca_inter_test --serial 0x1234 --dry-run
 ./adcs-tool certificate unrevoke --ca ca_inter_test --serial 0x1234
+./adcs-tool certificate unrevoke --ca ca_inter_test --serial 0x1234 --dry-run
 ./adcs-tool certificate delete --ca ca_inter_test --serial 0x1234
+./adcs-tool certificate delete --ca ca_inter_test --serial 0x1234 --dry-run
 ./adcs-tool crl resign --ca ca_inter_test
 ./adcs-tool crl resign-all
 ```
+
+Filtered bulk revocation and unrevocation use the same SQLite-backed filtering,
+search, ordering, and limit options as `certificate list` and `certificate delete`.
+Both display a **dry-run preview by default**; `--yes` is required to update
+CRLs. Existing CA certificates and entries already in the requested revocation
+state are skipped. `--serial` continues to perform an individual operation.
+`--dry-run` and `--yes` cannot be combined.
+
+```bash
+# Preview revoking valid, currently unrevoked certificates matching "radius"
+./adcs-tool certificate revoke --ca ca_inter_test --filter --status valid --revocation not_revoked --search radius --order-by "not_after ASC" --limit 100
+# Execute after reviewing the preview
+./adcs-tool certificate revoke --ca ca_inter_test --filter --status valid --revocation not_revoked --search radius --order-by "not_after ASC" --limit 100 --yes
+# Preview removing revocation for revoked certificates matching "radius"
+./adcs-tool certificate unrevoke --ca ca_inter_test --filter --revocation revoked --search radius --dry-run
+# Execute
+./adcs-tool certificate unrevoke --ca ca_inter_test --filter --revocation revoked --search radius --yes
+```
+
+Bulk certificate cleanup uses the same SQLite-backed filters as the listing
+command. By default, bulk deletion is a **dry run**, showing a table of
+certificates selected without moving files:
+
+```bash
+# Expired OR revoked certificates (including expired non-revoked)
+./adcs-tool certificate delete --ca ca_inter_test --eligible
+# Only certificates BOTH expired AND revoked
+./adcs-tool certificate delete --ca ca_inter_test --filter --status expired --revocation revoked
+# Optional search, sorting and limit
+./adcs-tool certificate delete --ca ca_inter_test --filter --status expired --search example.org --order-by "not_after ASC" --limit 100
+# Execute the operation after reviewing the preview
+./adcs-tool certificate delete --ca ca_inter_test --eligible --dry-run
+./adcs-tool certificate delete --ca ca_inter_test --eligible --yes
+```
+
+`--eligible` selects the union (expired **or** revoked); `--filter` combines
+`--status`, `--revocation` and `--search` with AND. The bulk operation skips
+CA certificates and skips certificates that are neither expired nor revoked,
+even when the requested filters match them. `--limit 0` selects all matching
+rows. `--yes` is required for bulk changes, and failed files are reported.
+Single-certificate `--serial` deletion retains its existing behaviour.
 
 **Safety:** `certificate delete` refuses to remove a currently valid,
 non-revoked certificate. Deletion moves the certificate and corresponding
@@ -571,3 +616,5 @@ To stay as close as possible to actual ADCS behavior, it is recommended to:
 
 **Summary:**  
 Yes, this project can be used as a stateless gateway in front of another PKI, as long as the client does not explicitly require a signed CMC response (`CR_IN_FULLRESPONSE`).
+
+`--dry-run` on `certificate revoke`, `certificate unrevoke`, and `certificate delete` previews the action without changing certificates, private keys or CRLs. For bulk deletion, a preview is already the default unless `--yes` is passed; `--dry-run` and `--yes` cannot be combined. Cache indexing may still be refreshed during inspection.

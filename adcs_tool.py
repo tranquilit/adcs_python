@@ -35,6 +35,29 @@ from utils_crt import (
 )
 
 
+class FriendlyArgumentParser(argparse.ArgumentParser):
+    """Concise CLI errors with contextual hints instead of a full usage dump."""
+
+    def error(self, message: str) -> None:
+        """Show contextual help for invalid or incomplete commands."""
+        if (message.startswith('the following arguments are required:')
+                or message.startswith('unrecognized arguments:')):
+            context = getattr(self, "_active_help_parser", self)
+            context.print_help(sys.stderr)
+            print(f'\nError: {message}', file=sys.stderr)
+            if context.prog.endswith(' ca list') and message.startswith('unrecognized arguments:'):
+                extra = message.partition(':')[2].strip()
+                if extra and not extra.startswith('-') and len(extra.split()) == 1:
+                    root = context.prog[:-len(' ca list')]
+                    print(f'Hint: To display a CA, use: {root} ca show {extra}', file=sys.stderr)
+                    print(f'      To list all CAs, use: {root} ca list', file=sys.stderr)
+            self.exit(2)
+        print(f'Error: {message}', file=sys.stderr)
+        print(f"Run '{self.prog} --help' for usage.", file=sys.stderr)
+        self.exit(2)
+
+
+
 def _default_limit() -> int:
     try:
         value = int(os.getenv('ADCS_MAX_ROWS', str(MAX_ROWS_DEFAULT)))
@@ -51,12 +74,12 @@ def _add_global_config(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = FriendlyArgumentParser(
         description='Manage ADCS CAs, certificate cache, certificates, callbacks and CRLs without the GUI.',
     )
     parser.add_argument('--confadcs', default='/etc/adcs/adcs.yaml',
                         help='Path of adcs.yaml (default: /etc/adcs/adcs.yaml)')
-    commands = parser.add_subparsers(dest='command', required=True, metavar='<subcommand>')
+    commands = parser.add_subparsers(dest='command', metavar='<subcommand>', parser_class=FriendlyArgumentParser)
     # Argument definitions are private templates, not public CLI commands.
     templates = argparse.ArgumentParser(add_help=False)
     definitions = templates.add_subparsers(dest='command')
@@ -80,6 +103,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     cert_list = command('certificate-list', 'Search, filter, sort and limit certificates of a CA via SQLite.')
     cert_list.add_argument('--ca', required=True, help='CA id or display name.')
+    cert_list.add_argument('--filter', action='store_true',
+                           help='Optional for listing: --status, --revocation and --search always apply.')
     cert_list.add_argument('--search', '--query', default='', help='Case-insensitive substring search in certificate metadata.')
     cert_list.add_argument('--status', choices=('any', 'expired', 'expiring', 'valid'), default='any',
                            help='Expiration: expired; expiring within 30 days; valid for more than 30 days.')
@@ -104,7 +129,23 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         sub = command(name, desc)
         sub.add_argument('--ca', required=True)
-        sub.add_argument('--serial', required=True, help='Hexadecimal certificate serial number.')
+        selection = sub.add_mutually_exclusive_group(required=True)
+        selection.add_argument('--serial', help='Operate on a single hexadecimal certificate serial.')
+        if name == 'certificate-delete':
+            selection.add_argument('--eligible', action='store_true',
+                                   help='Select certificates that are expired OR revoked.')
+        selection.add_argument('--filter', action='store_true',
+                               help='Select certificates matching --status/--revocation/--search.')
+        sub.add_argument('--status', choices=('any', 'expired', 'expiring', 'valid'), default='any')
+        sub.add_argument('--revocation', choices=('any', 'revoked', 'not_revoked'), default='any')
+        sub.add_argument('--search', default='', help='Case-insensitive metadata search.')
+        sub.add_argument('--order-by', default='not_after ASC',
+                         help='Allowed fields: ' + ', '.join(ORDER_BY_FIELDS))
+        sub.add_argument('--limit', type=int, default=0, help='Maximum selected rows (0 = all).')
+        sub.add_argument('--yes', action='store_true',
+                         help='Execute filtered operation; otherwise show a preview.')
+        sub.add_argument('--dry-run', action='store_true',
+                         help='Preview this operation without changing certificates, keys or CRLs.')
         if name != 'certificate-delete':
             sub.add_argument('--next-update-hours', type=int, default=None)
 
@@ -184,16 +225,22 @@ def build_parser() -> argparse.ArgumentParser:
     # Reuse the internal argument templates without duplicating definitions.
     originals = {name: definitions.choices[name] for _, (_, items) in groups.items()
                  for name in items.values()}
+    group_parsers = {}
+    action_parsers = {}
     for group_name, (description, items) in groups.items():
         group = commands.add_parser(group_name, help=description, description=description)
+        group_parsers[group_name] = group
         _add_global_config(group)
-        nested = group.add_subparsers(dest='operation', required=True, metavar='<subcommand>')
+        nested = group.add_subparsers(dest='operation', metavar='<subcommand>', parser_class=FriendlyArgumentParser)
         for short_name, old_name in items.items():
             old = originals[old_name]
             sub = nested.add_parser(short_name, parents=[old], add_help=False,
                                     help=old.description, description=old.description)
             sub.set_defaults(command=old_name)
+            action_parsers[(group_name, short_name)] = sub
     commands.metavar = '{' + ','.join(groups) + '}'
+    parser._group_parsers = group_parsers
+    parser._action_parsers = action_parsers
     return parser
 
 
@@ -212,7 +259,7 @@ def _table(headers: list[str], rows: list[list[Any]]) -> None:
     """Dependency-free readable tables, without truncating certificate identifiers."""
     rendered = [[str(value) if value is not None else '' for value in row] for row in rows]
     columns = [str(x) for x in headers]
-    widths = [max(len(columns[i]), *(len(row[i]) for row in rendered))
+    widths = [max([len(columns[i])] + [len(row[i]) for row in rendered])
               for i in range(len(columns))]
     def line(values: list[str]) -> str:
         return ' | '.join(value.ljust(width) for value, width in zip(values, widths)).rstrip()
@@ -364,27 +411,145 @@ def run(args: argparse.Namespace) -> int:
         _output_structure(detail, args.json)
         return 0
     if cmd in ('certificate-revoke', 'certificate-unrevoke'):
-        ca, _, record = _record(args, conf)
         revoke_it = cmd == 'certificate-revoke'
-        serial = str(record['serial_hex'])
-        change_revocation(
-            ca, serial, revoke_it=revoke_it,
-            next_update_hours=(args.next_update_hours or int(conf['next_update_hours_crl'])),
+        if args.yes and args.dry_run:
+            raise ValueError('--dry-run cannot be combined with --yes')
+        if args.serial:
+            if args.yes:
+                raise ValueError('--yes is only used with --filter')
+            ca, _, record = _record(args, conf)
+            serial = str(record['serial_hex'])
+            if args.dry_run:
+                currently_revoked = int(serial, 16) in _ca_revocations(ca)
+                _table(['Action', 'CA', 'Serial', 'Current state', 'Planned state'], [[
+                    'revoke' if revoke_it else 'unrevoke', ca['id'], serial,
+                    'revoked' if currently_revoked else 'not revoked',
+                    'revoked' if revoke_it else 'not revoked',
+                ]])
+                print('DRY RUN: no certificate or CRL modified.')
+                return 0
+            change_revocation(
+                ca, serial, revoke_it=revoke_it,
+                next_update_hours=(args.next_update_hours or int(conf['next_update_hours_crl'])),
+            )
+            print(f"{'Revoked' if revoke_it else 'Unrevoked'} certificate {serial} on CA {ca['id']} (CRL verified).")
+            return 0
+        if args.status == 'any' and args.revocation == 'any' and not args.search:
+            raise ValueError('--filter requires --status, --revocation or --search')
+        if args.limit < 0:
+            raise ValueError('--limit must be >= 0')
+        parse_order_by(args.order_by)
+        ca = _ca(conf, args.ca)
+        cert_dir, _ = _resolve_storage_paths_from_ca(ca)
+        revocations = _ca_revocations(ca)
+        rows, total = list_certificate_rows(
+            cert_dir, query=args.search,
+            status='' if args.status == 'any' else args.status,
+            revocation='' if args.revocation == 'any' else args.revocation,
+            revoked_serials=revocations, order_by=args.order_by,
+            limit=args.limit, synchronize=True,
         )
-        print(f"{'Revoked' if revoke_it else 'Unrevoked'} certificate {serial} on CA {ca['id']} (CRL verified).")
-        return 0
+        candidates = [row for row in rows if not row.is_ca and row.revoked != revoke_it]
+        _table(['Serial', 'Expires', 'Current state', 'Planned state', 'Subject'], [
+            [row.serial_nox, row.not_after.isoformat(),
+             'revoked' if row.revoked else 'not revoked',
+             'revoked' if revoke_it else 'not revoked', row.subject]
+            for row in candidates
+        ])
+        if not args.yes:
+            print(f'DRY RUN: {len(candidates)} certificate(s) selected from {total} matching row(s). '
+                  'Add --yes to execute.')
+            return 0
+        successes = failures = 0
+        for row in candidates:
+            try:
+                change_revocation(
+                    ca, row.serial_nox, revoke_it=revoke_it,
+                    next_update_hours=(args.next_update_hours or int(conf['next_update_hours_crl'])),
+                )
+                successes += 1
+            except (OSError, ValueError, PermissionError) as exc:
+                failures += 1
+                print(f'ERROR: {row.serial_nox}: {exc}', file=sys.stderr)
+        print(f"{'Revoked' if revoke_it else 'Unrevoked'}: {successes}; failed: {failures}; selected: {len(candidates)}")
+        return 2 if failures else 0
     if cmd == 'certificate-delete':
-        ca, cert_dir, record = _record(args, conf)
-        serial = int(str(record['serial_hex']), 16)
-        revoked = serial in _ca_revocations(ca)
-        path = os.path.join(cert_dir, record['relative_path'])
-        expires_at = datetime.fromisoformat(record['not_after'])
-        cert_n, key_n = delete_certificate(
-            ca, cert_path=path, revoked=revoked, expires_at=expires_at,
+        ca = _ca(conf, args.ca)
+        cert_dir, _ = _resolve_storage_paths_from_ca(ca)
+        revocations = _ca_revocations(ca)
+        if args.dry_run and args.yes:
+            raise ValueError('--dry-run cannot be combined with --yes')
+        if args.serial:
+            _, _, record = _record(args, conf)
+            serial = int(str(record['serial_hex']), 16)
+            path = os.path.join(cert_dir, record['relative_path'])
+            expires_at = datetime.fromisoformat(record['not_after'])
+            if args.dry_run:
+                from datetime import timezone
+                expiry = expires_at.replace(tzinfo=timezone.utc) if expires_at.tzinfo is None else expires_at
+                revoked = serial in revocations
+                if not revoked and expiry > datetime.now(timezone.utc):
+                    raise PermissionError('Certificate must be revoked or expired before deletion')
+                if record.get('is_ca'):
+                    raise PermissionError('CA certificates cannot be deleted through certificate delete')
+                _table(['CA', 'Serial', 'Expires', 'Revoked', 'Certificate'], [[
+                    ca['id'], record['serial_hex'], expiry.isoformat(),
+                    'yes' if revoked else 'no', path,
+                ]])
+                print('DRY RUN: certificate and associated key would be moved to .trash; no files modified.')
+                return 0
+            cert_n, key_n = delete_certificate(
+                ca, cert_path=path, revoked=serial in revocations, expires_at=expires_at,
+            )
+            _sync_certificate_cache(cert_dir)
+            print(f"Deleted (moved to .trash): certificate={cert_n}, key={key_n}; serial={record['serial_hex']}")
+            return 0
+        if args.eligible and (args.status != 'any' or args.revocation != 'any'):
+            raise ValueError('--eligible cannot be combined with --status or --revocation; use --filter')
+        if args.filter and args.status == 'any' and args.revocation == 'any' and not args.search:
+            raise ValueError('--filter requires --status, --revocation or --search')
+        if args.limit < 0:
+            raise ValueError('--limit must be >= 0')
+        parse_order_by(args.order_by)
+        rows, _ = list_certificate_rows(
+            cert_dir, query=args.search,
+            status='' if args.eligible or args.status == 'any' else args.status,
+            revocation='' if args.eligible or args.revocation == 'any' else args.revocation,
+            revoked_serials=revocations, order_by=args.order_by,
+            limit=args.limit, synchronize=True,
         )
+        from datetime import timezone
+        now = datetime.now(timezone.utc)
+        candidates = []
+        for row in rows:
+            expiration = row.not_after
+            if expiration.tzinfo is None:
+                expiration = expiration.replace(tzinfo=timezone.utc)
+            expired = expiration <= now
+            if row.is_ca or not (expired or row.revoked):
+                continue
+            candidates.append((row, expiration))
+        _table(['Serial', 'Expires', 'Revoked', 'Subject', 'File'], [
+            [r.serial_nox, e.isoformat(), 'yes' if r.revoked else 'no', r.subject, r.filename]
+            for r, e in candidates
+        ])
+        if not args.yes:
+            print(f'DRY RUN: {len(candidates)} eligible certificate(s). Add --yes to move to .trash.')
+            return 0
+        successes = 0
+        failures = 0
+        for row, expiry in candidates:
+            try:
+                # The shared action enforces the eligibility and path safety rules.
+                delete_certificate(ca, cert_path=os.path.join(cert_dir, row.cache_key),
+                                   revoked=row.revoked, expires_at=expiry)
+                successes += 1
+            except (OSError, ValueError, PermissionError) as exc:
+                failures += 1
+                print(f'ERROR: {row.serial_nox}: {exc}', file=sys.stderr)
         _sync_certificate_cache(cert_dir)
-        print(f"Deleted (moved to .trash): certificate={cert_n}, key={key_n}; serial={record['serial_hex']}")
-        return 0
+        print(f'Deleted: {successes}; failed: {failures}; selected: {len(candidates)}')
+        return 2 if failures else 0
     if cmd == 'crl-resign':
         ca = _ca(conf, args.ca)
         number, serials = resign_ca_crl(
@@ -438,10 +603,23 @@ def main(argv=None) -> int:
     if argv is None:
         argv = sys.argv[1:]
     if not argv:
-        print('adcs-tool: missing subcommand\n', file=sys.stderr)
-        parser.print_help(sys.stderr)
-        return 2
+        parser.print_help()
+        return 0
+    # argparse reports unknown trailing arguments through the root parser.
+    # Keep the help scoped to the deepest matching subcommand.
+    matched = [(i, group, operation, action) for (group, operation), action in parser._action_parsers.items()
+               for i in range(len(argv) - 1) if argv[i:i + 2] == [group, operation]]
+    if matched:
+        parser._active_help_parser = max(matched, key=lambda item: item[0])[3]
+    else:
+        matched_groups = [parser._group_parsers[token] for token in argv if token in parser._group_parsers]
+        if matched_groups:
+            parser._active_help_parser = matched_groups[0]
     args = parser.parse_args(argv)
+    if not getattr(args, 'operation', None):
+        group = parser._group_parsers.get(getattr(args, 'command', None))
+        (group or parser).print_help()
+        return 0
     try:
         return run(args)
     except (ValueError, LookupError, OSError, RuntimeError, PermissionError, KeyError) as exc:
