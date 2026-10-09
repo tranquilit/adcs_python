@@ -11,6 +11,7 @@ from cryptography.x509.oid import (
 )
 
 # helpers/structs already present in your project
+from flask import g
 from utils import  NtdsCASecurityExt, search_user, is_client_certificate_valid_for_ca_reference
 from utils import _apply_static_extensions,validate_csr
 import hashlib
@@ -55,9 +56,18 @@ def define_template(*, app_conf, username=None, request=None, params=None, auth_
         username = XSslClientDn.split('=', 1)[1]
 
 
-    r = search_user(username, "(userAccountControl:1.2.840.113556.1.4.803:=4096)")
-    if not r:
-        return
+    pac = g.get("pac_info", {})
+    flags = pac.get("account_flags")
+    # Samba ACB_* flags (different from LDAP userAccountControl):
+    # 0x0080 = ACB_WSTRUST: workstation account
+    # 0x0100 = ACB_SVRTRUST: domain controller account
+    if flags is not None:
+        is_machine = bool(flags & 0x80) and not (flags & 0x100)
+        if not is_machine:
+            return None
+    elif not search_user(username, "(userAccountControl:1.2.840.113556.1.4.803:=4096)"):
+        # Query LDAP only when PAC flags are unavailable.
+        return None
 
     return {
         # MS-XCEP Attributes/commonName: friendly/unique name of a CertificateEnrollmentPolicy within a GetPoliciesResponse
@@ -326,13 +336,34 @@ def emit_certificate(
 
         username = XSslClientDn.split('=', 1)[1]
 
-    r = search_user(username, "(userAccountControl:1.2.840.113556.1.4.803:=4096)")
-    if not r:
-        return {
-            "status": "denied",
-            "status_text": "denied",
-        }
-    samdbr, sam_entry = r
+
+    pac = g.get("pac_info", {})
+    flags = pac.get("account_flags")
+
+    # Samba ACB_* flags: 0x80 = workstation, 0x100 = domain controller.
+    if flags is not None:
+        if not (flags & 0x80) or flags & 0x100:
+            return {"status": "denied", "status_text": "denied"}
+
+        sam_name = pac.get("sam_name")
+        sid_str = pac.get("sid")
+        dns_domain = pac.get("dns_domain")
+        if not (sam_name and sid_str and dns_domain):
+            return {"status": "denied", "status_text": "denied"}
+
+        # The machine SAM account ends in '$'; derive its usual AD DNS name.
+        hostname = sam_name.removesuffix("$")
+        dns_host = f"{hostname}.{dns_domain}"
+    else:
+        # Fall back to LDAP only when PAC account flags are unavailable.
+        r = search_user(username, "(userAccountControl:1.2.840.113556.1.4.803:=4096)")
+        if not r:
+            return {"status": "denied", "status_text": "denied"}
+        samdbr, sam_entry = r
+        sam_name = _b(sam_entry, "sAMAccountName")
+        hostname = sam_name.removesuffix("$")
+        dns_host = _b(sam_entry, "dNSHostName")
+        sid_str = samdbr.schema_format_value("objectSID", sam_entry["objectSID"][0]).decode("ascii")
 
     denied = False
     must_pending = False
@@ -356,7 +387,7 @@ def emit_certificate(
     now = datetime.utcnow() - timedelta(minutes=5)
 
     # CN = sAMAccountName
-    cn = (sam_entry.get("sAMAccountName") or [b"user"])[0].decode("utf-8", "ignore")
+    cn = sam_name
     validity_seconds = (template or {}).get("validity", {}).get("validity_seconds") or 31536000
 
     builder = (
@@ -391,13 +422,6 @@ def emit_certificate(
     # ✅ static template extensions (EKU/KU/AppPolicies/TemplateInfo)
     builder = _apply_static_extensions(builder, template)
 
-    dns_host = _b(sam_entry or {}, "dNSHostName", "")
-    raw_sam = _b(sam_entry or {}, "sAMAccountName", "")
-    hostname = raw_sam
-
-
-    cn = dns_host or hostname or "computer"
-
     # Dynamic SAN DNS (de-dup)
     names = []
     seen = set()
@@ -409,7 +433,6 @@ def emit_certificate(
         builder = builder.add_extension(cx509.SubjectAlternativeName(names), critical=False)
 
     # ➕ dynamic NTDS (SID) (1.3.6.1.4.1.311.25.2 / ...2.1)
-    sid_str = samdbr.schema_format_value("objectSID", sam_entry["objectSID"][0]).decode('utf-8')
     sid_bytes = sid_str.encode("ascii")
     
     ntds_der = NtdsCASecurityExt({

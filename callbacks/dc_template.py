@@ -19,6 +19,7 @@ from cryptography.x509.oid import (
     ObjectIdentifier as CObjectIdentifier,
 )
 
+from flask import g
 from utils import search_user
 from utils import _apply_static_extensions, validate_csr
 import base64
@@ -68,11 +69,14 @@ def define_template(*, app_conf, username=None, request=None, params=None, auth_
     if not username:
         return
 
-    r = search_user(username,"(userAccountControl:1.2.840.113556.1.4.803:=8192)")
-    if not r:
-        return
-
-    samdbr, sam_entry = r
+    pac = g.get("pac_info", {})
+    flags = pac.get("account_flags")
+    # Samba ACB_SVRTRUST (0x0100): domain controller account.
+    if flags is not None:
+        if not flags & 0x100:
+            return None
+    elif not search_user(username, "(userAccountControl:1.2.840.113556.1.4.803:=8192)"):
+        return None
 
 
     return {
@@ -247,6 +251,11 @@ def emit_certificate(
 
         username = XSslClientDn.split('=', 1)[1]
 
+    # Reject a known non-DC account without querying LDAP.
+    flags = g.get("pac_info", {}).get("account_flags")
+    if flags is not None and not flags & 0x100:
+        return {"status": "denied", "status_text": "denied"}
+
     csr = cx509.load_der_x509_csr(csr_der)
     validate_csr(csr)
 
@@ -259,7 +268,7 @@ def emit_certificate(
     samdbr, sam_entry = r
 
 
-    csr = cx509.load_der_x509_csr(csr_der)
+
     ca_cert = cx509.load_der_x509_certificate(ca["__certificate_der"])
     now = datetime.utcnow() - timedelta(minutes=5)
 

@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta
-from typing import Iterable, Optional, Dict, Any
+from typing import Optional, Dict, Any
 
 from asn1crypto import core as a_core, x509 as a_x509
 
@@ -11,6 +11,7 @@ from cryptography.x509.oid import (
     ObjectIdentifier as CObjectIdentifier,
 )
 
+from flask import g
 from utils import (
     NtdsCASecurityExt,
     _aia_extension_der,
@@ -26,15 +27,6 @@ from utils import (
 
 
 
-# ---------- helpers (optional) ----------
-def _is_member_of(sam_entry: dict, groups: Iterable[str]) -> bool:
-    member_of = sam_entry.get("memberOf") or []
-    for raw in member_of:
-        dn = raw.decode("utf-8", "ignore") if isinstance(raw, (bytes, bytearray)) else str(raw)
-        for frag in groups:
-            if frag.lower() in dn.lower():
-                return True
-    return False
 
 
 # -----------------------------------------------------------------------------
@@ -116,16 +108,23 @@ def define_template(*, app_conf, username=None, request=None, params=None, auth_
             return None
         username = XSslClientDn.split('=', 1)[1]
 
-    r = search_user(username, "(!(userAccountControl:1.2.840.113556.1.4.803:=4096))(!(userAccountControl:1.2.840.113556.1.4.803:=8192))")
-    if not r:
-        return
-    samdbr, sam_entry = r
-
-    # Example: special group = duration x2
-    if _is_member_of(sam_entry or {}, ["CN=PKI-LongLived"]):
-        validity_seconds *= 2
-        renewal_seconds *= 2
-        
+    pac = g.get("pac_info", {})
+    flags = pac.get("account_flags")
+    if flags is not None:
+        # Samba flags: 0x10 = user, 0x80 = machine, 0x100 = DC.
+        # Reject non-user accounts
+        if not (flags & 0x10) or flags & 0x180:
+            return None
+        cn, sid_str, upn = pac.get("sam_name"), pac.get("sid"), pac.get("upn")
+    else:
+        # PAC account flags are missing: validate and resolve through LDAP.
+        r = search_user(username, "(!(userAccountControl:1.2.840.113556.1.4.803:=4096))(!(userAccountControl:1.2.840.113556.1.4.803:=8192))")
+        if not r:
+            return {"status": "denied", "status_text": "denied"}
+        samdbr, sam_entry = r
+        cn = (sam_entry.get("sAMAccountName") or [b"user"])[0].decode("utf-8", "ignore")
+        sid_str = samdbr.schema_format_value("objectSID", sam_entry["objectSID"][0]).decode("utf-8")
+        upn = (sam_entry.get("userPrincipalName") or [b""])[0].decode("utf-8", "ignore")
     return {
     # MS-XCEP Attributes/commonName: friendly/unique name of the policy item returned by CEP/XCEP
     # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cd22d3a0-f469-4a44-95ed-d10ce4dc2063
@@ -422,13 +421,23 @@ def emit_certificate(
 
         username = XSslClientDn.split('=', 1)[1]
 
-    r = search_user(username, "(!(userAccountControl:1.2.840.113556.1.4.803:=4096))(!(userAccountControl:1.2.840.113556.1.4.803:=8192))")
-    if not r:
-        return {
-            "status": "denied",
-            "status_text": "denied",
-        }
-    samdbr, sam_entry = r
+    pac = g.get("pac_info", {})
+    flags = pac.get("account_flags")
+    if flags is not None:
+        # Samba ACB_*: 0x10 = user, 0x80 = workstation, 0x100 = DC.
+        if not (flags & 0x10) or flags & 0x180:
+            return {"status": "denied", "status_text": "denied"}
+        cn, sid_str = pac.get("sam_name"), pac.get("sid")
+        if not cn or not sid_str:
+            return {"status": "denied", "status_text": "denied"}
+    else:
+        # PAC account flags are missing: validate and resolve through LDAP.
+        r = search_user(username, "(!(userAccountControl:1.2.840.113556.1.4.803:=4096))(!(userAccountControl:1.2.840.113556.1.4.803:=8192))")
+        if not r:
+            return {"status": "denied", "status_text": "denied"}
+        samdbr, sam_entry = r
+        cn = (sam_entry.get("sAMAccountName") or [b"user"])[0].decode("utf-8", "ignore")
+        sid_str = samdbr.schema_format_value("objectSID", sam_entry["objectSID"][0]).decode("utf-8")
 
     denied = False
     must_pending = False
@@ -471,17 +480,12 @@ def emit_certificate(
 
     
     # CN = sAMAccountName
-    cn = (sam_entry.get("sAMAccountName") or [b"user"])[0].decode("utf-8", "ignore")
     validity_seconds = (template or {}).get("validity", {}).get("validity_seconds") or 31536000
 
     priv = ca["__key_obj"]
     not_after = now + timedelta(seconds=int(validity_seconds))
 
     # SID / NTDS extension
-    sid_str = samdbr.schema_format_value(
-        "objectSID",
-        sam_entry["objectSID"][0],
-    ).decode("utf-8")
 
     sid_bytes = sid_str.encode("ascii")
 
