@@ -66,9 +66,11 @@ def build_parser() -> argparse.ArgumentParser:
         _add_global_config(sub)
         return sub
 
-    ca_list = command('ca-list', 'List CAs, parents, paths, AIA/CRL URLs and HSM settings.')
+    ca_list = command('ca-list', 'List CA identifiers, display names and parent CAs.')
     ca_list.add_argument('--json', action='store_true', help='Output structured JSON.')
-    ca_list.add_argument('--ca', help='Display one CA only (id or display name).')
+    ca_show = command('ca-show', 'Show full configuration details for one CA (secrets redacted).')
+    ca_show.add_argument('ca_id', help='CA identifier from ca list (or display name).')
+    ca_show.add_argument('--json', action='store_true', help='Output structured JSON.')
 
     callbacks = command('callback-list', 'List configured callbacks, templates and associated CAs.')
     callbacks.add_argument('--json', action='store_true')
@@ -166,7 +168,7 @@ def build_parser() -> argparse.ArgumentParser:
     rotate.add_argument('--no-write-fullchain-to-crt', action='store_true')
     # Public commands are exclusively hierarchical; templates share arguments.
     groups = {
-        'ca': ('Certificate authority management.', {'list': 'ca-list', 'create': 'ca-create'}),
+        'ca': ('Certificate authority management.', {'list': 'ca-list', 'show': 'ca-show', 'create': 'ca-create'}),
         'certificate': ('Certificate management.', {
             'list': 'certificate-list', 'show': 'certificate-show',
             'revoke': 'certificate-revoke', 'unrevoke': 'certificate-unrevoke',
@@ -293,14 +295,31 @@ def run(args: argparse.Namespace) -> int:
             settings = yaml.safe_load(file) or {}
         _output_structure(_redact_configuration(settings), args.json)
         return 0
-    if cmd in ('callback-list', 'ca-list'):
+    if cmd in ('callback-list', 'ca-list', 'ca-show'):
         # Configuration inspection remains usable even without signing keys.
         with open(args.confadcs, 'r', encoding='utf-8') as file:
             settings = yaml.safe_load(file) or {}
         if cmd == 'callback-list':
             _output_structure(public_callback_configuration(settings), args.json)
+        elif cmd == 'ca-show':
+            _output_structure(public_ca_configuration(settings, args.ca_id)[0], args.json)
         else:
-            _output_structure(public_ca_configuration(settings, args.ca), args.json)
+            cas = public_ca_configuration(settings)
+            summary = [
+                {'id': ca.get('id', ''),
+                 'display_name': ca.get('display_name', ''),
+                 'parent': ca.get('parent', '')}
+                for ca in cas
+            ]
+            if args.json:
+                _output_structure(summary, True)
+            elif summary:
+                _table(['CA ID', 'Display name', 'Parent CA'], [
+                    [item['id'], item['display_name'], item['parent']]
+                    for item in summary
+                ])
+            else:
+                print('(no CAs configured)')
         return 0
 
     read_only = cmd in ('certificate-list', 'certificate-show', 'certificate-delete')

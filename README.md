@@ -135,7 +135,8 @@ There are **two** independent entry points:
 ```bash
 ./adcs-tool ca list
 ./adcs-tool ca list --json
-./adcs-tool ca list --ca ca_inter_test
+./adcs-tool ca show ca_inter_test
+./adcs-tool ca show ca_inter_test --json
 ./adcs-tool callback list
 ./adcs-tool callback list --json
 ./adcs-tool config show --json  # secrets are redacted
