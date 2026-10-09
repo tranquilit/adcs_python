@@ -173,18 +173,18 @@ View and manage a particular certificate, using its **hexadecimal serial**:
 ./adcs-tool crl resign-all
 ```
 
-**Safety:** `certificate-delete` refuses to remove a currently valid,
+**Safety:** `certificate delete` refuses to remove a currently valid,
 non-revoked certificate. Deletion moves the certificate and corresponding
 private key into `.trash` as in the GUI; revocation is determined from the
 current CRL, not a stale SQLite flag.
 
 New certificate issuance and the other previously available non-interactive
-operations have moved to `ca-create`, `certificate-issue`, `ket-create`,
-`csr-submit` and `certificate-rotate`. See each subcommand's `--help` for
-parameters. The `ca-create` **stdout YAML block is unchanged** and can still
+operations are available as `ca create`, `certificate issue`, `ket create`,
+`csr submit` and `certificate rotate`. See each subcommand's `--help` for
+parameters. The `ca create` **stdout YAML block is unchanged** and can still
 be appended using `>> /etc/adcs/adcs.yaml` as shown below. Diagnostics are
 written to stderr. For a custom configuration file, pass
-`--confadcs /path/to/adcs.yaml` before or after the subcommand.
+`--confadcs /path/to/adcs.yaml` before the command or after the command family (for example, `adcs-tool --confadcs /etc/adcs/adcs.yaml ca list`).
 
 Launch the Textual interface with:
 
