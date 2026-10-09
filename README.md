@@ -192,16 +192,16 @@ field names only, and each field may specify `ASC` or `DESC`, separated by
 commas. The help always lists available fields. `--json` is available for
 scripting.
 
-View and manage a particular certificate, using its **hexadecimal serial**:
+View and manage a particular certificate, using its **serial**:
 
 ```bash
-adcs-tool certificate show --ca ca_inter_test --serial 0x1234 --json
-adcs-tool certificate revoke --ca ca_inter_test --serial 0x1234
-adcs-tool certificate revoke --ca ca_inter_test --serial 0x1234 --dry-run
-adcs-tool certificate unrevoke --ca ca_inter_test --serial 0x1234
-adcs-tool certificate unrevoke --ca ca_inter_test --serial 0x1234 --dry-run
-adcs-tool certificate delete --ca ca_inter_test --serial 0x1234
-adcs-tool certificate delete --ca ca_inter_test --serial 0x1234 --dry-run
+adcs-tool certificate show --ca ca_inter_test --serial 1234 --json
+adcs-tool certificate revoke --ca ca_inter_test --serial 1234
+adcs-tool certificate revoke --ca ca_inter_test --serial 1234 --dry-run
+adcs-tool certificate unrevoke --ca ca_inter_test --serial 1234
+adcs-tool certificate unrevoke --ca ca_inter_test --serial 1234 --dry-run
+adcs-tool certificate delete --ca ca_inter_test --serial 1234
+adcs-tool certificate delete --ca ca_inter_test --serial 1234 --dry-run
 adcs-tool crl resign --ca ca_inter_test
 adcs-tool crl resign-all
 ```
