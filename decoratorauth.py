@@ -15,42 +15,213 @@ from utils import is_client_certificate_valid_for_ca_reference
 logger = get_logger("auth")
 
 
-def _sid_from_pac(initiator_name):
-    """Return the account SID from an authenticated Kerberos PAC, if exposed."""
+try:
+    from samba.dcerpc import krb5pac
+    from samba.ndr import ndr_unpack
+except (ImportError, OSError):
+    krb5pac = None
+    ndr_unpack = None
+
+
+_MAX_PAC_BYTES = 4 * 1024 * 1024
+_SE_GROUP_ENABLED = 0x00000004
+_SE_GROUP_USE_FOR_DENY_ONLY = 0x00000010
+
+
+def _empty_pac_info():
+    """A fresh per-request dictionary, including for non-Kerberos requests."""
+    return {
+        "sid": None,
+        "sam_name": None,
+        "upn": None,
+        "dns_domain": None,
+        "groups": None,
+    }
+
+
+def _authenticated_pac_attribute(name, key):
+    """Return an authenticated PAC name attribute as bytes, if exposed.
+
+    Access these attributes only after SecurityContext.complete is True.
+    Never trust unauthenticated GSSAPI name attributes as authorization data.
+    """
     try:
-        # RFC 6680 GSS name attribute (MIT Kerberos / Heimdal support varies).
-        info = initiator_name.attributes["urn:mspac:upn-dns-info"]
-    except (KeyError, TypeError, NotImplementedError, gssapi.exceptions.GSSError):
+        attr = name.attributes[key]
+    except (
+        AttributeError,
+        KeyError,
+        TypeError,
+        NotImplementedError,
+        gssapi.exceptions.GSSError,
+    ):
         return None
 
-    if not info.authenticated or not info.complete or len(info.values) != 1:
+    if not attr.authenticated or not attr.complete or len(attr.values) != 1:
         return None
-
-    data = next(iter(info.values))
-    # MS-PAC UPN_DNS_INFO: 12-byte base header, 20-byte extended header.
-    if not isinstance(data, bytes) or len(data) < 20:
+    raw = next(iter(attr.values))
+    if not isinstance(raw, bytes) or len(raw) > _MAX_PAC_BYTES:
         return None
+    return raw
 
-    flags = struct.unpack_from("<I", data, 8)[0]
-    if not flags & 0x02:  # PAC_UPN_DNS_FLAG_HAS_SAM_NAME_AND_SID
-        return None
 
-    sid_length, sid_offset = struct.unpack_from("<HH", data, 16)
-    if sid_length < 12 or sid_offset < 20 or sid_offset + sid_length > len(data):
-        return None
+def _populate_upn_dns_info(name, info):
+    """Decode PAC_UPN_DNS_INFO; SID and SAM extension is optional."""
+    data = _authenticated_pac_attribute(name, "urn:mspac:upn-dns-info")
+    if not data or len(data) < 12:
+        return
 
+    upn_length, upn_offset, dns_length, dns_offset, flags = struct.unpack_from(
+        "<HHHHI", data, 0
+    )
+    has_sam_and_sid = bool(flags & 0x02)
+    header_size = 20 if has_sam_and_sid else 12
+    if len(data) < header_size:
+        return
+
+    def read_utf16(length, offset):
+        if length == 0 or length % 2 or offset < header_size:
+            return None
+        if offset + length > len(data):
+            return None
+        try:
+            return data[offset:offset + length].decode("utf-16-le")
+        except UnicodeDecodeError:
+            return None
+
+    info["upn"] = read_utf16(upn_length, upn_offset)
+    info["dns_domain"] = read_utf16(dns_length, dns_offset)
+
+    if not has_sam_and_sid:
+        return
+    sam_length, sam_offset, sid_length, sid_offset = struct.unpack_from(
+        "<HHHH", data, 12
+    )
+    info["sam_name"] = read_utf16(sam_length, sam_offset)
+
+    if sid_length < 12 or sid_offset < header_size:
+        return
+    if sid_offset + sid_length > len(data):
+        return
     sid = data[sid_offset:sid_offset + sid_length]
     revision, count = sid[0], sid[1]
     if revision != 1 or not 1 <= count <= 15:
-        return None
+        return
     if sid_length != 8 + 4 * count:
-        return None
-
+        return
     authority = int.from_bytes(sid[2:8], "big")
     subauths = struct.unpack_from("<" + "I" * count, sid, 8)
-    return f"S-{revision}-{authority}" + "".join(
+    info["sid"] = f"S-{revision}-{authority}" + "".join(
         f"-{value}" for value in subauths
     )
+
+
+def _valid_sid(sid):
+    """Convert a Samba dom_sid to a conventional SID string, if valid."""
+    if sid is None:
+        return None
+    text = str(sid)
+    parts = text.split("-")
+    if len(parts) < 3 or parts[0] != "S" or not all(
+        part.isascii() and part.isdecimal() for part in parts[1:]
+    ):
+        return None
+    return text
+
+
+def _populate_logon_info(name, info):
+    """Decode PAC_LOGON_INFO from the authenticated full PAC using Samba NDR.
+
+    Includes domain groups, primary group, resource-domain groups, and extra
+    enabled authorization SIDs. A genuine empty list means LOGON_INFO was
+    decoded but contained no usable groups; None means it was unavailable.
+    """
+    if krb5pac is None or ndr_unpack is None:
+        return
+
+    # The urn:mspac: attribute is the complete PAC, not just LOGON_INFO.
+    # ndr_unpack(PAC_DATA, ...) handles the PAC buffer offsets and NDR headers.
+    raw_pac = _authenticated_pac_attribute(name, "urn:mspac:")
+    if not raw_pac:
+        return
+
+    try:
+        pac = ndr_unpack(krb5pac.PAC_DATA, raw_pac)
+        for pac_buffer in pac.buffers:
+            if pac_buffer.type != krb5pac.PAC_TYPE_LOGON_INFO:
+                continue
+
+            # Samba's Python PAC_BUFFER.info is the decoded type-specific
+            # structure; for LOGON_INFO, .info is PAC_LOGON_INFO itself.
+            logon = pac_buffer.info.info
+            if logon is None:
+                return
+            info3 = logon.info3
+            base = info3.base
+            domain_sid = _valid_sid(base.domain_sid)
+
+            if info["sid"] is None and domain_sid and base.rid:
+                info["sid"] = f"{domain_sid}-{int(base.rid)}"
+            if info["sam_name"] is None:
+                info["sam_name"] = getattr(base.account_name, "string", None)
+
+            groups = []
+            seen = set()
+
+            def add_sid(sid):
+                sid = _valid_sid(sid)
+                if sid and sid not in seen:
+                    seen.add(sid)
+                    groups.append(sid)
+
+            def add_rid(sid_prefix, rid):
+                if sid_prefix and rid is not None and 0 < int(rid) <= 0xFFFFFFFF:
+                    add_sid(f"{sid_prefix}-{int(rid)}")
+
+            def enabled(entry):
+                # Do not expose disabled / deny-only entries as groups for
+                # positive authorization decisions.
+                attributes = int(entry.attributes)
+                return bool(attributes & _SE_GROUP_ENABLED) and not bool(
+                    attributes & _SE_GROUP_USE_FOR_DENY_ONLY
+                )
+
+            # The primary group can be absent from the ordinary groups array.
+            add_rid(domain_sid, base.primary_gid)
+            for entry in (base.groups.rids or []):
+                if enabled(entry):
+                    add_rid(domain_sid, entry.rid)
+
+            # Extra SIDs can represent forest-trust groups or SIDHistory.
+            for entry in (info3.sids or []):
+                if enabled(entry):
+                    add_sid(entry.sid)
+
+            # Cross-domain / resource group SIDs use their own domain prefix.
+            resource = logon.resource_groups
+            if resource is not None:
+                resource_domain_sid = _valid_sid(resource.domain_sid)
+                for entry in (resource.groups.rids or []):
+                    if enabled(entry):
+                        add_rid(resource_domain_sid, entry.rid)
+
+            info["groups"] = groups
+            return
+    except Exception as exc:
+        # PAC decoding is optional metadata; never turn a successful GSSAPI
+        # authentication into a 500 error if a PAC buffer cannot be decoded.
+        log_event(
+            logger, logging.DEBUG, "pac_logon_info_decode_failed",
+            "PAC LOGON_INFO decoding unavailable",
+            reason="ndr_decode_failed", error_type=type(exc).__name__,
+        )
+
+
+def _pac_info_from_name(initiator_name):
+    """Extract available PAC identity and group information, with no LDAP."""
+    info = _empty_pac_info()
+    _populate_upn_dns_info(initiator_name, info)
+    _populate_logon_info(initiator_name, info)
+    return info
 
 
 def kerberos_authenticate(auth_header):
@@ -113,8 +284,7 @@ def kerberos_authenticate(auth_header):
             return None, response_token
 
         user = str(initiator_name)
-        # The PAC is read only after successful Kerberos authentication.
-        g.sid = _sid_from_pac(initiator_name)
+        g.pac_info = _pac_info_from_name(initiator_name)
 
         return user, response_token
 
@@ -174,9 +344,9 @@ def _extract_username_password_from_soap(raw):
 def auth_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
+        g.pac_info = _empty_pac_info()
         conf = current_app.confadcs
         auth_header = request.headers.get('Authorization')
-        g.sid = None
         user = None
         response_token = None
         auth_method = None
