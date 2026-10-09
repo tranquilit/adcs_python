@@ -121,23 +121,106 @@ Copy template exemple, and edit if needed:
 cp -r /opt/adcs_python/callbacks /etc/adcs/callbacks
 ```
 
+
+ADCS CLI, SQLite cache and optional Textual interface
+====================================================
+
+There are **two** independent entry points:
+
+* `./adcs-tool`: non-interactive command-line administration; no Textual dependency.
+* `./manage-ca-ui`: optional Textual interface (same UI, keyboard focus, multi-selection, sorting and search as before).
+
+Both call `adcs_actions.py` for CA/certificate/CRL operations and
+`adcs_cert_store.py` for the **same per-CA SQLite cache**, search, filters,
+order and limits. SQLite stores parsed certificates and detail records and is
+synchronized before CLI reads; the UI synchronizes it in a background worker.
+The UI keeps only an in-memory snapshot needed to preserve cursor, scroll,
+selection and focus. If SQLite is unavailable, an error is shown instead of
+silently switching to a second parser/filter implementation.
+
+The cache is stored under `$XDG_DATA_HOME/adcs-tui/cert-cache/` or
+`~/.local/share/adcs-tui/cert-cache/` and is keyed by the certificate directory.
+An index record is created for each new certificate; removed files are purged.
+
+CA and callback information (includes CA parents, effective storage paths,
+private-key *locations*, AIA/CRL URLs, HSM configuration and associated CA ids):
+
+```bash
+./adcs-tool ca-list
+./adcs-tool ca-list --json
+./adcs-tool ca-list --ca ca_inter_test
+./adcs-tool callback-list
+./adcs-tool callback-list --json
+./adcs-tool config-show --json  # secrets are redacted
+```
+
+List certificates from any CA, applying the same 30-day expiration and
+revocation filters as the UI:
+
+```bash
+./adcs-tool certificate-list --ca ca_inter_test
+./adcs-tool certificate-list --ca ca_inter_test --search example.org --status expiring
+./adcs-tool certificate-list --ca ca_inter_test --revocation revoked --limit 0
+./adcs-tool certificate-list --ca ca_inter_test --order-by "expiration_date ASC, serial DESC" --limit 200
+./adcs-tool certificate-list --ca ca_inter_test --order-by "revoked DESC, not_after ASC" --json
+./adcs-tool certificate-list --help  # complete list of permitted ORDER BY fields
+```
+
+Valid statuses are `any`, `expired`, `expiring` (within the next 30 days),
+`valid` (more than 30 days). Revocation values are `any`, `revoked` and
+`not_revoked`. `--limit` defaults to **1000** (overridden by positive
+`ADCS_MAX_ROWS`); **0** means unlimited. Sort expressions accept whitelisted
+field names only, and each field may specify `ASC` or `DESC`, separated by
+commas. The help always lists available fields. `--json` is available for
+scripting.
+
+View and manage a particular certificate, using its **hexadecimal serial**:
+
+```bash
+./adcs-tool certificate-show --ca ca_inter_test --serial 0x1234 --json
+./adcs-tool certificate-revoke --ca ca_inter_test --serial 0x1234
+./adcs-tool certificate-unrevoke --ca ca_inter_test --serial 0x1234
+./adcs-tool certificate-delete --ca ca_inter_test --serial 0x1234
+./adcs-tool crl-resign --ca ca_inter_test
+./adcs-tool crl-resign-all
+```
+
+**Safety:** `certificate-delete` refuses to remove a currently valid,
+non-revoked certificate. Deletion moves the certificate and corresponding
+private key into `.trash` as in the GUI; revocation is determined from the
+current CRL, not a stale SQLite flag.
+
+New certificate issuance and the other previously available non-interactive
+operations have moved to `ca-create`, `certificate-issue`, `ket-create`,
+`csr-submit` and `certificate-rotate`. See each subcommand's `--help` for
+parameters. The `ca-create` **stdout YAML block is unchanged** and can still
+be appended using `>> /etc/adcs/adcs.yaml` as shown below. Diagnostics are
+written to stderr. For a custom configuration file, pass
+`--confadcs /path/to/adcs.yaml` before or after the subcommand.
+
+Launch the Textual interface with:
+
+```bash
+./manage-ca-ui --confadcs /etc/adcs/adcs.yaml
+```
+
 Create a local CA (for testing)
 ---------------------------------------------------------
  
-By default, `./manageca.py --create-ca` generates an RSA CA:
+By default, `./adcs-tool ca-create` generates an RSA CA:
 
 ```
-./manageca.py --create-ca --cn "CA Root Test" --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
-./manageca.py --create-ket-cert --ca-id "CA Root Test" >> /etc/adcs/adcs.yaml
-./manageca.py --create-ca --signer-ca-id "CA Root Test" --cn "CA Inter Test" --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
-./manageca.py --create-ket-cert --ca-id "CA Inter Test" >> /etc/adcs/adcs.yaml
-./manageca.py --issue-cert --signer-ca-id "CA Inter Test" --cn testadcs.mydomain.lan --san testadcs.mydomain.lan --crt-path /etc/nginx/crt.pem --key-path /etc/nginx/key.pem
+./adcs-tool ca-create --cn "CA Root Test" --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
+./adcs-tool ket-create --ca-id "CA Root Test" >> /etc/adcs/adcs.yaml
+./adcs-tool ca-create --signer-ca-id "CA Root Test" --cn "CA Inter Test" --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
+./adcs-tool ket-create --ca-id "CA Inter Test" >> /etc/adcs/adcs.yaml
+./adcs-tool certificate-issue --signer-ca-id "CA Inter Test" --cn testadcs.mydomain.lan --san testadcs.mydomain.lan --crt-path /etc/nginx/crt.pem --key-path /etc/nginx/key.pem
 ```
 
 To generate an ECC CA instead, use `--key-type ec` and select the curve with `--ec-curve`:
 
 ```
-./manageca.py --create-ca --cn "CA Root ECC Test" --key-type ec --ec-curve secp384r1 --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
+./adcs-tool ca-create --cn "CA Root ECC Test" --key-type ec --ec-curve secp384r1 --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
 ```
 
 Supported ECC curves are `secp256r1`, `secp384r1`, and `secp521r1`. Aliases such as `prime256v1`, `p-256`, `p-384`, and `p-521` are also accepted.
@@ -146,11 +229,11 @@ Supported ECC curves are `secp256r1`, `secp384r1`, and `secp521r1`. Aliases such
 Create a CA certificate from an existing CSR public key
 ---------------------------------------------------------
 
-`./manageca.py --create-ca` can also create a CA certificate from an existing CSR with `--csr-path`.
+`./adcs-tool ca-create` can also create a CA certificate from an existing CSR with `--csr-path`.
 This is useful when the future CA private key is generated and kept outside this tool, for example in an HSM.
 
 Only the public key is read from the CSR. The CSR subject, SANs, attributes, and requested extensions are ignored.
-The CA certificate subject is still built from the `--cn` value and the CA extensions are still generated by `manageca.py`.
+The CA certificate subject is still built from the `--cn` value and the CA extensions are still generated by `adcs-tool`.
 
 Example:
 
@@ -164,7 +247,7 @@ openssl req -new \
 
 # Issue the new CA certificate with the public key from the CSR.
 # The certificate subject below is "CA Inter HSM Test", not the CSR subject.
-./manageca.py --create-ca \
+./adcs-tool ca-create \
   --signer-ca-id "CA Root Test" \
   --cn "CA Inter HSM Test" \
   --csr-path subca.csr.pem \
@@ -172,7 +255,7 @@ openssl req -new \
 ```
 
 When `--csr-path` is used, `--signer-ca-id` is required because the CA certificate is signed by an existing parent CA.
-No private key is generated or written for the new CA, and no initial CRL is created for it because the new CA private key is not available to `manageca.py`.
+No private key is generated or written for the new CA, and no initial CRL is created for it because the new CA private key is not available to `adcs-tool`.
 
 
 > A **KET certificate** (**Key Exchange Token**) is a special certificate used to protect the **exchange of encrypted enrollment data** between the client and the server in Microsoft ADCS workflows, for example for **TPM attestation**.
@@ -299,7 +382,7 @@ Regenerate and re-sign the CRL
 
 ```bash
 cd /opt/adcs_python
-./manageca.py --resign-all-crl
+./adcs-tool crl-resign-all
 ```
 
 Add cron 
@@ -311,7 +394,7 @@ Rotate adcs Certificate When Expiring Soon
 
 ```bash
 cd /opt/adcs_python
-./manageca.py --rotate-if-expiring --signer-ca-id "CA Inter Test" --crt-path /etc/nginx/crt.pem  --key-path /etc/nginx/key.pem --threshold-days 30 --valid-days 365
+./adcs-tool certificate-rotate --signer-ca-id "CA Inter Test" --crt-path /etc/nginx/crt.pem  --key-path /etc/nginx/key.pem --threshold-days 30 --valid-days 365
 ```
 
 - `--signer-ca-id` is the CA identifier (e.g., `"CA Inter Test"`).
@@ -323,7 +406,7 @@ Launch the admin GUI, then select the target certificate to re-sign/re-issue:
 
 ```bash
 cd /opt/adcs_python
-./manageca.py
+./manage-ca-ui
 ```  
 ![Demo TERMINAL UI](demo/ui_terminal.png "DEMO TERMINAL UI")
 
@@ -334,7 +417,7 @@ cd /opt/adcs_python
 You can submit a CSR directly from the command line without using the API interface:
 
 ```bash
-/opt/adcs_python/manageca.py --submit-csr --signer-ca-id 'ca_inter_test' --username 'srvads$@MYDOMAIN.LAN' --template-name 'dc' --csr-path srvads.csr
+/opt/adcs_python/adcs-tool csr-submit --signer-ca-id 'ca_inter_test' --username 'srvads$@MYDOMAIN.LAN' --template-name 'dc' --csr-path srvads.csr
 ```
 
 🔐 TPM Attestation
