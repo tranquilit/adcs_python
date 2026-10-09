@@ -153,6 +153,7 @@ revocation filters as the UI:
 ./adcs-tool certificate list --ca ca_inter_test --order-by "expiration_date ASC, serial DESC" --limit 200
 ./adcs-tool certificate list --ca ca_inter_test --order-by "revoked DESC, not_after ASC" --json
 ./adcs-tool certificate list --help  # complete list of permitted ORDER BY fields
+# --filter is optional for certificate list; status/revocation/search work without it.
 ```
 
 Valid statuses are `any`, `expired`, `expiring` (within the next 30 days),
@@ -618,3 +619,21 @@ To stay as close as possible to actual ADCS behavior, it is recommended to:
 Yes, this project can be used as a stateless gateway in front of another PKI, as long as the client does not explicitly require a signed CMC response (`CR_IN_FULLRESPONSE`).
 
 `--dry-run` on `certificate revoke`, `certificate unrevoke`, and `certificate delete` previews the action without changing certificates, private keys or CRLs. For bulk deletion, a preview is already the default unless `--yes` is passed; `--dry-run` and `--yes` cannot be combined. Cache indexing may still be refreshed during inspection.
+
+### Bash Tab completion
+
+To enable interactive Tab completion in the current Bash session from the project directory:
+
+```bash
+source ./adcs-tool.bash-completion
+```
+
+To enable it for every Bash session, install the completion file (as root, on systems with `bash-completion`):
+
+```bash
+install -Dm644 adcs-tool.bash-completion /usr/share/bash-completion/completions/adcs-tool
+```
+
+If invoking the command as `./adcs-tool`, load the script with `source` in your shell profile if the automatic completion loader does not load it.
+
+Tab completes command groups, subcommands, options, enumerated values (`--status`, `--revocation`, `--key-type`), sorting fields for `--order-by`, filesystem paths and `--ca` identifiers from `adcs.yaml`. The CA config path defaults to `/etc/adcs/adcs.yaml` and can be changed via `--confadcs`. Completion reads configuration only: it never performs certificate operations or changes SQLite. Bash completion requires Bash; other shells are not configured by this script.

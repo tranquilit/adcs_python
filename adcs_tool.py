@@ -598,10 +598,85 @@ def run(args: argparse.Namespace) -> int:
     raise ValueError(f'Unknown command: {cmd}')
 
 
-def main(argv=None) -> int:
+def _complete_words(words: list[str]) -> list[str]:
+    """Read-only Bash completion driven by the same argparse definitions as the CLI."""
     parser = build_parser()
+    if not words:
+        words = ['']
+    current, previous = words[-1], words[:-1]
+    groups = parser._group_parsers
+    group = next((value for value in previous if value in groups), None)
+    operation = None
+    if group:
+        index = previous.index(group)
+        operation = previous[index + 1] if len(previous) > index + 1 else None
+    context = parser._action_parsers.get((group, operation)) if group and operation else None
+    if context is None:
+        context = groups.get(group, parser)
+
+    # Resolve current --confadcs without importing services or modifying SQLite.
+    config_path = '/etc/adcs/adcs.yaml'
+    for index, word in enumerate(previous):
+        if word == '--confadcs' and index + 1 < len(previous):
+            config_path = previous[index + 1]
+        elif word.startswith('--confadcs='):
+            config_path = word.split('=', 1)[1]
+
+    def ca_ids():
+        try:
+            with open(config_path, encoding='utf-8') as stream:
+                conf = yaml.safe_load(stream) or {}
+            cas = conf.get('cas', []) if isinstance(conf, dict) else []
+            if isinstance(cas, dict):
+                cas = cas.values()
+            return [str(ca['id']) for ca in cas if isinstance(ca, dict) and ca.get('id')]
+        except (OSError, yaml.YAMLError, TypeError, ValueError):
+            return []
+
+    actions = context._actions
+    value_options = {opt: action for action in actions if action.nargs != 0
+                     for opt in action.option_strings}
+    if previous and previous[-1] in value_options:
+        option = previous[-1]
+        action = value_options[option]
+        if option in ('--ca', '--ca-id', '--signer-ca-id'):
+            choices = ca_ids()
+        elif action.choices:
+            choices = [str(choice) for choice in action.choices]
+        elif option == '--order-by':
+            choices = [str(field) for field in ORDER_BY_FIELDS]
+        else:
+            choices = []
+    elif current.startswith('--') and '=' in current:
+        option, fragment = current.split('=', 1)
+        action = value_options.get(option)
+        if option in ('--ca', '--ca-id', '--signer-ca-id'):
+            choices = [option + '=' + ca for ca in ca_ids()]
+        elif action and action.choices:
+            choices = [option + '=' + str(choice) for choice in action.choices]
+        else:
+            choices = []
+    elif current.startswith('-'):
+        choices = [opt for action in actions for opt in action.option_strings]
+    elif group is None:
+        choices = list(groups)
+    elif operation is None or operation not in [key[1] for key in parser._action_parsers if key[0] == group]:
+        choices = [name for g, name in parser._action_parsers if g == group]
+    elif group == 'ca' and operation == 'show' and previous[-1] == 'show':
+        choices = ca_ids()
+    else:
+        choices = []
+    return sorted(set(choice for choice in choices if choice.startswith(current)))
+
+
+def main(argv=None) -> int:
     if argv is None:
         argv = sys.argv[1:]
+    if argv and argv[0] == '--_complete':
+        for completion in _complete_words(argv[1:]):
+            print(completion)
+        return 0
+    parser = build_parser()
     if not argv:
         parser.print_help()
         return 0
