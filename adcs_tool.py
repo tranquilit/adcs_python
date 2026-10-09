@@ -3,12 +3,13 @@
 """Non-interactive ADCS management, sharing data/operations with Textual UI.
 
 No Textual imports: the server can use ``adcs-tool`` without installing a UI.
-The human-readable YAML block printed by ``ca-create`` is delegated directly
+The human-readable YAML block printed by ``ca create`` is delegated directly
 and unchanged to utils_crt._cmd_create_ca() for shell redirection compatibility.
 """
 from __future__ import annotations
 
 import argparse
+import shutil
 import json
 import os
 import sys
@@ -55,10 +56,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument('--confadcs', default='/etc/adcs/adcs.yaml',
                         help='Path of adcs.yaml (default: /etc/adcs/adcs.yaml)')
-    commands = parser.add_subparsers(dest='command', required=True)
+    commands = parser.add_subparsers(dest='command', required=True, metavar='<subcommand>')
+    # Argument definitions are private templates, not public CLI commands.
+    templates = argparse.ArgumentParser(add_help=False)
+    definitions = templates.add_subparsers(dest='command')
 
     def command(name: str, help_text: str) -> argparse.ArgumentParser:
-        sub = commands.add_parser(name, help=help_text, description=help_text)
+        sub = definitions.add_parser(name, help=help_text, description=help_text)
         _add_global_config(sub)
         return sub
 
@@ -160,6 +164,34 @@ def build_parser() -> argparse.ArgumentParser:
     rotate.add_argument('--threshold-days', type=int, default=30)
     rotate.add_argument('--valid-days', type=int, default=365)
     rotate.add_argument('--no-write-fullchain-to-crt', action='store_true')
+    # Public commands are exclusively hierarchical; templates share arguments.
+    groups = {
+        'ca': ('Certificate authority management.', {'list': 'ca-list', 'create': 'ca-create'}),
+        'certificate': ('Certificate management.', {
+            'list': 'certificate-list', 'show': 'certificate-show',
+            'revoke': 'certificate-revoke', 'unrevoke': 'certificate-unrevoke',
+            'delete': 'certificate-delete', 'issue': 'certificate-issue',
+            'rotate': 'certificate-rotate'}),
+        'crl': ('Certificate revocation list management.', {
+            'resign': 'crl-resign', 'resign-all': 'crl-resign-all'}),
+        'callback': ('Callback configuration.', {'list': 'callback-list'}),
+        'config': ('Global configuration.', {'show': 'config-show'}),
+        'ket': ('CAExchange certificate management.', {'create': 'ket-create'}),
+        'csr': ('Certificate signing requests.', {'submit': 'csr-submit'}),
+    }
+    # Reuse the internal argument templates without duplicating definitions.
+    originals = {name: definitions.choices[name] for _, (_, items) in groups.items()
+                 for name in items.values()}
+    for group_name, (description, items) in groups.items():
+        group = commands.add_parser(group_name, help=description, description=description)
+        _add_global_config(group)
+        nested = group.add_subparsers(dest='operation', required=True, metavar='<subcommand>')
+        for short_name, old_name in items.items():
+            old = originals[old_name]
+            sub = nested.add_parser(short_name, parents=[old], add_help=False,
+                                    help=old.description, description=old.description)
+            sub.set_defaults(command=old_name)
+    commands.metavar = '{' + ','.join(groups) + '}'
     return parser
 
 
@@ -174,17 +206,37 @@ def _render_dict_lines(prefix: str, obj: Any) -> list[str]:
     return [f'{prefix}: {obj if obj is not None else "(unset)"}']
 
 
+def _table(headers: list[str], rows: list[list[Any]]) -> None:
+    """Dependency-free readable tables, without truncating certificate identifiers."""
+    rendered = [[str(value) if value is not None else '' for value in row] for row in rows]
+    columns = [str(x) for x in headers]
+    widths = [max(len(columns[i]), *(len(row[i]) for row in rendered))
+              for i in range(len(columns))]
+    def line(values: list[str]) -> str:
+        return ' | '.join(value.ljust(width) for value, width in zip(values, widths)).rstrip()
+    print(line(columns))
+    print('-+-'.join('-' * width for width in widths))
+    for row in rendered:
+        print(line(row))
+
+
+def _field_rows(obj: Any) -> list[list[str]]:
+    return [line.split(': ', 1) if ': ' in line else [line, '']
+            for line in _render_dict_lines('', obj)]
+
+
 def _output_structure(obj: Any, as_json: bool = False) -> None:
     if as_json:
         print(json.dumps(obj, ensure_ascii=False, indent=2, default=str))
     elif isinstance(obj, list):
-        for entry in obj:
-            for line in _render_dict_lines('', entry):
-                print(line)
-            print()
+        if not obj:
+            print('(no results)')
+        for index, entry in enumerate(obj):
+            if index:
+                print()
+            _table(['Field', 'Value'], _field_rows(entry))
     else:
-        for line in _render_dict_lines('', obj):
-            print(line)
+        _table(['Field', 'Value'], _field_rows(obj))
 
 
 def _ca(conf: Dict[str, Any], name: str) -> Dict[str, Any]:
@@ -279,8 +331,10 @@ def run(args: argparse.Namespace) -> int:
             _output_structure({'ca': ca['id'], 'total': total,
                                'shown': len(entries), 'certificates': entries}, True)
         else:
-            for e in entries:
-                print(f"{e['serial']}\t{e['not_after']}\t{'revoked' if e['revoked'] else 'active'}\t{e['subject']}\t{e['filename']}")
+            _table(['Serial', 'Expires', 'Status', 'Subject', 'File'], [
+                [e['serial'], e['not_after'], 'revoked' if e['revoked'] else 'active',
+                 e['subject'], e['filename']] for e in entries
+            ])
             print(f'Shown: {len(entries)}/{total}', file=sys.stderr)
         return 0
     if cmd == 'certificate-show':
@@ -362,6 +416,12 @@ def run(args: argparse.Namespace) -> int:
 
 def main(argv=None) -> int:
     parser = build_parser()
+    if argv is None:
+        argv = sys.argv[1:]
+    if not argv:
+        print('adcs-tool: missing subcommand\n', file=sys.stderr)
+        parser.print_help(sys.stderr)
+        return 2
     args = parser.parse_args(argv)
     try:
         return run(args)

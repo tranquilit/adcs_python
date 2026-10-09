@@ -127,43 +127,30 @@ ADCS CLI, SQLite cache and optional Textual interface
 
 There are **two** independent entry points:
 
-* `./adcs-tool`: non-interactive command-line administration; no Textual dependency.
-* `./manage-ca-ui`: optional Textual interface (same UI, keyboard focus, multi-selection, sorting and search as before).
+* `./adcs-tool`: non-interactive command-line administration.
+* `./manage-ca-ui`: Gui interface .
 
-Both call `adcs_actions.py` for CA/certificate/CRL operations and
-`adcs_cert_store.py` for the **same per-CA SQLite cache**, search, filters,
-order and limits. SQLite stores parsed certificates and detail records and is
-synchronized before CLI reads; the UI synchronizes it in a background worker.
-The UI keeps only an in-memory snapshot needed to preserve cursor, scroll,
-selection and focus. If SQLite is unavailable, an error is shown instead of
-silently switching to a second parser/filter implementation.
 
-The cache is stored under `$XDG_DATA_HOME/adcs-tui/cert-cache/` or
-`~/.local/share/adcs-tui/cert-cache/` and is keyed by the certificate directory.
-An index record is created for each new certificate; removed files are purged.
-
-CA and callback information (includes CA parents, effective storage paths,
-private-key *locations*, AIA/CRL URLs, HSM configuration and associated CA ids):
 
 ```bash
-./adcs-tool ca-list
-./adcs-tool ca-list --json
-./adcs-tool ca-list --ca ca_inter_test
-./adcs-tool callback-list
-./adcs-tool callback-list --json
-./adcs-tool config-show --json  # secrets are redacted
+./adcs-tool ca list
+./adcs-tool ca list --json
+./adcs-tool ca list --ca ca_inter_test
+./adcs-tool callback list
+./adcs-tool callback list --json
+./adcs-tool config show --json  # secrets are redacted
 ```
 
 List certificates from any CA, applying the same 30-day expiration and
 revocation filters as the UI:
 
 ```bash
-./adcs-tool certificate-list --ca ca_inter_test
-./adcs-tool certificate-list --ca ca_inter_test --search example.org --status expiring
-./adcs-tool certificate-list --ca ca_inter_test --revocation revoked --limit 0
-./adcs-tool certificate-list --ca ca_inter_test --order-by "expiration_date ASC, serial DESC" --limit 200
-./adcs-tool certificate-list --ca ca_inter_test --order-by "revoked DESC, not_after ASC" --json
-./adcs-tool certificate-list --help  # complete list of permitted ORDER BY fields
+./adcs-tool certificate list --ca ca_inter_test
+./adcs-tool certificate list --ca ca_inter_test --search example.org --status expiring
+./adcs-tool certificate list --ca ca_inter_test --revocation revoked --limit 0
+./adcs-tool certificate list --ca ca_inter_test --order-by "expiration_date ASC, serial DESC" --limit 200
+./adcs-tool certificate list --ca ca_inter_test --order-by "revoked DESC, not_after ASC" --json
+./adcs-tool certificate list --help  # complete list of permitted ORDER BY fields
 ```
 
 Valid statuses are `any`, `expired`, `expiring` (within the next 30 days),
@@ -177,12 +164,12 @@ scripting.
 View and manage a particular certificate, using its **hexadecimal serial**:
 
 ```bash
-./adcs-tool certificate-show --ca ca_inter_test --serial 0x1234 --json
-./adcs-tool certificate-revoke --ca ca_inter_test --serial 0x1234
-./adcs-tool certificate-unrevoke --ca ca_inter_test --serial 0x1234
-./adcs-tool certificate-delete --ca ca_inter_test --serial 0x1234
-./adcs-tool crl-resign --ca ca_inter_test
-./adcs-tool crl-resign-all
+./adcs-tool certificate show --ca ca_inter_test --serial 0x1234 --json
+./adcs-tool certificate revoke --ca ca_inter_test --serial 0x1234
+./adcs-tool certificate unrevoke --ca ca_inter_test --serial 0x1234
+./adcs-tool certificate delete --ca ca_inter_test --serial 0x1234
+./adcs-tool crl resign --ca ca_inter_test
+./adcs-tool crl resign-all
 ```
 
 **Safety:** `certificate-delete` refuses to remove a currently valid,
@@ -207,20 +194,20 @@ Launch the Textual interface with:
 Create a local CA (for testing)
 ---------------------------------------------------------
  
-By default, `./adcs-tool ca-create` generates an RSA CA:
+By default, `./adcs-tool ca create` generates an RSA CA:
 
 ```
-./adcs-tool ca-create --cn "CA Root Test" --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
-./adcs-tool ket-create --ca-id "CA Root Test" >> /etc/adcs/adcs.yaml
-./adcs-tool ca-create --signer-ca-id "CA Root Test" --cn "CA Inter Test" --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
-./adcs-tool ket-create --ca-id "CA Inter Test" >> /etc/adcs/adcs.yaml
-./adcs-tool certificate-issue --signer-ca-id "CA Inter Test" --cn testadcs.mydomain.lan --san testadcs.mydomain.lan --crt-path /etc/nginx/crt.pem --key-path /etc/nginx/key.pem
+./adcs-tool ca create --cn "CA Root Test" --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
+./adcs-tool ket create --ca-id "CA Root Test" >> /etc/adcs/adcs.yaml
+./adcs-tool ca create --signer-ca-id "CA Root Test" --cn "CA Inter Test" --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
+./adcs-tool ket create --ca-id "CA Inter Test" >> /etc/adcs/adcs.yaml
+./adcs-tool certificate issue --signer-ca-id "CA Inter Test" --cn testadcs.mydomain.lan --san testadcs.mydomain.lan --crt-path /etc/nginx/crt.pem --key-path /etc/nginx/key.pem
 ```
 
 To generate an ECC CA instead, use `--key-type ec` and select the curve with `--ec-curve`:
 
 ```
-./adcs-tool ca-create --cn "CA Root ECC Test" --key-type ec --ec-curve secp384r1 --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
+./adcs-tool ca create --cn "CA Root ECC Test" --key-type ec --ec-curve secp384r1 --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
 ```
 
 Supported ECC curves are `secp256r1`, `secp384r1`, and `secp521r1`. Aliases such as `prime256v1`, `p-256`, `p-384`, and `p-521` are also accepted.
@@ -229,7 +216,7 @@ Supported ECC curves are `secp256r1`, `secp384r1`, and `secp521r1`. Aliases such
 Create a CA certificate from an existing CSR public key
 ---------------------------------------------------------
 
-`./adcs-tool ca-create` can also create a CA certificate from an existing CSR with `--csr-path`.
+`./adcs-tool ca create` can also create a CA certificate from an existing CSR with `--csr-path`.
 This is useful when the future CA private key is generated and kept outside this tool, for example in an HSM.
 
 Only the public key is read from the CSR. The CSR subject, SANs, attributes, and requested extensions are ignored.
@@ -247,7 +234,7 @@ openssl req -new \
 
 # Issue the new CA certificate with the public key from the CSR.
 # The certificate subject below is "CA Inter HSM Test", not the CSR subject.
-./adcs-tool ca-create \
+./adcs-tool ca create \
   --signer-ca-id "CA Root Test" \
   --cn "CA Inter HSM Test" \
   --csr-path subca.csr.pem \
@@ -382,7 +369,7 @@ Regenerate and re-sign the CRL
 
 ```bash
 cd /opt/adcs_python
-./adcs-tool crl-resign-all
+./adcs-tool crl resign-all
 ```
 
 Add cron 
@@ -394,7 +381,7 @@ Rotate adcs Certificate When Expiring Soon
 
 ```bash
 cd /opt/adcs_python
-./adcs-tool certificate-rotate --signer-ca-id "CA Inter Test" --crt-path /etc/nginx/crt.pem  --key-path /etc/nginx/key.pem --threshold-days 30 --valid-days 365
+./adcs-tool certificate rotate --signer-ca-id "CA Inter Test" --crt-path /etc/nginx/crt.pem  --key-path /etc/nginx/key.pem --threshold-days 30 --valid-days 365
 ```
 
 - `--signer-ca-id` is the CA identifier (e.g., `"CA Inter Test"`).
@@ -417,7 +404,7 @@ cd /opt/adcs_python
 You can submit a CSR directly from the command line without using the API interface:
 
 ```bash
-/opt/adcs_python/adcs-tool csr-submit --signer-ca-id 'ca_inter_test' --username 'srvads$@MYDOMAIN.LAN' --template-name 'dc' --csr-path srvads.csr
+/opt/adcs_python/adcs-tool csr submit --signer-ca-id 'ca_inter_test' --username 'srvads$@MYDOMAIN.LAN' --template-name 'dc' --csr-path srvads.csr
 ```
 
 🔐 TPM Attestation
