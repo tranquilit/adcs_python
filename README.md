@@ -128,9 +128,15 @@ ADCS CLI, SQLite cache and optional Textual interface
 There are **two** independent entry points:
 
 * `./adcs-tool`: non-interactive command-line administration.
-* `./manage-ca-ui`: Gui interface .
+* `./adcs-gui`: optional Textual interface.
 
+To run the tools from any directory, create symbolic links (as root, assuming
+the project was cloned into `/opt/adcs_python`):
 
+```bash
+ln -s /opt/adcs_python/adcs-tool /usr/bin/adcs-tool
+ln -s /opt/adcs_python/adcs-gui /usr/bin/adcs-gui
+```
 
 ```bash
 ./adcs-tool ca list
@@ -235,7 +241,7 @@ written to stderr. For a custom configuration file, pass
 Launch the Textual interface with:
 
 ```bash
-./manage-ca-ui --confadcs /etc/adcs/adcs.yaml
+./adcs-gui --confadcs /etc/adcs/adcs.yaml
 ```
 
 Create a local CA (for testing)
@@ -440,7 +446,7 @@ Launch the admin GUI, then select the target certificate to re-sign/re-issue:
 
 ```bash
 cd /opt/adcs_python
-./manage-ca-ui
+./adcs-gui
 ```  
 ![Demo TERMINAL UI](demo/ui_terminal.png "DEMO TERMINAL UI")
 
