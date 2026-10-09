@@ -58,6 +58,23 @@ class FriendlyArgumentParser(argparse.ArgumentParser):
 
 
 
+OUTPUT_FORMATS = ('table', 'accessible', 'json')
+
+
+def _default_output_format() -> str:
+    value = os.environ.get('ADCS_OUTPUT_FORMAT', 'table').strip().lower()
+    return value if value in OUTPUT_FORMATS else 'table'
+
+
+def _add_output_format(parser: argparse.ArgumentParser, *, json_allowed: bool = True) -> None:
+    parser.add_argument('--format', choices=OUTPUT_FORMATS, default=None,
+                        help='Output format (default: ADCS_OUTPUT_FORMAT or table).')
+
+
+def _format(args: argparse.Namespace) -> str:
+    return 'json' if getattr(args, 'json', False) else (getattr(args, 'format', None) or _default_output_format())
+
+
 def _default_limit() -> int:
     try:
         value = int(os.getenv('ADCS_MAX_ROWS', str(MAX_ROWS_DEFAULT)))
@@ -148,6 +165,11 @@ def build_parser() -> argparse.ArgumentParser:
                          help='Preview this operation without changing certificates, keys or CRLs.')
         if name != 'certificate-delete':
             sub.add_argument('--next-update-hours', type=int, default=None)
+
+    for source in (ca_list, ca_show, callbacks, config, cert_list, cert_show):
+        _add_output_format(source)
+    for name in ('certificate-revoke', 'certificate-unrevoke', 'certificate-delete'):
+        _add_output_format(definitions.choices[name])
 
     resign = command('crl-resign', 'Re-sign CRL of one CA.')
     resign.add_argument('--ca', required=True)
@@ -255,8 +277,21 @@ def _render_dict_lines(prefix: str, obj: Any) -> list[str]:
     return [f'{prefix}: {obj if obj is not None else "(unset)"}']
 
 
-def _table(headers: list[str], rows: list[list[Any]]) -> None:
+def _table(headers: list[str], rows: list[list[Any]], output_format: str = 'table', *, title: str = 'Record') -> None:
     """Dependency-free readable tables, without truncating certificate identifiers."""
+    if output_format == 'json':
+        print(json.dumps([dict(zip(headers, row)) for row in rows], ensure_ascii=False, indent=2, default=str))
+        return
+    if output_format == 'accessible':
+        if not rows:
+            print('No results.')
+        for index, row in enumerate(rows, 1):
+            if index > 1:
+                print()
+            print(f'{title} {index} of {len(rows)}')
+            for header, value in zip(headers, row):
+                print(f'  {header}: {value if value is not None else "(unset)"}')
+        return
     rendered = [[str(value) if value is not None else '' for value in row] for row in rows]
     columns = [str(x) for x in headers]
     widths = [max([len(columns[i])] + [len(row[i]) for row in rendered])
@@ -274,18 +309,18 @@ def _field_rows(obj: Any) -> list[list[str]]:
             for line in _render_dict_lines('', obj)]
 
 
-def _output_structure(obj: Any, as_json: bool = False) -> None:
-    if as_json:
+def _output_structure(obj: Any, output_format: str = "table") -> None:
+    if output_format == 'json':
         print(json.dumps(obj, ensure_ascii=False, indent=2, default=str))
     elif isinstance(obj, list):
         if not obj:
-            print('(no results)')
+            print('No results.' if output_format == 'accessible' else '(no results)')
         for index, entry in enumerate(obj):
             if index:
                 print()
-            _table(['Field', 'Value'], _field_rows(entry))
+            _table(['Field', 'Value'], _field_rows(entry), output_format)
     else:
-        _table(['Field', 'Value'], _field_rows(obj))
+        _table(['Field', 'Value'], _field_rows(obj), output_format)
 
 
 def _ca(conf: Dict[str, Any], name: str) -> Dict[str, Any]:
@@ -340,16 +375,16 @@ def run(args: argparse.Namespace) -> int:
     if cmd == 'config-show':
         with open(args.confadcs, 'r', encoding='utf-8') as file:
             settings = yaml.safe_load(file) or {}
-        _output_structure(_redact_configuration(settings), args.json)
+        _output_structure(_redact_configuration(settings), _format(args))
         return 0
     if cmd in ('callback-list', 'ca-list', 'ca-show'):
         # Configuration inspection remains usable even without signing keys.
         with open(args.confadcs, 'r', encoding='utf-8') as file:
             settings = yaml.safe_load(file) or {}
         if cmd == 'callback-list':
-            _output_structure(public_callback_configuration(settings), args.json)
+            _output_structure(public_callback_configuration(settings), _format(args))
         elif cmd == 'ca-show':
-            _output_structure(public_ca_configuration(settings, args.ca_id)[0], args.json)
+            _output_structure(public_ca_configuration(settings, args.ca_id)[0], _format(args))
         else:
             cas = public_ca_configuration(settings)
             summary = [
@@ -358,13 +393,13 @@ def run(args: argparse.Namespace) -> int:
                  'parent': ca.get('parent', '')}
                 for ca in cas
             ]
-            if args.json:
-                _output_structure(summary, True)
+            if _format(args) == 'json':
+                _output_structure(summary, 'json')
             elif summary:
                 _table(['CA ID', 'Display name', 'Parent CA'], [
                     [item['id'], item['display_name'], item['parent']]
                     for item in summary
-                ])
+                ], _format(args), title='CA')
             else:
                 print('(no CAs configured)')
         return 0
@@ -393,22 +428,35 @@ def run(args: argparse.Namespace) -> int:
             'filename': row.filename, 'relative_path': row.cache_key,
             'sha256': row.sha256_fingerprint,
         } for row in records]
-        if args.json:
+        if _format(args) == 'json':
             _output_structure({'ca': ca['id'], 'total': total,
-                               'shown': len(entries), 'certificates': entries}, True)
+                               'shown': len(entries), 'certificates': entries}, 'json')
         else:
-            _table(['Serial', 'Expires', 'Status', 'Subject', 'File'], [
-                [e['serial'], e['not_after'], 'revoked' if e['revoked'] else 'active',
-                 e['subject'], e['filename']] for e in entries
-            ])
-            print(f'Shown: {len(entries)}/{total}', file=sys.stderr)
+            if _format(args) == 'accessible':
+                print(f"CA: {ca['id']}\nCertificates: {len(entries)} of {total}")
+            if _format(args) == 'accessible':
+                from datetime import timezone
+                now = datetime.now(timezone.utc)
+                _table(['Serial', 'Subject', 'Expires', 'Expiration status', 'Revocation status', 'File'], [
+                    [e['serial'], e['subject'], e['not_after'],
+                     'expired' if datetime.fromisoformat(e['not_after']).replace(tzinfo=timezone.utc) <= now else 'not expired',
+                     'revoked' if e['revoked'] else 'not revoked', e['filename']]
+                    for e in entries
+                ], 'accessible', title='Certificate')
+            else:
+                _table(['Serial', 'Expires', 'Status', 'Subject', 'File'], [
+                    [e['serial'], e['not_after'], 'revoked' if e['revoked'] else 'not revoked',
+                     e['subject'], e['filename']] for e in entries
+                ], 'table', title='Certificate')
+            if _format(args) == 'table':
+                print(f'Shown: {len(entries)}/{total}', file=sys.stderr)
         return 0
     if cmd == 'certificate-show':
         ca, cert_dir, record = _record(args, conf)
         detail = json.loads(record['details_json']) if record.get('details_json') else {}
         detail['file'] = os.path.join(cert_dir, record['relative_path'])
         detail['revoked'] = int(str(record['serial_hex']), 16) in _ca_revocations(ca)
-        _output_structure(detail, args.json)
+        _output_structure(detail, _format(args))
         return 0
     if cmd in ('certificate-revoke', 'certificate-unrevoke'):
         revoke_it = cmd == 'certificate-revoke'
@@ -425,8 +473,8 @@ def run(args: argparse.Namespace) -> int:
                     'revoke' if revoke_it else 'unrevoke', ca['id'], serial,
                     'revoked' if currently_revoked else 'not revoked',
                     'revoked' if revoke_it else 'not revoked',
-                ]])
-                print('DRY RUN: no certificate or CRL modified.')
+                ]], _format(args), title='Certificate')
+                print('DRY RUN: no certificate or CRL modified.', file=sys.stderr if _format(args) == 'json' else sys.stdout)
                 return 0
             change_revocation(
                 ca, serial, revoke_it=revoke_it,
@@ -455,10 +503,10 @@ def run(args: argparse.Namespace) -> int:
              'revoked' if row.revoked else 'not revoked',
              'revoked' if revoke_it else 'not revoked', row.subject]
             for row in candidates
-        ])
+        ], _format(args), title='Certificate')
         if not args.yes:
             print(f'DRY RUN: {len(candidates)} certificate(s) selected from {total} matching row(s). '
-                  'Add --yes to execute.')
+                  'Add --yes to execute.', file=sys.stderr if _format(args) == 'json' else sys.stdout)
             return 0
         successes = failures = 0
         for row in candidates:
@@ -495,8 +543,8 @@ def run(args: argparse.Namespace) -> int:
                 _table(['CA', 'Serial', 'Expires', 'Revoked', 'Certificate'], [[
                     ca['id'], record['serial_hex'], expiry.isoformat(),
                     'yes' if revoked else 'no', path,
-                ]])
-                print('DRY RUN: certificate and associated key would be moved to .trash; no files modified.')
+                ]], _format(args), title='Certificate')
+                print('DRY RUN: certificate and associated key would be moved to .trash; no files modified.', file=sys.stderr if _format(args) == 'json' else sys.stdout)
                 return 0
             cert_n, key_n = delete_certificate(
                 ca, cert_path=path, revoked=serial in revocations, expires_at=expires_at,
@@ -532,9 +580,9 @@ def run(args: argparse.Namespace) -> int:
         _table(['Serial', 'Expires', 'Revoked', 'Subject', 'File'], [
             [r.serial_nox, e.isoformat(), 'yes' if r.revoked else 'no', r.subject, r.filename]
             for r, e in candidates
-        ])
+        ], _format(args), title='Certificate')
         if not args.yes:
-            print(f'DRY RUN: {len(candidates)} eligible certificate(s). Add --yes to move to .trash.')
+            print(f'DRY RUN: {len(candidates)} eligible certificate(s). Add --yes to move to .trash.', file=sys.stderr if _format(args) == 'json' else sys.stdout)
             return 0
         successes = 0
         failures = 0

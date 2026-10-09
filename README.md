@@ -637,3 +637,26 @@ install -Dm644 adcs-tool.bash-completion /usr/share/bash-completion/completions/
 If invoking the command as `./adcs-tool`, load the script with `source` in your shell profile if the automatic completion loader does not load it.
 
 Tab completes command groups, subcommands, options, enumerated values (`--status`, `--revocation`, `--key-type`), sorting fields for `--order-by`, filesystem paths and `--ca` identifiers from `adcs.yaml`. The CA config path defaults to `/etc/adcs/adcs.yaml` and can be changed via `--confadcs`. Completion reads configuration only: it never performs certificate operations or changes SQLite. Bash completion requires Bash; other shells are not configured by this script.
+
+
+### Accessible CLI output (screen readers)
+
+Read-only commands (`ca list/show`, `callback list`, `config show`,
+`certificate list/show`) and certificate revoke/unrevoke/delete previews support
+`--format table|accessible|json`. `table` is the default and preserves the
+column display; `accessible` renders one labelled field per line; `json`
+provides machine-readable output. The existing `--json` flag remains available
+for read-only commands and takes precedence over `--format`.
+
+```bash
+./adcs-tool certificate list --ca ca-auth --format accessible
+./adcs-tool certificate show --ca ca-auth --serial 0x1234 --format accessible
+./adcs-tool certificate revoke --ca ca-auth --filter --status expired --dry-run --format accessible
+./adcs-tool ca list --format json
+export ADCS_OUTPUT_FORMAT=accessible  # optional default for supported commands
+```
+
+The environment setting can be overridden by `--format`. An invalid environment
+value falls back to `table`. The CA creation command deliberately retains its
+original stdout format for existing redirections. Screen-reader behaviour
+should be validated with the actual terminal and assistive technology.
