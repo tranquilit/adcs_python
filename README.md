@@ -122,6 +122,28 @@ cp -r /opt/adcs_python/callbacks /etc/adcs/callbacks
 ```
 
 
+Create a local CA (for testing)
+---------------------------------------------------------
+ 
+By default, `./adcs-tool ca create` generates an RSA CA:
+
+```
+./adcs-tool ca create --cn "CA Root Test" --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
+./adcs-tool ket create --ca-id "CA Root Test" >> /etc/adcs/adcs.yaml
+./adcs-tool ca create --signer-ca-id "CA Root Test" --cn "CA Inter Test" --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
+./adcs-tool ket create --ca-id "CA Inter Test" >> /etc/adcs/adcs.yaml
+./adcs-tool certificate issue --signer-ca-id "CA Inter Test" --cn testadcs.mydomain.lan --san testadcs.mydomain.lan --crt-path /etc/nginx/crt.pem --key-path /etc/nginx/key.pem
+```
+
+To generate an ECC CA instead, use `--key-type ec` and select the curve with `--ec-curve`:
+
+```
+./adcs-tool ca create --cn "CA Root ECC Test" --key-type ec --ec-curve secp384r1 --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
+```
+
+Supported ECC curves are `secp256r1`, `secp384r1`, and `secp521r1`. Aliases such as `prime256v1`, `p-256`, `p-384`, and `p-521` are also accepted.
+
+
 ADCS CLI, SQLite cache and optional Textual interface
 ====================================================
 
@@ -243,28 +265,6 @@ Launch the Textual interface with:
 ```bash
 ./adcs-gui --confadcs /etc/adcs/adcs.yaml
 ```
-
-Create a local CA (for testing)
----------------------------------------------------------
- 
-By default, `./adcs-tool ca create` generates an RSA CA:
-
-```
-./adcs-tool ca create --cn "CA Root Test" --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
-./adcs-tool ket create --ca-id "CA Root Test" >> /etc/adcs/adcs.yaml
-./adcs-tool ca create --signer-ca-id "CA Root Test" --cn "CA Inter Test" --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
-./adcs-tool ket create --ca-id "CA Inter Test" >> /etc/adcs/adcs.yaml
-./adcs-tool certificate issue --signer-ca-id "CA Inter Test" --cn testadcs.mydomain.lan --san testadcs.mydomain.lan --crt-path /etc/nginx/crt.pem --key-path /etc/nginx/key.pem
-```
-
-To generate an ECC CA instead, use `--key-type ec` and select the curve with `--ec-curve`:
-
-```
-./adcs-tool ca create --cn "CA Root ECC Test" --key-type ec --ec-curve secp384r1 --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
-```
-
-Supported ECC curves are `secp256r1`, `secp384r1`, and `secp521r1`. Aliases such as `prime256v1`, `p-256`, `p-384`, and `p-521` are also accepted.
-
 
 Create a CA certificate from an existing CSR public key
 ---------------------------------------------------------
