@@ -102,6 +102,14 @@ from adcs_actions import (
     issue_certificate, change_revocation, resign_ca_crl, delete_certificate,
 )
 
+# Display-only column layouts (the SQLite sort/filter definitions remain shared
+# in adcs_cert_store.py). Keep these headers in sync with the original UI.
+FULL_COLUMNS = ["Sel", "#", "Serial", "Subject", "Valid from", "Valid until",
+                "Days", "Revoked", "Is CA", "Signature", "Public Key", "SHA-256", "File"]
+COMPACT_COLUMNS = ["Sel", "#", "Serial", "Subject", "Valid until", "Days", "Revoked", "Is CA"]
+NARROW_COLUMNS = ["Sel", "#", "Serial", "Subject", "Days", "Revoked"]
+TINY_COLUMNS = ["Sel", "#", "Subject", "Days", "Revoked"]
+
 def _mc_select(*args, **kwargs):
     """Create a borderless compact Select when supported by Textual.
 
