@@ -1,6 +1,7 @@
 import base64
 import binascii
 import logging
+import struct
 import gssapi
 from flask import request, Response, g
 from flask import current_app
@@ -12,6 +13,44 @@ from utils import is_client_certificate_valid_for_ca_reference
 
 
 logger = get_logger("auth")
+
+
+def _sid_from_pac(initiator_name):
+    """Return the account SID from an authenticated Kerberos PAC, if exposed."""
+    try:
+        # RFC 6680 GSS name attribute (MIT Kerberos / Heimdal support varies).
+        info = initiator_name.attributes["urn:mspac:upn-dns-info"]
+    except (KeyError, TypeError, NotImplementedError, gssapi.exceptions.GSSError):
+        return None
+
+    if not info.authenticated or not info.complete or len(info.values) != 1:
+        return None
+
+    data = next(iter(info.values))
+    # MS-PAC UPN_DNS_INFO: 12-byte base header, 20-byte extended header.
+    if not isinstance(data, bytes) or len(data) < 20:
+        return None
+
+    flags = struct.unpack_from("<I", data, 8)[0]
+    if not flags & 0x02:  # PAC_UPN_DNS_FLAG_HAS_SAM_NAME_AND_SID
+        return None
+
+    sid_length, sid_offset = struct.unpack_from("<HH", data, 16)
+    if sid_length < 12 or sid_offset < 20 or sid_offset + sid_length > len(data):
+        return None
+
+    sid = data[sid_offset:sid_offset + sid_length]
+    revision, count = sid[0], sid[1]
+    if revision != 1 or not 1 <= count <= 15:
+        return None
+    if sid_length != 8 + 4 * count:
+        return None
+
+    authority = int.from_bytes(sid[2:8], "big")
+    subauths = struct.unpack_from("<" + "I" * count, sid, 8)
+    return f"S-{revision}-{authority}" + "".join(
+        f"-{value}" for value in subauths
+    )
 
 
 def kerberos_authenticate(auth_header):
@@ -74,6 +113,8 @@ def kerberos_authenticate(auth_header):
             return None, response_token
 
         user = str(initiator_name)
+        # The PAC is read only after successful Kerberos authentication.
+        g.sid = _sid_from_pac(initiator_name)
 
         return user, response_token
 
@@ -135,6 +176,7 @@ def auth_required(f):
     def decorated_function(*args, **kwargs):
         conf = current_app.confadcs
         auth_header = request.headers.get('Authorization')
+        g.sid = None
         user = None
         response_token = None
         auth_method = None
