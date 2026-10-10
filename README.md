@@ -43,6 +43,22 @@ Each template is represented by an external module (e.g. `callbacks/user_templat
 - Provides **maximum flexibility**: template logic can depend on Active Directory attributes, group membership, external policies, or any business rule.  
 - Avoids locking the CA server into static, predefined templates.
 
+### Kerberos PAC information in callbacks
+When a client authenticates using **Kerberos**, callbacks can access the information extracted from the ticket's **Privilege Attribute Certificate (PAC)** through `flask.g`:
+
+```python
+from flask import g
+
+pac = g.get("pac_info", {})
+user_sid = pac.get("sid")
+user_groups = pac.get("groups")
+user_upn = pac.get("upn")
+```
+
+This allows callbacks to use PAC-provided identity and authorization information **without querying Active Directory (LDAP)**. With an appropriate **Kerberos service keytab**, the ADCS Python server can accept valid client Kerberos tickets and read their PAC data **without any direct network access to Active Directory domain controllers**. This is particularly useful when hosting the service in the cloud or in an isolated network.
+
+**Limitation:** only fields included in the ticket's PAC and successfully decoded are available. Other Active Directory attributes require a separate directory lookup. PAC fields may be absent, so callbacks should handle missing values.
+
 ### ⚠️ Security responsibility
 This design shifts most of the **security checks** to the callback author.  
 In practice:
@@ -65,7 +81,7 @@ Requirements
 
 - Linux server (Debian/Ubuntu) (not ad server)
 - Root access
-- A functional Active Directory domain
+- A working Kerberos infrastructure for Kerberos authentication (the server needs a service keytab; direct LDAP access to Active Directory is optional when using only PAC data)
 
 Install dependencies
 ---------------------------------------------------------
@@ -542,6 +558,16 @@ Desired enhancements for the project.
 
 Frequently Asked Questions (FAQ)
 ==========================================
+
+Is an Active Directory connection required to read user attributes with Kerberos authentication?
+-----------------------------------------------------------------------------------------------------
+
+**No.** When Kerberos authentication is used, **the ADCS Python server can operate without any direct network connectivity to Active Directory**, including when deployed in the cloud or on an isolated network. No LDAP connection or network access to a domain controller is required from the ADCS Python server.
+
+A valid **Kerberos service keytab** is sufficient on the server side to accept and process Kerberos authentication, as long as clients can obtain valid Kerberos tickets. The server extracts identity information from the ticket's **Privilege Attribute Certificate (PAC)** and makes it available to callbacks via `g.get("pac_info", {})`.
+
+**Limitation:** only information actually included in the PAC and successfully decoded is available (for example, SID, UPN, and group membership, when present). Retrieving other Active Directory attributes requires a separate directory query. A functioning Kerberos ticket-issuing infrastructure (typically an Active Directory domain controller acting as a KDC) is still required for clients to obtain their tickets; it simply does **not** need to be reachable from the ADCS Python server.
+
 
 Is it possible to issue certificates to machines or users from multiple Active Directory domains?
 -------------------------------------------------------------------------------------------------------------------------------------
