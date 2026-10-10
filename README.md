@@ -326,10 +326,10 @@ adcs-tool certificate rotate --signer-ca-id "CA Inter Test" --crt-path /etc/ngin
 - `--signer-ca-id` is the CA identifier (e.g., `"CA Inter Test"`).
 
 
-Re-sign / Re-issue a Certificate (GUI)
------------------------------------------------------------------
+Manage the certification authority and certificates with (adcs-gui)
+---------------------------------------------------------------------
 
-Launch the admin GUI, then select the target certificate to re-sign/re-issue:
+Launch the admin GUI:
 
 ```bash
 adcs-gui
