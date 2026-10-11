@@ -89,8 +89,6 @@ Install dependencies
 ```
 apt-get update
 apt-get install -y \
-       samba \
-       samba-dsdb-modules \
        msktutil \
        nginx \
        python3-textual \
@@ -103,7 +101,6 @@ apt-get install -y \
        python3-pyasn1 \
        python3-waitress \
        python3-yaml \
-       python3-samba \
        python3-cryptography \
        python3-pkcs11 \
        python3-itsdangerous \
@@ -229,9 +226,9 @@ Nginx is responsible for handling SSL/TLS authentication and securely exposing t
 
 Using a different Nginx configuration, or modifying the provided one without fully understanding the security implications, may compromise the authentication flow and weaken the overall security of the service.
 
-Join the Active Directory domain
----------------------------------------------------------
 
+Create Keytab
+---------------------------------------------------------
 
 - Edit ``/etc/krb5.conf`` for your domain.
 
@@ -246,43 +243,10 @@ default_tkt_enctypes = aes256-cts-hmac-sha1-96 aes128-cts-hmac-sha1-96
 default_tgs_enctypes = aes256-cts-hmac-sha1-96 aes128-cts-hmac-sha1-96
 ```
 
-- Edit ``/etc/samba/smb.conf`` for your domain.
-
-```
-[global]
-  workgroup = MYDOMAIN
-  security = ADS
-  realm = MYDOMAIN.LAN
-  winbind separator = +
-  idmap config *:backend = tdb
-  idmap config *:range = 700001-800000
-  idmap config MYDOMAIN:backend  = rid
-  idmap config MYDOMAIN:range  = 10000-700000
-  winbind use default domain = yes
-  kerberos method = secrets and keytab
-```
-
-Join : 
+Create Keytab : 
 ```
 kinit <user>@MYDOMAIN.LAN
-net ads join --use-kerberos=required
-```
-
-Manage SPN 
----------------------------------------------------------
-
-- Register the HTTP SPN for the machine account:
-
-```
-samba-tool spn add "HTTP/testadcs.mydomain.lan" "testadcs$" -H ldap://srvads.mydomain.lan:389 --use-kerberos=required
-```
-
-Note that the URL must be in **lowercase**.
-
-- Generate the keytab:
-
-```
-net ads keytab create
+msktutil --server dc01.mydomain.lan --create --hostname srvadcs.mydomain.lan --service HTTP/srvadcs.mydomain.lan --keytab /etc/krb5.keytab --no-reverse-lookups --enctypes 0x18
 ```
 
 Checking if http is present in the keytab :
