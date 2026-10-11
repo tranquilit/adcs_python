@@ -65,7 +65,7 @@ from dns.rdtypes.IN.SRV import SRV
 from ldap3 import BASE, NONE, Connection, Server
 from ldap3.core.exceptions import LDAPException
 from ldap3.utils.conv import escape_filter_chars
-
+import gssapi
 # -----------------------------------------------------------------------------
 # Useful OIDs
 # -----------------------------------------------------------------------------
@@ -2926,3 +2926,10 @@ def send_mail(
 
     return True
 
+def get_default_realm():
+    name = gssapi.Name(
+        "dummy",
+        name_type=gssapi.NameType.kerberos_principal,
+    )
+    principal = name.canonicalize(gssapi.MechType.kerberos)
+    return str(principal).rsplit("@", 1)[1].upper()
