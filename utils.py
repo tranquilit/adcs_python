@@ -45,10 +45,13 @@ except ImportError:  # cryptography versions without ML-DSA support
 from cryptography.x509.oid import ObjectIdentifier as CObjectIdentifier
 from utils_crt import is_certificate_revoked_by_crl
 
-# Samba is used only by search_user (not for DC discovery).
-from samba.credentials import Credentials
-from samba.param import LoadParm
-from samba.samdb import SamDB
+# Samba is optional: only the legacy search_user() uses it.
+try:
+    from samba.credentials import Credentials
+    from samba.param import LoadParm
+    from samba.samdb import SamDB
+except ImportError:
+    Credentials = LoadParm = SamDB = None
 
 # pyasn1 for minimal CMC/PKIResponse structures
 from pyasn1.type import univ, namedtype, namedval, char, useful, constraint
@@ -1591,6 +1594,9 @@ def search_user(userauth: str,ldap_filter='',dc_fqdn=None,basedn=None,password=N
     Returns (SamDB, entry) if found.
     """
 
+    if Credentials is None or LoadParm is None or SamDB is None:
+        raise ImportError("Samba is required by search_user(); use search_user_ldap3() without Samba")
+
     username = userauth.split("@", 1)[0].strip()
 
     if BAD_LDAP_CHARS_RE.search(username):
@@ -1639,6 +1645,42 @@ def search_user(userauth: str,ldap_filter='',dc_fqdn=None,basedn=None,password=N
 
     for entry in res:
         return samdbr, entry
+
+
+def search_user_ldap3(
+    userauth: str,
+    ldap_filter: str = "",
+    dc_fqdn: str | None = None,
+    basedn: str | None = None,
+    password: str | None = None,
+    bind_user: str | None = None,
+    dc_cache_ttl_seconds: float = 300,
+    *,
+    realm: str | None = None,
+    keytab: str = "/etc/krb5.keytab",
+    attributes: list[str] | tuple[str, ...] | None = None,
+    timeout: int = 10,
+) -> dict | None:
+    """LDAP3 + Kerberos SASL, with GSSAPI encryption when available.
+
+    No TLS; lazy import keeps the legacy Samba path independent of gssapi.
+    """
+    from ldap3_auth import find_user
+
+    return find_user(
+        userauth=userauth,
+        ldap_filter=ldap_filter,
+        dc_fqdn=dc_fqdn,
+        basedn=basedn,
+        password=password,
+        bind_user=bind_user,
+        dc_cache_ttl_seconds=dc_cache_ttl_seconds,
+        realm=realm,
+        keytab=keytab,
+        attributes=attributes,
+        timeout=timeout,
+        get_dc_fqdn=get_dc_fqdn,
+    )
 
 
 # -----------------------------------------------------------------------------
