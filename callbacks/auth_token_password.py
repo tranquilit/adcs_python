@@ -1,6 +1,6 @@
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from flask import g
-from utils import search_user
+from utils import search_user_ldap3
 import yaml
 
 
@@ -35,7 +35,9 @@ def check_auth(username=None, password=None):
         return False
 
     except BadSignature:
-        r = search_user(
+        if not '@' in username :
+            return False
+        r = search_user_ldap3(
             userauth=username,
             password=password
         )
