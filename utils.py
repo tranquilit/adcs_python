@@ -30,6 +30,11 @@ from cryptography.hazmat.primitives.asymmetric import (
 import smtplib
 import ssl
 import time
+import logging
+import random
+import struct
+from contextlib import suppress
+from threading import Lock
 from email.message import EmailMessage
 from email.utils import formataddr
 
@@ -40,19 +45,23 @@ except ImportError:  # cryptography versions without ML-DSA support
 from cryptography.x509.oid import ObjectIdentifier as CObjectIdentifier
 from utils_crt import is_certificate_revoked_by_crl
 
-# Samba / AD lookup (used by search_user)
+# Samba is used only by search_user (not for DC discovery).
 from samba.credentials import Credentials
 from samba.param import LoadParm
 from samba.samdb import SamDB
-from samba.net import Net
-from samba.dcerpc import nbt
 
 # pyasn1 for minimal CMC/PKIResponse structures
 from pyasn1.type import univ, namedtype, namedval, char, useful, constraint
 from pyasn1.codec.der.encoder import encode as der_encode
 
-#dns
+# DC discovery: DNS SRV + Netlogon LDAP Ping (TCP/389).
+import dns.exception
+import dns.name
 import dns.resolver
+from dns.rdtypes.IN.SRV import SRV
+from ldap3 import BASE, NONE, Connection, Server
+from ldap3.core.exceptions import LDAPException
+from ldap3.utils.conv import escape_filter_chars
 
 # -----------------------------------------------------------------------------
 # Useful OIDs
@@ -539,7 +548,7 @@ def _verify_cms_signature_with_cert(cert, signer_info, signed_bytes: bytes):
             return
 
         if sig_algo == "rsassa_pss":
-            # Parametres PSS eventuellement presents
+            # Optional PSS parameters may be present
             params = signer_info["signature_algorithm"]["parameters"]
             if params is not None and params.native:
                 pss = params.native
@@ -657,7 +666,7 @@ def _verify_signer_info(sd, signer_info):
                 result["errors"].append("messageDigest attribute does not match encapsulated content")
                 return result
 
-            # En CMS, la signature porte sur le SET OF des signedAttrs
+            # In CMS, the signature covers the SET OF signedAttrs
             signed_bytes = _tbs_signed_attrs(signed_attrs)
         else:
             signed_bytes = content
@@ -1421,55 +1430,160 @@ def build_ws_trust_response(
 
 
 # -----------------------------------------------------------------------------
-# Active Directory user resolution (SAMBA/LDAP)
+# Active Directory: DNS/LDAP DC discovery and Samba/LDAP user lookup
 # -----------------------------------------------------------------------------
 
 BAD_LDAP_CHARS_RE = re.compile(r'[\x00()*\\]')
 
 
-_dc_cache = {}
+log = logging.getLogger(__name__)
+_dc_cache: dict[str, tuple[str, float]] = {}
+_cache_lock = Lock()
 
 
-def get_dc_fqdn(realm: str,dc_cache_ttl_seconds = 3600):
-    """Return the DC FQDN, caching the lookup for 5 minutes per realm."""
-    now = time.monotonic()
+def _parse_netlogon(data: bytes, realm: str) -> tuple[str, str]:
+    """Decode NETLOGON_SAM_LOGON_RESPONSE_EX: (FQDN, client site)."""
+    if len(data) < 40:
+        raise ValueError("Reponse Netlogon trop courte")
 
-    cached = _dc_cache.get(realm)
-    if cached is not None:
-        dc_fqdn, expires_at = cached
-        if now < expires_at:
-            return dc_fqdn
+    opcode, reserved, flags = struct.unpack_from("<HHI", data)
+    # LOGON_SAM_LOGON_RESPONSE_EX and DS_LDAP_FLAG.
+    if opcode != 23 or reserved != 0 or not (flags & 0x08):
+        raise ValueError("DC indisponible ou reponse Netlogon inattendue")
 
-    lp = LoadParm()
-    lp.load_default()
+    offset = 24  # Opcode + reserved + flags + 16-byte GUID.
+    names = []
+    for _ in range(8):
+        name, consumed = dns.name.from_wire(data, offset)
+        offset += consumed  # from_wire returns the number of bytes consumed, not an offset.
+        names.append(b".".join(name.labels[:-1]).decode("utf-8"))
 
-    creds = Credentials()
-    creds.guess(lp)
-    creds.set_kerberos_state(True)
-    creds.set_machine_account(lp)
+    # NtVer=4 requires neither an IP address nor an additional site field.
+    if len(data) != offset + 8:
+        raise ValueError("Longueur Netlogon inattendue")
+    version, token1, token2 = struct.unpack_from("<IHH", data, offset)
+    if not (version & 0x04) or (token1, token2) != (0xFFFF, 0xFFFF):
+        raise ValueError("Terminaison Netlogon invalide")
+    if names[1].lower() != realm or not names[2]:
+        raise ValueError("Domaine inattendu ou FQDN absent")
 
-    net = Net(creds=creds, lp=lp)
+    # forest, domain, host, netbios_domain, netbios_host, user, dc_site, client_site
+    return names[2], names[7]
 
-    flags = nbt.NBT_SERVER_LDAP
 
-    initial = net.finddc(domain=realm, flags=flags)
-    site = str(initial.client_site)
+def _ldap_ping(host: str, port: int, realm: str, timeout: int) -> tuple[str, str]:
+    server = Server(host, port=port, get_info=NONE, connect_timeout=timeout)
+    conn = Connection(
+        server,
+        check_names=False,
+        raise_exceptions=True,
+        auto_referrals=False,
+        receive_timeout=timeout,
+    )
+    try:
+        # No bind: perform only an anonymous search on the rootDSE.
+        conn.open(read_server_info=False)
+        ok = conn.search(
+            search_base="",
+            search_filter=(
+                f"(&(DnsDomain={escape_filter_chars(realm)})"
+                r"(NtVer=\04\00\00\00))"
+            ),
+            search_scope=BASE,
+            attributes=["Netlogon"],
+            time_limit=timeout,
+        )
+        if ok:
+            for entry in conn.response:
+                for name, values in entry.get("raw_attributes", {}).items():
+                    if name.lower() == "netlogon" and values:
+                        return _parse_netlogon(values[0], realm)
+        raise ValueError(f"{host}: aucune reponse Netlogon exploitable")
+    finally:
+        with suppress(LDAPException, OSError):
+            conn.unbind()
 
-    query = f"_ldap._tcp.{site}._sites.dc._msdcs.{realm}"
-    records = dns.resolver.resolve(query, "SRV")
-    records = sorted(records, key=lambda r: r.priority)
 
+def _srv_records(realm: str, site: str | None, timeout: int) -> list[SRV]:
+    # Treat the site name as a single DNS label, even if it contains a dot.
+    labels = [b"_ldap", b"_tcp"]
+    if site:
+        labels += [site.encode("utf-8"), b"_sites"]
+    labels += [b"dc", b"_msdcs"]
+    query = dns.name.Name(labels) + dns.name.from_text(realm)
+    answer = dns.resolver.resolve(query, "SRV", lifetime=timeout, search=False)
+    records = [r for r in answer if r.target != dns.name.root]
+
+    # Ascending SRV priority, then weighted selection (RFC 2782).
+    ordered = []
+    for priority in sorted({r.priority for r in records}):
+        group = [r for r in records if r.priority == priority]
+        random.shuffle(group)
+        group.sort(key=lambda r: r.weight != 0)
+        while group:
+            draw = random.randint(0, sum(r.weight for r in group))
+            cumulative = 0
+            for i, record in enumerate(group):
+                cumulative += record.weight
+                if cumulative >= draw:
+                    ordered.append(group.pop(i))
+                    break
+    return ordered
+
+
+def _first_dc(records: list[SRV], realm: str, timeout: int) -> tuple[str, str]:
+    last_error = None
     for record in records:
-        dc = str(record.target).rstrip(".")
+        host = record.target.to_text(omit_final_dot=True)
         try:
-            info = net.finddc(address=dc, flags=flags)
-            _dc_cache[realm] = (str(info.pdc_dns_name), now + dc_cache_ttl_seconds)
-            return str(info.pdc_dns_name)
-        except Exception:
-            continue
+            return _ldap_ping(host, record.port, realm, timeout)
+        except (LDAPException, OSError, ValueError, dns.exception.DNSException) as exc:
+            last_error = exc
+            log.debug("DC ignore: %s: %s", host, exc)
+    raise RuntimeError(f"Aucun DC LDAP utilisable pour {realm}") from last_error
 
-    _dc_cache[realm] = (str(initial.pdc_dns_name), now + dc_cache_ttl_seconds)
-    return str(initial.pdc_dns_name)
+
+def get_dc_fqdn(
+    realm: str,
+    dc_cache_ttl_seconds: float = 3600,
+    *,
+    timeout: int = 3,
+) -> str:
+    """Return a DC, preferably in the client site. Cache for 1 hour by default."""
+    realm = realm.strip().rstrip(".").lower()
+    if not realm:
+        raise ValueError("realm ne doit pas etre vide")
+    if dc_cache_ttl_seconds < 0:
+        raise ValueError("Le TTL doit etre positif ou nul")
+    if not isinstance(timeout, int) or timeout <= 0:
+        raise ValueError("timeout doit etre un entier strictement positif")
+
+    with _cache_lock:
+        cached = _dc_cache.get(realm)
+        if dc_cache_ttl_seconds > 0 and cached and time.monotonic() < cached[1]:
+            return cached[0]
+
+    # 1. Discover a domain DC and query it for the client site.
+    initial_dc, client_site = _first_dc(_srv_records(realm, None, timeout), realm, timeout)
+    chosen_dc = initial_dc
+
+    # 2. Prefer a DC in the client site; otherwise keep the initial valid DC.
+    if client_site:
+        try:
+            chosen_dc, _ = _first_dc(
+                _srv_records(realm, client_site, timeout), realm, timeout
+            )
+        except (dns.exception.DNSException, RuntimeError) as exc:
+            log.debug("Repli sur %s: %s", initial_dc, exc)
+
+    # Application-level TTL, as in the original function, not the DNS TTL.
+    with _cache_lock:
+        if dc_cache_ttl_seconds > 0:
+            _dc_cache[realm] = (chosen_dc, time.monotonic() + dc_cache_ttl_seconds)
+        else:
+            _dc_cache.pop(realm, None)
+    return chosen_dc
+
 
 def search_user(userauth: str,ldap_filter='',dc_fqdn=None,basedn=None,password=None,bind_user=None,dc_cache_ttl_seconds=300):
     """
@@ -2402,8 +2516,8 @@ def _raw_x509_extension(oid: str, critical: bool, extn_value_der: bytes) -> a_x5
       extnValue OCTET STRING -- containing DER of the real extension value
     }
 
-    On fait ça en DER brut pour éviter qu'asn1crypto essaie de parser
-    certaines extensions reconnues.
+    Construct this using raw DER to prevent asn1crypto from parsing
+    certain recognized extensions.
     """
     contents = a_core.ObjectIdentifier(oid).dump()
 
@@ -2417,12 +2531,12 @@ def _raw_x509_extension(oid: str, critical: bool, extn_value_der: bytes) -> a_x5
 
 def _csr_spki_from_der(csr_der: bytes):
     """
-    Retourne:
-      - spki_obj: SubjectPublicKeyInfo ASN.1 brut, utilisable dans TbsCertificate
-      - oid: OID de l'algorithme de clé publique
-      - ski: SubjectKeyIdentifier calculé depuis le BIT STRING brut
+    Returns:
+      - spki_obj: raw ASN.1 SubjectPublicKeyInfo, usable in TbsCertificate
+      - oid: public-key algorithm OID
+      - ski: SubjectKeyIdentifier calculated from the raw BIT STRING
 
-    Ne déclenche pas le parse typé de la clé publique, donc compatible ML-DSA.
+    Avoids typed public-key parsing, preserving ML-DSA compatibility.
     """
 
     # CertificationRequest ::= SEQUENCE {
@@ -2487,8 +2601,8 @@ def _csr_spki_from_der(csr_der: bytes):
     public_key_bytes = bitstr_contents[1:]
     ski = hashlib.sha1(public_key_bytes).digest()
 
-    # Important : on charge l'objet brut, mais on ne fait pas spki_obj["algorithm"]
-    # ni spki_obj["public_key"] ensuite, sinon asn1crypto tente de parser ML-DSA.
+    # Important: load the raw object without accessing spki_obj["algorithm"]
+    # or spki_obj["public_key"], which would make asn1crypto attempt to parse ML-DSA.
     spki_obj = a_keys.PublicKeyInfo.load(spki_der)
 
     return spki_obj, oid, ski

@@ -9,3 +9,5 @@ gssapi
 requests
 textual
 python-pkcs11
+ldap3
+dnspython
