@@ -1,3 +1,4 @@
+from ldap_entry import ldap_text, ldap_sid
 from datetime import datetime, timedelta
 from typing import Iterable, Optional, Dict, Any
 from asn1crypto import core as a_core
@@ -12,16 +13,9 @@ from cryptography.x509.oid import (
 
 # helpers/structs already present in your project
 from flask import g
-from utils import  NtdsCASecurityExt, search_user, is_client_certificate_valid_for_ca_reference
+from utils import  NtdsCASecurityExt, search_user_ldap3, is_client_certificate_valid_for_ca_reference
 from utils import _apply_static_extensions,validate_csr
 import hashlib
-
-def _b(entry: dict, attr: str, default: str = "") -> str:
-    vals = entry.get(attr) or []
-    if not vals:
-        return default
-    v = vals[0]
-    return v.decode("utf-8", "ignore") if isinstance(v, (bytes, bytearray)) else str(v)
 
 
 
@@ -65,7 +59,7 @@ def define_template(*, app_conf, username=None, request=None, params=None, auth_
         is_machine = bool(flags & 0x80) and not (flags & 0x100)
         if not is_machine:
             return None
-    elif not search_user(username, "(userAccountControl:1.2.840.113556.1.4.803:=4096)"):
+    elif not search_user_ldap3(userauth=username, ldap_filter="(userAccountControl:1.2.840.113556.1.4.803:=4096)"):
         # Query LDAP only when PAC flags are unavailable.
         return None
 
@@ -356,14 +350,15 @@ def emit_certificate(
         dns_host = f"{hostname}.{dns_domain}"
     else:
         # Fall back to LDAP only when PAC account flags are unavailable.
-        r = search_user(username, "(userAccountControl:1.2.840.113556.1.4.803:=4096)")
+        r = search_user_ldap3(userauth=username, ldap_filter="(userAccountControl:1.2.840.113556.1.4.803:=4096)")
         if not r:
             return {"status": "denied", "status_text": "denied"}
-        samdbr, sam_entry = r
-        sam_name = _b(sam_entry, "sAMAccountName")
+        sam_name = ldap_text(r, "sAMAccountName")
+        dns_host = ldap_text(r, "dNSHostName")
+        sid_str = ldap_sid(r)
+        if not sam_name or not sid_str:
+            return {"status": "denied", "status_text": "denied"}
         hostname = sam_name.removesuffix("$")
-        dns_host = _b(sam_entry, "dNSHostName")
-        sid_str = samdbr.schema_format_value("objectSID", sam_entry["objectSID"][0]).decode("ascii")
 
     denied = False
     must_pending = False

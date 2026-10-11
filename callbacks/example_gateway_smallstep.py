@@ -1,7 +1,8 @@
+from ldap_entry import ldap_text
 from typing import Iterable, Optional, Dict, Any
 from cryptography import x509 as cx509
 from cryptography.hazmat.primitives import serialization as crypto_serialization
-from utils import search_user, is_client_certificate_valid_for_ca_reference
+from utils import search_user_ldap3, is_client_certificate_valid_for_ca_reference
 import requests
 import json
 import base64
@@ -245,11 +246,13 @@ def emit_certificate(
 
 
     TEMPLATE_OID = [u for u in template['__all_required_extensions'] if u['oid'] == "1.3.6.1.4.1.311.21.7"][0]['value_b64']
-    samdbr, sam_entry = search_user(username)
+    entry = search_user_ldap3(userauth=username)
+    if not entry:
+        return {"status": "denied", "status_text": "denied"}
 
-    #MS_SID = samdbr.schema_format_value("objectSID", sam_entry["objectSID"][0]).decode('utf-8')
-
-    cn = sam_entry["sAMAccountName"][0].decode("utf-8", "ignore")
+    cn = ldap_text(entry, "sAMAccountName")
+    if not cn:
+        return {"status": "denied", "status_text": "denied"}
 
     sans=[]
 

@@ -1,3 +1,4 @@
+from ldap_entry import ldap_text, ldap_raw
 import sys
 import argparse
 from datetime import datetime, timedelta
@@ -20,7 +21,7 @@ from cryptography.x509.oid import (
 )
 
 from flask import g
-from utils import search_user
+from utils import search_user_ldap3, get_default_realm
 from utils import _apply_static_extensions, validate_csr
 import base64
 import json
@@ -75,7 +76,7 @@ def define_template(*, app_conf, username=None, request=None, params=None, auth_
     if flags is not None:
         if not flags & 0x100:
             return None
-    elif not search_user(username, "(userAccountControl:1.2.840.113556.1.4.803:=8192)"):
+    elif not search_user_ldap3(userauth=username, ldap_filter="(userAccountControl:1.2.840.113556.1.4.803:=8192)"):
         return None
 
 
@@ -259,24 +260,23 @@ def emit_certificate(
     csr = cx509.load_der_x509_csr(csr_der)
     validate_csr(csr)
 
-    r = search_user(username,"(userAccountControl:1.2.840.113556.1.4.803:=8192)")
+    r = search_user_ldap3(userauth=username, ldap_filter="(userAccountControl:1.2.840.113556.1.4.803:=8192)")
     if not r:
         return {
             "status": "denied",
             "status_text": "denied",
         }
-    samdbr, sam_entry = r
-
-
+    sam_name = ldap_text(r, "sAMAccountName")
+    objectGUID = ldap_raw(r, "objectGUID")
+    if not sam_name or not objectGUID:
+        return {"status": "denied", "status_text": "denied"}
 
     ca_cert = cx509.load_der_x509_certificate(ca["__certificate_der"])
     now = datetime.utcnow() - timedelta(minutes=5)
 
-    raw_sam = sam_entry["sAMAccountName"][0].decode('utf-8').lower()
+    raw_sam = sam_name.lower()
     realm = username.split('$@')[1].lower()
     dc_fqdn = raw_sam.replace('$','') + '.' + realm
-    objectGUID = sam_entry["objectGUID"][0]
-
     dc_guid_ad_bytes_le = _guid_to_ad_bytes_le(objectGUID)
 
     validity_seconds = (template or {}).get("validity", {}).get("validity_seconds") or 31536000

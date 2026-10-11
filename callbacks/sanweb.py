@@ -12,7 +12,7 @@ from cryptography.x509.oid import (
 )
 
 # helpers/structs already present in your project
-from utils import  NtdsCASecurityExt, search_user
+from utils import NtdsCASecurityExt
 from utils import _apply_static_extensions, validate_csr, is_directly_issued_by_cert_in_folder,is_client_certificate_valid_for_ca_reference
 from utils_crt import is_certificate_revoked_by_crl
 from cryptography.x509.extensions import ExtensionNotFound

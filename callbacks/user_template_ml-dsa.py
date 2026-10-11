@@ -1,3 +1,4 @@
+from ldap_entry import ldap_text, ldap_sid
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 
@@ -22,7 +23,7 @@ from utils import (
     _csr_spki_from_der,
     _raw_x509_extension,
     is_client_certificate_valid_for_ca_reference,
-    search_user,
+    search_user_ldap3,
 )
 
 
@@ -118,13 +119,14 @@ def define_template(*, app_conf, username=None, request=None, params=None, auth_
         cn, sid_str, upn = pac.get("sam_name"), pac.get("sid"), pac.get("upn")
     else:
         # PAC account flags are missing: validate and resolve through LDAP.
-        r = search_user(username, "(!(userAccountControl:1.2.840.113556.1.4.803:=4096))(!(userAccountControl:1.2.840.113556.1.4.803:=8192))")
+        r = search_user_ldap3(userauth=username, ldap_filter="(!(userAccountControl:1.2.840.113556.1.4.803:=4096))(!(userAccountControl:1.2.840.113556.1.4.803:=8192))")
         if not r:
             return {"status": "denied", "status_text": "denied"}
-        samdbr, sam_entry = r
-        cn = (sam_entry.get("sAMAccountName") or [b"user"])[0].decode("utf-8", "ignore")
-        sid_str = samdbr.schema_format_value("objectSID", sam_entry["objectSID"][0]).decode("utf-8")
-        upn = (sam_entry.get("userPrincipalName") or [b""])[0].decode("utf-8", "ignore")
+        cn = ldap_text(r, "sAMAccountName")
+        sid_str = ldap_sid(r)
+        upn = ldap_text(r, "userPrincipalName")
+        if not cn or not sid_str:
+            return None
     return {
     # MS-XCEP Attributes/commonName: friendly/unique name of the policy item returned by CEP/XCEP
     # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cd22d3a0-f469-4a44-95ed-d10ce4dc2063
@@ -432,12 +434,13 @@ def emit_certificate(
             return {"status": "denied", "status_text": "denied"}
     else:
         # PAC account flags are missing: validate and resolve through LDAP.
-        r = search_user(username, "(!(userAccountControl:1.2.840.113556.1.4.803:=4096))(!(userAccountControl:1.2.840.113556.1.4.803:=8192))")
+        r = search_user_ldap3(userauth=username, ldap_filter="(!(userAccountControl:1.2.840.113556.1.4.803:=4096))(!(userAccountControl:1.2.840.113556.1.4.803:=8192))")
         if not r:
             return {"status": "denied", "status_text": "denied"}
-        samdbr, sam_entry = r
-        cn = (sam_entry.get("sAMAccountName") or [b"user"])[0].decode("utf-8", "ignore")
-        sid_str = samdbr.schema_format_value("objectSID", sam_entry["objectSID"][0]).decode("utf-8")
+        cn = ldap_text(r, "sAMAccountName")
+        sid_str = ldap_sid(r)
+        if not cn or not sid_str:
+            return {"status": "denied", "status_text": "denied"}
 
     denied = False
     must_pending = False

@@ -1,3 +1,4 @@
+from ldap_entry import ldap_text, ldap_sid
 import re
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
@@ -16,7 +17,7 @@ from cryptography.x509.extensions import ExtensionNotFound
 
 # As before
 from flask import g
-from utils import NtdsCASecurityExt,search_user,validate_csr
+from utils import NtdsCASecurityExt,search_user_ldap3,validate_csr
 from utils import _apply_static_extensions, is_client_certificate_valid_for_ca_reference
 import hashlib
 
@@ -59,10 +60,12 @@ def define_template(*, app_conf, username=None, request=None, params=None, auth_
         is_user = bool(flags & 0x10) and not (flags & 0x180)
         if not is_user:
             return None
-    elif not search_user(
-        username,
-        "(!(userAccountControl:1.2.840.113556.1.4.803:=4096))"
-        "(!(userAccountControl:1.2.840.113556.1.4.803:=8192))",
+    elif not search_user_ldap3(
+        userauth=username,
+        ldap_filter=(
+            "(!(userAccountControl:1.2.840.113556.1.4.803:=4096))"
+            "(!(userAccountControl:1.2.840.113556.1.4.803:=8192))"
+        ),
     ):
         # Query LDAP only when PAC flags are unavailable.
         return None
@@ -379,13 +382,14 @@ def emit_certificate(
             return {"status": "denied", "status_text": "denied"}
     else:
         # PAC account flags are missing: validate and resolve through LDAP.
-        r = search_user(username, "(!(userAccountControl:1.2.840.113556.1.4.803:=4096))(!(userAccountControl:1.2.840.113556.1.4.803:=8192))")
+        r = search_user_ldap3(userauth=username, ldap_filter="(!(userAccountControl:1.2.840.113556.1.4.803:=4096))(!(userAccountControl:1.2.840.113556.1.4.803:=8192))")
         if not r:
             return {"status": "denied", "status_text": "denied"}
-        samdbr, sam_entry = r
-        cn = (sam_entry.get("sAMAccountName") or [b"user"])[0].decode("utf-8", "ignore")
-        sid_str = samdbr.schema_format_value("objectSID", sam_entry["objectSID"][0]).decode("utf-8")
-        upn = (sam_entry.get("userPrincipalName") or [b""])[0].decode("utf-8", "ignore")
+        cn = ldap_text(r, "sAMAccountName")
+        sid_str = ldap_sid(r)
+        upn = ldap_text(r, "userPrincipalName")
+        if not cn or not sid_str:
+            return {"status": "denied", "status_text": "denied"}
 
     denied = False
     must_pending = False
