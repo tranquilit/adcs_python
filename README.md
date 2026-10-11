@@ -223,6 +223,21 @@ Checking if http is present in the keytab :
 klist -k -K /etc/krb5.keytab |grep HTTP
 ```
 
+### Automatic keytab rotation (recommended)
+
+For security, configure a daily cron job to keep the machine account password and
+`/etc/krb5.keytab` up to date. Create `/etc/cron.d/msktutil-keytab` with:
+
+```cron
+30 23 * * * root msktutil --auto-update --keytab /etc/krb5.keytab --enctypes 0x18
+```
+
+This checks the keytab every day at **23:30**. `msktutil --auto-update` only
+rotates the machine account password and refreshes the keytab when an update
+is needed (normally after **30 days**); it does **not** change the password
+every day. The machine account must be allowed to change its own password in
+Active Directory.
+
 - Add the machine FQDN and IP address to ``/etc/hosts``   **important**.
 
 Start the ADCS Python server
