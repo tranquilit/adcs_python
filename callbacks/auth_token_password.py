@@ -1,6 +1,6 @@
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from flask import g
-from utils import search_user_ldap3
+from utils import search_user_ldap3, get_default_realm
 import yaml
 
 
@@ -35,14 +35,25 @@ def check_auth(username=None, password=None):
         return False
 
     except BadSignature:
-        if not '@' in username :
+        if not isinstance(username, str) or not username.strip():
             return False
+
+        username = username.strip()
+        realm = get_default_realm().upper()
+
+        if "@" in username:
+            user, domain = username.split("@", 1)
+
+            if not user or domain.upper() != realm:
+                return False
+        else:
+            user = username
+
+        username = f"{user}@{realm}"
+
         r = search_user_ldap3(
             userauth=username,
             password=password
         )
 
-        if r:
-            return username
-
-        return False
+        return username if r else False
