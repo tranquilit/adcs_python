@@ -223,6 +223,8 @@ Checking if http is present in the keytab :
 klist -k -K /etc/krb5.keytab |grep HTTP
 ```
 
+- Add the machine FQDN and IP address to ``/etc/hosts``   **important**.
+
 ### Automatic keytab rotation (recommended)
 
 For security, configure a daily cron job to keep the machine account password and
@@ -238,7 +240,6 @@ is needed (normally after **30 days**); it does **not** change the password
 every day. The machine account must be allowed to change its own password in
 Active Directory.
 
-- Add the machine FQDN and IP address to ``/etc/hosts``   **important**.
 
 Start the ADCS Python server
 ---------------------------------------------------------
