@@ -7,15 +7,24 @@ requires the application's existing GSSAPI bindings for ticket authentication.
 import base64
 import binascii
 import logging
+import sys
+from pathlib import Path
 
 import gssapi
 from flask import current_app, g, request
 
 from adcs_logging import get_logger, log_event
 
-logger = get_logger("auth")
+# The submodule has a src/ layout, and is not a Debian Python package.
+_DECODER_SRC = Path(__file__).resolve().parent / "vendor/py-mspack-decoder/src"
+if not (_DECODER_SRC / "pac_decoder/__init__.py").is_file():
+    raise RuntimeError("Missing PAC decoder submodule: git submodule update --init --recursive")
+sys.path.insert(0, str(_DECODER_SRC))
 
-_MAX_PAC_BYTES = 4 * 1024 * 1024
+from pac_decoder import PACDecodeError
+from pac_decoder.gssapi_helpers import PACAttributeError, decode_completed_context
+
+logger = get_logger("auth")
 
 def _empty_pac_info():
     """Fresh request-local data for every auth method, even non-Kerberos."""
@@ -82,38 +91,13 @@ def _empty_pac_info():
     }
 
 
-def _authenticated_pac_attribute(name, key):
-    """Return authenticated PAC bytes only AFTER GSSAPI context completion.
-
-    Unauthenticated GSS name attributes must never be used for authorization.
-    """
+def _pac_info_from_context(context):
+    """Read the authenticated PAC using the decoder's GSSAPI integration."""
     try:
-        attr = name.attributes[key]
-    except (
-        AttributeError,
-        KeyError,
-        TypeError,
-        NotImplementedError,
-        gssapi.exceptions.GSSError,
-    ):
-        return None
-
-    if not attr.authenticated or not attr.complete or len(attr.values) != 1:
-        return None
-    raw = next(iter(attr.values))
-    if not isinstance(raw, bytes) or len(raw) > _MAX_PAC_BYTES:
-        return None
-    return raw
-
-
-def _pac_info_from_name(initiator_name):
-    """PAC decoding only; GSSAPI remains unchanged."""
-    from pac_decoder.integration import pac_info_from_name
-    return pac_info_from_name(
-        initiator_name,
-        authenticated_attribute=_authenticated_pac_attribute,
-        empty_factory=_empty_pac_info,
-    )
+        return decode_completed_context(context)
+    except (PACAttributeError, PACDecodeError) as exc:
+        logger.warning("PAC unavailable or invalid: %s", type(exc).__name__)
+        return _empty_pac_info()
 
 
 def kerberos_authenticate(auth_header):
@@ -173,7 +157,7 @@ def kerberos_authenticate(auth_header):
 
         user = str(initiator_name)
         # Read the authenticated PAC after Kerberos context completion.
-        g.pac_info = _pac_info_from_name(initiator_name)
+        g.pac_info = _pac_info_from_context(context)
         # Keep the previous g.sid interface for compatibility.
         g.sid = g.pac_info["sid"]
 
