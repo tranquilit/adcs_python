@@ -107,7 +107,8 @@ def _cmd_submit_csr_cli(
         templates_for_user, _ = build_templates_for_policy_response(
             conf,
             username=username.strip(),
-            request=fake_request
+            request=fake_request,
+            auth_method="cli",
         )
 
         tmap = {(t.get("template_oid") or {}).get("value"): t for t in templates_for_user}
@@ -172,6 +173,7 @@ def _cmd_submit_csr_cli(
             app_conf=conf,
             CAID=ca['id'],
             request=fake_request,
+            auth_method="cli",
             body_part_id=body_part_id,
             p7_der=request_blob,
         )

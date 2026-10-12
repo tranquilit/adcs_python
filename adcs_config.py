@@ -648,7 +648,7 @@ def build_templates_for_policy_response(
     # Build each template via its "define" callback
     for cb in conf.get("__template_decls__") or []:
 
-        if auth_method is not None and auth_method not in cb.get("auth_methods", ["kerberos", "username_password", "tls"]):
+        if auth_method not in (None, "cli") and auth_method not in cb.get("auth_methods", ["kerberos", "username_password", "tls"]):
             continue
 
         if cb["path"].startswith('/'):

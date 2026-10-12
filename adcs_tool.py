@@ -622,11 +622,18 @@ def run(args: argparse.Namespace) -> int:
             rsa_bits=args.rsa_bits, valid_days=args.valid_days,
         )
     if cmd == 'csr-submit':
-        return _cmd_submit_csr_cli(
-            ca_id=args.ca, username=args.username, conf=conf,
-            csr_path=args.csr_path, template_oid=args.template_oid,
-            template_name=args.template_name,
-        )
+        from flask import Flask, g
+
+        cli_app = Flask(__name__)
+        cli_app.confadcs = conf
+        with cli_app.app_context():
+            g.username = args.username.strip()
+            g.auth_method = "cli"
+            return _cmd_submit_csr_cli(
+                ca_id=args.ca, username=args.username, conf=conf,
+                csr_path=args.csr_path, template_oid=args.template_oid,
+                template_name=args.template_name,
+            )
     if cmd == 'certificate-rotate':
         return _cmd_rotate_if_expiring(
             ca_id=args.ca, crt_path=args.crt_path, key_path=args.key_path,
