@@ -2016,9 +2016,8 @@ def _cmd_create_ket_cert(
         print(f"    ket_key_pem: {storage_key_path}")
         return 0
 
-    except Exception as e:
-        print(f"ERROR: create KET certificate failed: {e}", file=sys.stderr)
-        return 1
+    except Exception:
+        raise
 
 def _read_all_bytes(paths: list[str]) -> bytes:
     out = b""

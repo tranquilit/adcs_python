@@ -238,9 +238,8 @@ def _cmd_submit_csr_cli(
         print(f"CSR PATH:    {csr_path_out}")
         return 0
 
-    except Exception as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return 1
+    except Exception:
+        raise
 
 
 def _cmd_issue_cert_cli(
@@ -290,9 +289,8 @@ def _cmd_issue_cert_cli(
 
         return 0
 
-    except Exception as e:
-        print(f"ERROR: issue certificate failed: {e}", file=sys.stderr)
-        return 1
+    except Exception:
+        raise
 
 
 def _cmd_resign_all_crls(

@@ -736,9 +736,8 @@ def main(argv=None) -> int:
         return 0
     try:
         return run(args)
-    except (ValueError, LookupError, OSError, RuntimeError, PermissionError, KeyError) as exc:
-        print(f'ERROR: {exc}', file=sys.stderr)
-        return 1
+    except Exception:
+        raise
 
 
 if __name__ == '__main__':
