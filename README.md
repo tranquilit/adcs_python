@@ -90,19 +90,19 @@ Install dependencies
 apt-get update
 apt-get install -y \
        msktutil \
+       gunicorn \
+       acl \
        nginx \
+       krb5-user \
+       git \
        python3-textual \
        python3-flask \
        python3-asn1crypto \
        python3-gssapi \
-       krb5-user \
-       git \
        python3-defusedxml \
        python3-pyasn1 \
        python3-waitress \
        python3-gunicorn \
-       gunicorn \
-       acl \
        python3-yaml \
        python3-cryptography \
        python3-pkcs11 \
