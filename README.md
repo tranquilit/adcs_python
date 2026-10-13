@@ -89,12 +89,12 @@ Install dependencies
 ```
 apt-get update
 apt-get install -y \
-       msktutil \
-       gunicorn \
+       git \
        acl \
+       msktutil \
        nginx \
        krb5-user \
-       git \
+       gunicorn \
        python3-textual \
        python3-flask \
        python3-asn1crypto \
