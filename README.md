@@ -273,7 +273,7 @@ For security, configure a daily cron job to keep the machine account password an
 `/etc/krb5.keytab` up to date. Create `/etc/cron.d/msktutil-keytab` with:
 
 ```cron
-30 23 * * * root msktutil --auto-update --keytab /etc/krb5.keytab --enctypes 0x18
+30 23 * * * root msktutil --auto-update --keytab /etc/krb5.keytab --enctypes 0x18 --no-reverse-lookups
 ```
 
 This checks the keytab every day at **23:30**. `msktutil --auto-update` only
