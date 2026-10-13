@@ -101,12 +101,14 @@ apt-get install -y \
        python3-pyasn1 \
        python3-waitress \
        python3-gunicorn \
+       gunicorn \
        acl \
        python3-yaml \
        python3-cryptography \
        python3-pkcs11 \
        python3-itsdangerous \
-       python3-ldap3
+       python3-ldap3 \
+       python3-dnspython
 ```
 
 Retrieve the project
