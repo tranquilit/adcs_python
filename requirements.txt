@@ -1,5 +1,6 @@
 Flask
 waitress
+gunicorn
 asn1crypto
 cryptography
 defusedxml

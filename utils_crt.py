@@ -92,12 +92,7 @@ def _read_sidecar_num(path: str) -> Optional[int]:
 
 
 def _write_sidecar_num(path: str, num: int) -> None:
-    tmp = path + ".tmp"
-    with open(tmp, "wt", encoding="utf-8") as f:
-        f.write(str(int(num)))
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)  # atomic on POSIX
+    _atomic_write(path, str(int(num)).encode("ascii"), mode=0o644)
 
 
 def _next_crl_number_persistent(crl_path: str, crl, bump: bool = True) -> int:
@@ -163,10 +158,7 @@ def _write_crl_file(crl_path: str, pem_bytes: bytes) -> None:
     """Write a PEM CRL to disk safely (create dirs, fsync, replace)."""
     dirn = os.path.dirname(crl_path) or "."
     os.makedirs(dirn, exist_ok=True)
-    with open(crl_path, "wb") as f:
-        f.write(pem_bytes)
-        f.flush()
-        os.fsync(f.fileno())
+    _atomic_write(crl_path, pem_bytes, mode=0o644)
 
 
 # -----------------------------------------------------------------------------
@@ -1658,7 +1650,7 @@ def create_ca(
             format=_private_key_pem_format_for_key(key),
             encryption_algorithm=serialization.NoEncryption(),
         )
-        _atomic_write(key_path, key_pem, mode=stat.S_IRUSR | stat.S_IWUSR)
+        _atomic_write(key_path, key_pem, mode=0o640)
 
         crl_builder = (
             cx509.CertificateRevocationListBuilder()
@@ -1753,7 +1745,7 @@ def _cmd_create_ca(
             _copy_if_different(
                 effective_key_path,
                 user_key_path,
-                mode=stat.S_IRUSR | stat.S_IWUSR,
+                mode=0o640,
             )
 
 
@@ -2006,12 +1998,12 @@ def _cmd_create_ket_cert(
         fullchain_pem = _compose_fullchain_pem(cert_pem, conf=conf, ca=ca)
 
         _atomic_write(storage_crt_path, fullchain_pem, mode=0o644)
-        _atomic_write(storage_key_path, key_pem, mode=stat.S_IRUSR | stat.S_IWUSR)
+        _atomic_write(storage_key_path, key_pem, mode=0o640)
 
         if crt_path:
             _copy_if_different(storage_crt_path, crt_path, mode=0o644)
         if key_path:
-            _copy_if_different(storage_key_path, key_path, mode=stat.S_IRUSR | stat.S_IWUSR)
+            _copy_if_different(storage_key_path, key_path, mode=0o640)
         print(f"    ket_cert_pem: {storage_crt_path}")
         print(f"    ket_key_pem: {storage_key_path}")
         return 0
