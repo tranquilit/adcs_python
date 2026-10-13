@@ -100,6 +100,8 @@ apt-get install -y \
        python3-defusedxml \
        python3-pyasn1 \
        python3-waitress \
+       python3-gunicorn \
+       acl \
        python3-yaml \
        python3-cryptography \
        python3-pkcs11 \
@@ -117,6 +119,31 @@ cd adcs_python
 ```   
 
 
+Service account and storage permissions
+---------------------------------------------------------
+
+Create the service account and prepare the storage
+
+```bash
+adduser --system --group --home /var/lib/adcs --no-create-home --shell /usr/sbin/nologin adcs
+
+# Create directories with inherited adcs group
+install -d -o root -g adcs -m 2775 \
+    /var/lib/adcs \
+    /var/lib/adcs/pki \
+    /var/lib/adcs/pki/certs \
+    /var/lib/adcs/pki/crl
+
+# Allow adcs to read/write and inherit permissions
+setfacl -m g:adcs:rwx -m d:g:adcs:rwx /var/lib/adcs
+
+# Allow Nginx to traverse parent directories
+setfacl -m u:www-data:--x /var/lib/adcs /var/lib/adcs/pki
+
+# Allow Nginx to read public certificates and CRLs, including future files
+setfacl -m u:www-data:r-x -m d:u:www-data:r-x /var/lib/adcs/pki/certs /var/lib/adcs/pki/crl
+```
+
 Initial configuration
 ---------------------------------------------------------
 
@@ -128,6 +155,12 @@ cp -f /opt/adcs_python/adcs.yaml.template /etc/adcs/adcs.yaml
 ```
 
 - Edit ``adcs.yaml`` if needed.
+
+```bash
+chown root:adcs /etc/adcs /etc/adcs/adcs.yaml
+chmod 750 /etc/adcs
+chmod 640 /etc/adcs/adcs.yaml
+```
 
 Copy template exemple, and edit if needed:
 
@@ -217,6 +250,13 @@ kinit <user>@MYDOMAIN.LAN
 msktutil --server dc01.mydomain.lan --create --hostname srvadcs.mydomain.lan --service HTTP/srvadcs.mydomain.lan --keytab /etc/krb5.keytab --no-reverse-lookups --enctypes 0x18
 ```
 
+Allow the service account to read the keytab (rotation remains in the root cron):
+
+```bash
+chown root:adcs /etc/krb5.keytab
+chmod 640 /etc/krb5.keytab
+```
+
 Checking if http is present in the keytab :
 
 ```
@@ -244,11 +284,15 @@ Active Directory.
 Start the ADCS Python server
 ---------------------------------------------------------
 
-```
-cd /opt/adcs_python && python3 app.py
+Install and start the supplied Gunicorn systemd unit (as root):
+
+```bash
+cp /opt/adcs_python/adcs.service /etc/systemd/system/adcs.service
+systemctl daemon-reload
+systemctl enable --now adcs
+systemctl status adcs
 ```
 
-- (Optional) Create a **systemd** service to start ADCS automatically.
 
 Test on a Windows client
 ---------------------------------------------------------
