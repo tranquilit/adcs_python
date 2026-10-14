@@ -5,7 +5,7 @@ import base64
 import hashlib
 import re
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Union
 from urllib.parse import unquote
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
@@ -1507,7 +1507,7 @@ def _ldap_ping(host: str, port: int, realm: str, timeout: int) -> tuple[str, str
             conn.unbind()
 
 
-def _srv_records(realm: str, site: str | None, timeout: int) -> list[SRV]:
+def _srv_records(realm: str, site: Optional[str], timeout: int) -> list[SRV]:
     # Treat the site name as a single DNS label, even if it contains a dot.
     labels = [b"_ldap", b"_tcp"]
     if site:
@@ -1650,17 +1650,17 @@ def search_user(userauth: str,ldap_filter='',dc_fqdn=None,basedn=None,password=N
 def search_user_ldap3(
     userauth: str,
     ldap_filter: str = "",
-    dc_fqdn: str | None = None,
-    basedn: str | None = None,
-    password: str | None = None,
-    bind_user: str | None = None,
+    dc_fqdn: Optional[str] = None,
+    basedn: Optional[str] = None,
+    password: Optional[str] = None,
+    bind_user: Optional[str] = None,
     dc_cache_ttl_seconds: float = 300,
     *,
-    realm: str | None = None,
+    realm: Optional[str] = None,
     keytab: str = "/etc/krb5.keytab",
-    attributes: list[str] | tuple[str, ...] | None = None,
+    attributes: Optional[Union[list[str], tuple[str, ...]]] = None,
     timeout: int = 10,
-) -> dict | None:
+) -> Optional[dict]:
     """LDAP3 + Kerberos SASL, with GSSAPI encryption when available.
 
     No TLS; lazy import keeps the legacy Samba path independent of gssapi.

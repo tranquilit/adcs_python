@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import struct
 from tempfile import TemporaryDirectory
+from typing import Optional, Union
 
 import gssapi
 from ldap3 import (
@@ -187,18 +188,18 @@ def _entries(conn, operation):
 def find_user(
     userauth: str,
     ldap_filter: str = "",
-    dc_fqdn: str | None = None,
-    basedn: str | None = None,
-    password: str | None = None,
-    bind_user: str | None = None,
+    dc_fqdn: Optional[str] = None,
+    basedn: Optional[str] = None,
+    password: Optional[str] = None,
+    bind_user: Optional[str] = None,
     dc_cache_ttl_seconds: float = 300,
     *,
-    realm: str | None = None,
+    realm: Optional[str] = None,
     keytab: str = "/etc/krb5.keytab",
-    attributes: list[str] | tuple[str, ...] | None = None,
+    attributes: Optional[Union[list[str], tuple[str, ...]]] = None,
     timeout: int = 10,
     get_dc_fqdn,
-) -> dict | None:
+) -> Optional[dict]:
     """Find an AD sAMAccountName with SASL Kerberos; return detached LDAP entry or None.
 
     GSSAPI confidentiality (Seal) is preferred; GSSAPI integrity (Sign)
