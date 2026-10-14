@@ -2,10 +2,11 @@
 # -*- coding: utf-8 -*-
 
 import base64
+from collections.abc import Mapping
 import hashlib
 import re
 from datetime import datetime, timezone
-from typing import Optional, Union
+from typing import Any, Optional, Union
 from urllib.parse import unquote
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
@@ -1435,6 +1436,99 @@ def build_ws_trust_response(
 # -----------------------------------------------------------------------------
 # Active Directory: DNS/LDAP DC discovery and Samba/LDAP user lookup
 # -----------------------------------------------------------------------------
+
+# Helpers for ldap3 Connection.response entries (case-insensitive AD attributes).
+def _attribute(entry: Any, section: str, name: str) -> Any:
+    """Return the first value of an attribute, or None if it is absent."""
+    if not isinstance(entry, Mapping) or not isinstance(name, str):
+        return None
+    attrs = entry.get(section)
+    if not isinstance(attrs, Mapping):
+        return None
+    wanted = name.casefold()
+    for key, value in attrs.items():
+        if isinstance(key, str) and key.casefold() == wanted:
+            if isinstance(value, (tuple, list)):
+                return value[0] if value else None
+            return value
+    return None
+
+
+def ldap_text(entry: Any, name: str) -> Optional[str]:
+    """Read one textual LDAP attribute, or None if unavailable/invalid."""
+    value = _attribute(entry, "attributes", name)
+    if value is None:
+        value = _attribute(entry, "raw_attributes", name)
+
+    if isinstance(value, str):
+        return value if value and "\x00" not in value else None
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        try:
+            decoded = bytes(value).decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+        return decoded if decoded and "\x00" not in decoded else None
+    return None
+
+
+def ldap_raw(entry: Any, name: str) -> Optional[bytes]:
+    """Read the bytes of one LDAP attribute, e.g. AD's objectGUID."""
+    value = _attribute(entry, "raw_attributes", name)
+    if value is None:
+        value = _attribute(entry, "attributes", name)
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return bytes(value)
+    return None
+
+
+def _binary_sid(value: bytes) -> Optional[str]:
+    """Decode an MS-DTYP SID: revision, authority, LE subauthorities."""
+    if len(value) < 12 or value[0] != 1:
+        return None
+    count = value[1]
+    if not 1 <= count <= 15 or len(value) != 8 + 4 * count:
+        return None
+    authority = int.from_bytes(value[2:8], "big")
+    parts = [str(int.from_bytes(value[8 + i * 4:12 + i * 4], "little"))
+             for i in range(count)]
+    return "S-1-{}-{}".format(authority, "-".join(parts))
+
+
+def _text_sid(value: str) -> Optional[str]:
+    parts = value.split("-")
+    if len(parts) < 4 or len(parts) > 18 or parts[:2] != ["S", "1"]:
+        return None
+    if any(not part or not part.isascii() or not part.isdecimal()
+           for part in parts[2:]):
+        return None
+    # Bound string lengths before converting untrusted LDAP values to ints.
+    if len(parts[2]) > 15 or any(len(part) > 10 for part in parts[3:]):
+        return None
+    nums = [int(part) for part in parts[2:]]
+    if nums[0] >= 1 << 48 or any(number >= 1 << 32 for number in nums[1:]):
+        return None
+    return "S-1-" + "-".join(str(number) for number in nums)
+
+
+def ldap_sid(entry: Any) -> Optional[str]:
+    """Return a canonical objectSid such as S-1-5-21-..., or None.
+
+    Prefer the original binary bytes to a transformed LDAP3 value. If binary
+    data is present but invalid, refuse it instead of trusting a second copy.
+    """
+    raw = _attribute(entry, "raw_attributes", "objectSid")
+    if raw is not None:
+        if isinstance(raw, (bytes, bytearray, memoryview)):
+            return _binary_sid(bytes(raw))
+        return None
+
+    parsed = _attribute(entry, "attributes", "objectSid")
+    if isinstance(parsed, str):
+        return _text_sid(parsed)
+    if isinstance(parsed, (bytes, bytearray, memoryview)):
+        return _binary_sid(bytes(parsed))
+    return None
+
 
 BAD_LDAP_CHARS_RE = re.compile(r'[\x00()*\\]')
 

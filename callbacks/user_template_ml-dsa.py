@@ -1,4 +1,4 @@
-from ldap_entry import ldap_text, ldap_sid
+from utils import ldap_text, ldap_sid
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 

@@ -1,4 +1,4 @@
-from ldap_entry import ldap_text, ldap_raw
+from utils import ldap_text, ldap_raw
 import sys
 import argparse
 from datetime import datetime, timedelta

@@ -1,4 +1,4 @@
-from ldap_entry import ldap_text
+from utils import ldap_text
 from typing import Iterable, Optional, Dict, Any
 from cryptography import x509 as cx509
 from cryptography.hazmat.primitives import serialization as crypto_serialization
