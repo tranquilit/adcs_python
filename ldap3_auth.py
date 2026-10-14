@@ -125,8 +125,8 @@ def _machine_principal(keytab: Path, realm: str):
 
     if not found:
         raise ValueError(f"No machine principal NAME$@{realm} in {keytab}")
-    if len(found) != 1:
-        raise ValueError(f"Multiple different machine principals NAME$@{realm} in {keytab}")
+    #if len(found) != 1:
+    #    raise ValueError(f"Multiple different machine principals NAME$@{realm} in {keytab}")
 
     account = next(iter(found))
     # A keytab name component is not a free-form principal string. Escape any
