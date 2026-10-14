@@ -53,6 +53,7 @@ def define_template(*, app_conf, username=None, request=None, params=None, auth_
         "permissions": {"enroll": True, "auto_enroll": auto_enroll},
 
         "flags": {
+            "hash_algorithm": "sha256",
             "private_key_flags": {
                 "exportable_key": True,
 

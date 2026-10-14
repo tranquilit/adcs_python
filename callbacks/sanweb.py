@@ -117,6 +117,7 @@ def define_template(*, app_conf, username=None , request=None,auth_method=None,p
 
     # FLAGS: booleans only
     "flags": {
+        "hash_algorithm": "sha256",
         "private_key_flags": {
             # MS-XCEP Attributes/privateKeyFlags: bitmask of private key flags
             # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cd22d3a0-f469-4a44-95ed-d10ce4dc2063

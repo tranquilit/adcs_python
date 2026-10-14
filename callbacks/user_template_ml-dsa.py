@@ -191,6 +191,7 @@ def define_template(*, app_conf, username=None, request=None, params=None, auth_
     },
 
     "flags": {
+        "hash_algorithm": "sha256",
         # MS-XCEP Attributes: privateKeyFlags / subjectNameFlags / enrollmentFlags / generalFlags (bitmasks)
         # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cd22d3a0-f469-4a44-95ed-d10ce4dc2063
         #
