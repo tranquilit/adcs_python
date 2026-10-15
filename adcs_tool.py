@@ -426,6 +426,7 @@ def _create_ca(args: argparse.Namespace) -> int:
             raise ValueError('Unexpected CA configuration output')
         cas.append(entries[0])
         _save_config(args.confadcs, editor, document)
+        print(f"CA '{args.cn.strip()}' created successfully (updated {args.confadcs}).")
     return result
 
 
@@ -693,6 +694,7 @@ def run(args: argparse.Namespace) -> int:
                 raise ValueError('Unexpected KET configuration output')
             matches[0].update(paths)
             _save_config(args.confadcs, editor, document)
+            print(f"KET certificate for CA '{args.ca}' created successfully (updated {args.confadcs}).")
         return result
     if cmd == 'csr-submit':
         from flask import Flask, g
