@@ -5,7 +5,7 @@ asn1crypto
 cryptography
 defusedxml
 pyasn1
-PyYAML
+ruamel.yaml>=0.16.6
 gssapi
 requests
 textual

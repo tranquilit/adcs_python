@@ -1,7 +1,8 @@
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from flask import g
 from utils import search_user_ldap3, get_default_realm
-import yaml
+from ruamel.yaml import YAML
+yaml = YAML(typ="safe")
 
 
 def check_auth(username=None, password=None):
@@ -9,7 +10,7 @@ def check_auth(username=None, password=None):
         return False
 
     with open("/etc/adcs/token.yaml", "r") as f:
-        config = yaml.safe_load(f)
+        config = yaml.load(f)
 
     serializer = URLSafeTimedSerializer(
         config["security"]["secret_key"],

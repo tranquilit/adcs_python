@@ -23,7 +23,7 @@ Focus:
   - Focus is preserved after selection and after actions (reselects highlighted row).
 
 Dependencies:
-  pip install textual cryptography PyYAML
+  pip install textual cryptography ruamel.yaml
 
 The app reuses your adcs.yaml and your folders.
 

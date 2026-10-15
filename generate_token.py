@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 
-import yaml
+from ruamel.yaml import YAML
+yaml = YAML(typ="safe")
 from itsdangerous import URLSafeTimedSerializer
 
 with open("/etc/adcs/token.yaml") as f:
-    config = yaml.safe_load(f)
+    config = yaml.load(f)
 
 serializer = URLSafeTimedSerializer(
     config["security"]["secret_key"],

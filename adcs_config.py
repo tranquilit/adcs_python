@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 
 import base64
-import yaml
+from ruamel.yaml import YAML
+yaml = YAML(typ="safe")
 import os
 import inspect
 from typing import Tuple
@@ -343,7 +344,7 @@ def load_yaml_conf(path="adcs.yaml", bypass_read_only=False):
     #from cryptography.hazmat.primitives import serialization
 
     with open(path, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
+        cfg = yaml.load(f)
 
     conf = {}
     gbl = cfg.get("global", {})

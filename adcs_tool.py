@@ -3,8 +3,7 @@
 """Non-interactive ADCS management, sharing data/operations with Textual UI.
 
 No Textual imports: the server can use ``adcs-tool`` without installing a UI.
-The human-readable YAML block printed by ``ca create`` is delegated directly
-and unchanged to utils_crt._cmd_create_ca() for shell redirection compatibility.
+CA and KET creation write their YAML configuration directly to adcs.yaml.
 """
 from __future__ import annotations
 
@@ -13,10 +12,18 @@ import shutil
 import json
 import os
 import sys
+import stat
+import tempfile
+from contextlib import redirect_stdout
+from io import StringIO
 from datetime import datetime
 from typing import Any, Dict
 
-import yaml
+from ruamel.yaml import YAML
+from ruamel.yaml.comments import CommentedSeq
+from ruamel.yaml.error import YAMLError
+
+yaml = YAML(typ="safe")
 
 from adcs_config import load_yaml_conf
 from adcs_actions import (
@@ -180,7 +187,7 @@ def build_parser() -> argparse.ArgumentParser:
     resign_all.add_argument('--no-bump-number', action='store_true')
     resign_all.add_argument('--next-update-hours', type=int, default=None)
 
-    ca_create = command('ca-create', 'Create a root/intermediate CA; stdout YAML block is unchanged.')
+    ca_create = command('ca-create', 'Create a root/intermediate CA and update adcs.yaml.')
     ca_create.add_argument('--cn', required=True)
     ca_create.add_argument('--signer-ca-id', '--ca-id', '--ca', dest='ca', default=None,
                            help='Issuer CA, omit for a self-signed root CA.')
@@ -346,9 +353,51 @@ def _record(args: argparse.Namespace, conf: Dict[str, Any]):
     return ca, cert_dir, record
 
 
+def _config_yaml(path):
+    editor = YAML()
+    editor.preserve_quotes = True
+    editor.indent(mapping=2, sequence=4, offset=2)
+    with open(path, encoding='utf-8') as stream:
+        document = editor.load(stream)
+    if not isinstance(document, dict):
+        raise ValueError('Invalid adcs.yaml: expected a mapping')
+    if document.get('cas') is None:
+        document['cas'] = CommentedSeq()
+    cas = document['cas']
+    if not isinstance(cas, list) or any(not isinstance(ca, dict) for ca in cas):
+        raise ValueError('Invalid adcs.yaml: cas must be a list of mappings')
+    return editor, document, cas
+
+
+def _save_config(path, editor, document):
+    output = StringIO()
+    editor.dump(document, output)
+    target = os.path.realpath(path)
+    info = os.stat(target)
+    fd, temporary = tempfile.mkstemp(dir=os.path.dirname(target))
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+            os.fchown(stream.fileno(), info.st_uid, info.st_gid)
+            os.fchmod(stream.fileno(), stat.S_IMODE(info.st_mode))
+            for attr in os.listxattr(target):
+                os.setxattr(temporary, attr, os.getxattr(target, attr))
+            stream.write(output.getvalue())
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _capture_yaml(command, **kwargs):
+    output = StringIO()
+    with redirect_stdout(output):
+        result = command(**kwargs)
+    return result, output.getvalue()
+
+
 def _create_ca(args: argparse.Namespace) -> int:
-    # Preserve stdout *byte-for-byte* with the historical CA creation logic:
-    # the direct call below alone prints the YAML block for >> adcs.yaml.
     if args.aia_crl_base_url.lower().startswith('https://'):
         raise ValueError('--aia-crl-base-url must not start with https://')
     if args.valid_days <= 0:
@@ -357,8 +406,12 @@ def _create_ca(args: argparse.Namespace) -> int:
     crt_path = args.crt_path or f'/var/lib/adcs/pki/certs/{basename}/{basename}.crt.pem'
     key_path = args.key_path or f'/var/lib/adcs/pki/private/{basename}/{basename}.key.pem'
     crl_path = args.crl_path or f'/var/lib/adcs/pki/crl/{basename}/{basename}.crl'
+    editor, document, cas = _config_yaml(args.confadcs)
+    if any(basename in (ca.get('id'), ca.get('display_name'))
+           or args.cn.strip() in (ca.get('id'), ca.get('display_name')) for ca in cas):
+        raise ValueError(f"CA '{basename}' already exists")
     conf = _load(args, read_only=False) if args.ca else None
-    return _cmd_create_ca(
+    result, output = _capture_yaml(_cmd_create_ca,
         ca_id=args.ca, crt_path=crt_path, key_path=key_path,
         crl_path=crl_path, aia_crl_base_url=args.aia_crl_base_url,
         valid_days=args.valid_days, rsa_key_size=args.rsa_bits,
@@ -366,6 +419,14 @@ def _create_ca(args: argparse.Namespace) -> int:
         mldsa_variant=args.mldsa_variant, conf=conf, cn=args.cn,
         csr_path=args.csr_path,
     )
+    if result == 0:
+        entries = editor.load('cas:\n' + output)['cas']
+        if (len(entries) != 1 or entries[0].get('id') != basename
+                or entries[0].get('display_name') != args.cn.strip()):
+            raise ValueError('Unexpected CA configuration output')
+        cas.append(entries[0])
+        _save_config(args.confadcs, editor, document)
+    return result
 
 
 def run(args: argparse.Namespace) -> int:
@@ -374,13 +435,13 @@ def run(args: argparse.Namespace) -> int:
         return _create_ca(args)
     if cmd == 'config-show':
         with open(args.confadcs, 'r', encoding='utf-8') as file:
-            settings = yaml.safe_load(file) or {}
+            settings = yaml.load(file) or {}
         _output_structure(_redact_configuration(settings), _format(args))
         return 0
     if cmd in ('callback-list', 'ca-list', 'ca-show'):
         # Configuration inspection remains usable even without signing keys.
         with open(args.confadcs, 'r', encoding='utf-8') as file:
-            settings = yaml.safe_load(file) or {}
+            settings = yaml.load(file) or {}
         if cmd == 'callback-list':
             _output_structure(public_callback_configuration(settings), _format(args))
         elif cmd == 'ca-show':
@@ -616,11 +677,23 @@ def run(args: argparse.Namespace) -> int:
             conf=conf, crt_path=args.crt_path, key_path=args.key_path,
         )
     if cmd == 'ket-create':
-        return _cmd_create_ket_cert(
+        editor, document, cas = _config_yaml(args.confadcs)
+        matches = [ca for ca in cas if args.ca in (ca.get('id'), ca.get('display_name'))]
+        if len(matches) != 1:
+            raise ValueError(f"CA '{args.ca}' not found or ambiguous in adcs.yaml")
+        result, output = _capture_yaml(_cmd_create_ket_cert,
             ca_id=args.ca, common_name=args.cn or f'{args.ca}-Xchg',
             conf=conf, crt_path=args.crt_path, key_path=args.key_path,
             rsa_bits=args.rsa_bits, valid_days=args.valid_days,
         )
+        if result == 0:
+            paths = editor.load('ket:\n' + output)['ket']
+            if (set(paths) != {'ket_cert_pem', 'ket_key_pem'}
+                    or not all(isinstance(v, str) and v for v in paths.values())):
+                raise ValueError('Unexpected KET configuration output')
+            matches[0].update(paths)
+            _save_config(args.confadcs, editor, document)
+        return result
     if cmd == 'csr-submit':
         from flask import Flask, g
 
@@ -671,12 +744,12 @@ def _complete_words(words: list[str]) -> list[str]:
     def ca_ids():
         try:
             with open(config_path, encoding='utf-8') as stream:
-                conf = yaml.safe_load(stream) or {}
+                conf = yaml.load(stream) or {}
             cas = conf.get('cas', []) if isinstance(conf, dict) else []
             if isinstance(cas, dict):
                 cas = cas.values()
             return [str(ca['id']) for ca in cas if isinstance(ca, dict) and ca.get('id')]
-        except (OSError, yaml.YAMLError, TypeError, ValueError):
+        except (OSError, YAMLError, TypeError, ValueError):
             return []
 
     actions = context._actions

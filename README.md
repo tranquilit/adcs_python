@@ -103,7 +103,7 @@ apt-get install -y \
        python3-pyasn1 \
        python3-waitress \
        python3-gunicorn \
-       python3-yaml \
+       python3-ruamel.yaml \
        python3-cryptography \
        python3-pkcs11 \
        python3-itsdangerous \
@@ -185,17 +185,17 @@ ln -s /opt/adcs_python/adcs-gui /usr/bin/adcs-gui
 By default, `adcs-tool ca create` generates an RSA CA:
 
 ```
-adcs-tool ca create --cn "CA Root Test" --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
-adcs-tool ket create --ca-id "CA Root Test" >> /etc/adcs/adcs.yaml
-adcs-tool ca create --signer-ca-id "CA Root Test" --cn "CA Inter Test" --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
-adcs-tool ket create --ca-id "CA Inter Test" >> /etc/adcs/adcs.yaml
+adcs-tool ca create --cn "CA Root Test" --aia-crl-base-url "http://testadcs.mydomain.lan"
+adcs-tool ket create --ca-id "CA Root Test"
+adcs-tool ca create --signer-ca-id "CA Root Test" --cn "CA Inter Test" --aia-crl-base-url "http://testadcs.mydomain.lan"
+adcs-tool ket create --ca-id "CA Inter Test"
 adcs-tool certificate issue --signer-ca-id "CA Inter Test" --cn testadcs.mydomain.lan --san testadcs.mydomain.lan --crt-path /etc/nginx/crt.pem --key-path /etc/nginx/key.pem
 ```
 
 To generate an ECC CA instead, use `--key-type ec` and select the curve with `--ec-curve`:
 
 ```
-adcs-tool ca create --cn "CA Root ECC Test" --key-type ec --ec-curve secp384r1 --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
+adcs-tool ca create --cn "CA Root ECC Test" --key-type ec --ec-curve secp384r1 --aia-crl-base-url "http://testadcs.mydomain.lan"
 ```
 
 Supported ECC curves are `secp256r1`, `secp384r1`, and `secp521r1`. Aliases such as `prime256v1`, `p-256`, `p-384`, and `p-521` are also accepted.
@@ -540,9 +540,8 @@ current CRL, not a stale SQLite flag.
 New certificate issuance and the other previously available non-interactive
 operations are available as `ca create`, `certificate issue`, `ket create`,
 `csr submit` and `certificate rotate`. See each subcommand's `--help` for
-parameters. The `ca create` **stdout YAML block is unchanged** and can still
-be appended using `>> /etc/adcs/adcs.yaml` as shown below. Diagnostics are
-written to stderr. For a custom configuration file, pass
+parameters. `ca create` and `ket create` update `adcs.yaml` directly.
+For a custom configuration file, pass
 `--confadcs /path/to/adcs.yaml` before the command or after the command family (for example, `adcs-tool --confadcs /etc/adcs/adcs.yaml ca list`).
 
 Optional: Create a CA certificate from an existing CSR public key
@@ -573,7 +572,7 @@ adcs-tool ca create \
   --signer-ca-id "CA Root Test" \
   --cn "CA Inter HSM Test" \
   --csr-path subca.csr.pem \
-  --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
+  --aia-crl-base-url "http://testadcs.mydomain.lan"
 ```
 
 When `--csr-path` is used, `--signer-ca-id` is required because the CA certificate is signed by an existing parent CA.
