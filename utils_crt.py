@@ -1331,29 +1331,27 @@ def _cmd_rotate_if_expiring(
     conf,
     write_fullchain_to_crt: bool = True,
     valid_days=365
-) -> int:
+) -> Dict[str, Any]:
 
     ca = _cli_find_ca_by_id(conf, ca_id)
     if not ca:
-        print(f"ERROR: CA '{ca_id}' not found in adcs.yaml", file=sys.stderr)
-        return 3
+        raise LookupError(f"CA '{ca_id}' not found in adcs.yaml")
 
     if not os.path.isfile(crt_path):
-        print(f"ERROR: crt file not found: {crt_path}", file=sys.stderr)
-        return 4
+        raise FileNotFoundError(f"crt file not found: {crt_path}")
 
     try:
         cert = load_certificate_file(crt_path)
     except Exception as e:
-        print(f"ERROR: cannot parse certificate '{crt_path}': {e}", file=sys.stderr)
-        return 5
+        raise ValueError(f"cannot parse certificate '{crt_path}': {e}") from e
 
     now = datetime.now(timezone.utc)
     not_after = cert.not_valid_after_utc
     days_left = (not_after - now).days
     if days_left > threshold_days:
-        print(f"OK: {days_left} days left (> {threshold_days}); no rotation needed.")
-        return 0
+        return {'ca_id': ca_id, 'rotated': False, 'days_left': days_left,
+                'threshold_days': threshold_days, 'certificate_path': crt_path,
+                'key_path': key_path}
 
     cn, sans = _extract_cn_and_sans(cert)
     request_id = uuid.uuid4().int
@@ -1400,11 +1398,9 @@ def _cmd_rotate_if_expiring(
     _atomic_write(os.path.join(private_storage_dir, f"{request_id}.key.pem"), key_pem, mode=stat.S_IRUSR | stat.S_IWUSR)
     _atomic_write(key_path, key_pem, mode=stat.S_IRUSR | stat.S_IWUSR)
 
-    print(
-        f"ROTATED: cert replaced at '{crt_path}', key replaced at '{key_path}' "
-        f"(days left was {days_left} ≤ threshold {threshold_days})"
-    )
-    return 0
+    return {'ca_id': ca_id, 'rotated': True, 'days_left': days_left,
+            'threshold_days': threshold_days, 'certificate_path': crt_path,
+            'key_path': key_path}
 
 
 def _cli_find_ca_by_id(conf: Dict[str, Any], ca_id: str) -> Optional[Dict[str, Any]]:
@@ -1698,7 +1694,7 @@ def _cmd_create_ca(
     conf=None,
     cn=None,
     csr_path: Optional[str] = None,
-) -> int:
+) -> Dict[str, Any]:
     parent_ca = None
     effective_crt_path = crt_path
     effective_key_path = key_path
@@ -1710,8 +1706,7 @@ def _cmd_create_ca(
             raise ValueError('Configuration is required when --ca-id is used.')
         parent_ca = _cli_find_ca_by_id(conf, ca_id)
         if not parent_ca:
-            print(f"ERROR: parent CA '{ca_id}' not found in adcs.yaml", file=sys.stderr)
-            return 3
+            raise LookupError(f"parent CA '{ca_id}' not found in adcs.yaml")
 
         certs_dir, private_dir = _resolve_storage_paths_from_ca(parent_ca)
         os.makedirs(certs_dir, exist_ok=True)
@@ -1749,51 +1744,37 @@ def _cmd_create_ca(
             )
 
 
-    print("")
-
-    slug = cn.lower().replace(' ','_')
+    slug = cn.lower().replace(' ', '_')
     display_name = cn.strip()
     aia_crl_base_url = aia_crl_base_url.rstrip('/')
-
-    print(f'  - id: "{slug}"')
-    print("")
-
-    if ca_id:
-        print(f'    issuer_ca_id: "{ca_id}"')
-        print("")
-
-    print(f'    display_name: "{display_name}"')
-    print("    urls:")
-    print(f'      crl_http:        "{aia_crl_base_url}/crl/{slug}/{os.path.basename(crl_path)}"')
-    print(f'      ca_issuers_http: "{aia_crl_base_url}/certs/{slug}/{os.path.basename(crt_path)}"')
-    print("    pem:")
-    print(f"      certificate_path_pem: {crt_path}")
-    if result.get('key_path'):
-        print(f"      key_path_pem:         {key_path}")
-        print("      key_passphrase: null")
-    else:
-        guessed_key_path = f"/var/lib/adcs/pki/private/{slug}/{slug}.key.pem"
-        print(f"      key_path_pem:         {guessed_key_path}")
-        print("      key_passphrase: null")
-    print("")
-    print("    crl:")
-    print(f"      path_crl: {crl_path}")
-    print("")
-    print("    storage_paths:")
-    print(f"      cert_dir: /var/lib/adcs/pki/newcerts/{slug}/")
-    print(f"      csr_dir:  /var/lib/adcs/pki/csr/{slug}/")
-    print(f"      private_dir: /var/lib/adcs/pki/private/{slug}/")
+    return {
+        'id': slug,
+        **({'issuer_ca_id': ca_id} if ca_id else {}),
+        'display_name': display_name,
+        'urls': {
+            'crl_http': f'{aia_crl_base_url}/crl/{slug}/{os.path.basename(crl_path)}',
+            'ca_issuers_http': f'{aia_crl_base_url}/certs/{slug}/{os.path.basename(crt_path)}',
+        },
+        'pem': {
+            'certificate_path_pem': crt_path,
+            'key_path_pem': key_path if result.get('key_path') else
+                            f'/var/lib/adcs/pki/private/{slug}/{slug}.key.pem',
+            'key_passphrase': None,
+        },
+        'crl': {'path_crl': crl_path},
+        'storage_paths': {
+            'cert_dir': f'/var/lib/adcs/pki/newcerts/{slug}/',
+            'csr_dir': f'/var/lib/adcs/pki/csr/{slug}/',
+            'private_dir': f'/var/lib/adcs/pki/private/{slug}/',
+        },
+    }
 
 
 
-    return 0
-
-
-def _cmd_resign_crl(ca_id: str, next_update_hours: int = 8, bump_number: bool = True, conf=None) -> int:
+def _cmd_resign_crl(ca_id: str, next_update_hours: int = 8, bump_number: bool = True, conf=None) -> Dict[str, Any]:
     ca = _cli_find_ca_by_id(conf, ca_id)
     if not ca:
-        print(f"ERROR: CA '{ca_id}' not found in adcs.yaml", file=sys.stderr)
-        return 3
+        raise LookupError(f"CA '{ca_id}' not found in adcs.yaml")
 
     ca_key = ca["__key_obj"]
     ca_cert_der = ca["__certificate_der"]
@@ -1809,8 +1790,7 @@ def _cmd_resign_crl(ca_id: str, next_update_hours: int = 8, bump_number: bool = 
         bump_number=bump_number,
         next_update_hours=next_update_hours,
     )
-    print(f"CRL re-signed for '{ca_id}' -> CRLNumber {new_num} (path: {crl_path})")
-    return 0
+    return {'ca_id': ca_id, 'crl_number': new_num, 'crl_path': crl_path}
 
 
 
@@ -1962,22 +1942,18 @@ def _cmd_create_ket_cert(
     rsa_bits: int = 2048,
     valid_days: int = 7,
     subject_dc: Optional[List[str]] = None,
-) -> int:
+) -> Dict[str, str]:
     try:
         ca = _cli_find_ca_by_id(conf, ca_id)
         if not ca:
-            print(f"ERROR: CA not found: {ca_id}", file=sys.stderr)
-            return 1
+            raise LookupError(f"CA not found: {ca_id}")
 
         if not common_name.strip():
-            print("ERROR: --cn is required with --create-ket-cert", file=sys.stderr)
-            return 1
+            raise ValueError("--cn is required with --create-ket-cert")
         if int(rsa_bits) not in (2048, 3072, 4096):
-            print("ERROR: --rsa-bits must be one of: 2048, 3072, 4096", file=sys.stderr)
-            return 1
+            raise ValueError("--rsa-bits must be one of: 2048, 3072, 4096")
         if int(valid_days) <= 0:
-            print("ERROR: --valid-days must be > 0", file=sys.stderr)
-            return 1
+            raise ValueError("--valid-days must be > 0")
 
         certs_dir, private_dir = _resolve_storage_paths_from_ca(ca)
         os.makedirs(certs_dir, exist_ok=True)
@@ -2004,9 +1980,7 @@ def _cmd_create_ket_cert(
             _copy_if_different(storage_crt_path, crt_path, mode=0o644)
         if key_path:
             _copy_if_different(storage_key_path, key_path, mode=0o640)
-        print(f"    ket_cert_pem: {storage_crt_path}")
-        print(f"    ket_key_pem: {storage_key_path}")
-        return 0
+        return {'ket_cert_pem': storage_crt_path, 'ket_key_pem': storage_key_path}
 
     except Exception:
         raise

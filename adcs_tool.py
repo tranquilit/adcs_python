@@ -14,10 +14,11 @@ import os
 import sys
 import stat
 import tempfile
-from contextlib import redirect_stdout
 from io import StringIO
 from datetime import datetime
-from typing import Any, Dict
+from contextlib import contextmanager, nullcontext
+from functools import lru_cache
+from typing import Any, Dict, Literal, Mapping, TypedDict
 
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedSeq
@@ -27,7 +28,7 @@ yaml = YAML(typ="safe")
 
 from adcs_config import load_yaml_conf
 from adcs_actions import (
-    _cmd_issue_cert_cli, _cmd_resign_all_crls, _cmd_submit_csr_cli,
+    _cmd_issue_cert_cli, _cmd_resign_all_crls, submit_csr_request,
     _redact_configuration, public_ca_configuration, public_callback_configuration,
     change_revocation, delete_certificate, resign_ca_crl,
 )
@@ -97,16 +98,16 @@ def _add_global_config(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = FriendlyArgumentParser(
+def build_parser(parser_class=FriendlyArgumentParser) -> argparse.ArgumentParser:
+    parser = parser_class(
         description='Manage ADCS CAs, certificate cache, certificates, callbacks and CRLs without the GUI.',
     )
     parser.add_argument('--confadcs', default='/etc/adcs/adcs.yaml',
                         help='Path of adcs.yaml (default: /etc/adcs/adcs.yaml)')
-    commands = parser.add_subparsers(dest='command', metavar='<subcommand>', parser_class=FriendlyArgumentParser)
+    commands = parser.add_subparsers(dest='command', metavar='<subcommand>', parser_class=parser_class)
     # Argument definitions are private templates, not public CLI commands.
     templates = argparse.ArgumentParser(add_help=False)
-    definitions = templates.add_subparsers(dest='command')
+    definitions = templates.add_subparsers(dest='command', parser_class=parser_class)
 
     def command(name: str, help_text: str) -> argparse.ArgumentParser:
         sub = definitions.add_parser(name, help=help_text, description=help_text)
@@ -260,7 +261,7 @@ def build_parser() -> argparse.ArgumentParser:
         group = commands.add_parser(group_name, help=description, description=description)
         group_parsers[group_name] = group
         _add_global_config(group)
-        nested = group.add_subparsers(dest='operation', metavar='<subcommand>', parser_class=FriendlyArgumentParser)
+        nested = group.add_subparsers(dest='operation', metavar='<subcommand>', parser_class=parser_class)
         for short_name, old_name in items.items():
             old = originals[old_name]
             sub = nested.add_parser(short_name, parents=[old], add_help=False,
@@ -337,20 +338,8 @@ def _ca(conf: Dict[str, Any], name: str) -> Dict[str, Any]:
     return ca
 
 
-def _load(args: argparse.Namespace, read_only: bool = True) -> Dict[str, Any]:
-    return load_yaml_conf(args.confadcs, bypass_read_only=read_only)
-
-
 def _ca_revocations(ca: Dict[str, Any]) -> set[int]:
     return revoked_serials_set((ca.get('crl') or {}).get('path_crl'))
-
-
-def _record(args: argparse.Namespace, conf: Dict[str, Any]):
-    ca = _ca(conf, args.ca)
-    cert_dir, _ = _resolve_storage_paths_from_ca(ca)
-    _sync_certificate_cache(cert_dir)
-    record = cached_certificate_by_serial(cert_dir, args.serial)
-    return ca, cert_dir, record
 
 
 def _config_yaml(path):
@@ -390,96 +379,220 @@ def _save_config(path, editor, document):
             os.unlink(temporary)
 
 
-def _capture_yaml(command, **kwargs):
-    output = StringIO()
-    with redirect_stdout(output):
-        result = command(**kwargs)
-    return result, output.getvalue()
+class BatchResult(TypedDict):
+    """Bulk revoke/unrevoke/delete result (preview or applied).
+
+    All counts are integers; errors contain {serial, error} mappings.
+    ``dry_run`` indicates a preview, not whether it succeeded.
+    """
+    action: str
+    ca: str
+    dry_run: bool
+    total: int
+    selected: int
+    candidates: list[dict[str, Any]]
+    successes: int
+    failures: int
+    errors: list[dict[str, str]]
 
 
-def _create_ca(args: argparse.Namespace) -> int:
-    if args.aia_crl_base_url.lower().startswith('https://'):
-        raise ValueError('--aia-crl-base-url must not start with https://')
-    if args.valid_days <= 0:
-        raise ValueError('--valid-days must be positive')
-    basename = args.cn.lower().replace(' ', '_')
-    crt_path = args.crt_path or f'/var/lib/adcs/pki/certs/{basename}/{basename}.crt.pem'
-    key_path = args.key_path or f'/var/lib/adcs/pki/private/{basename}/{basename}.key.pem'
-    crl_path = args.crl_path or f'/var/lib/adcs/pki/crl/{basename}/{basename}.crl'
-    editor, document, cas = _config_yaml(args.confadcs)
-    if any(basename in (ca.get('id'), ca.get('display_name'))
-           or args.cn.strip() in (ca.get('id'), ca.get('display_name')) for ca in cas):
-        raise ValueError(f"CA '{basename}' already exists")
-    conf = _load(args, read_only=False) if args.ca else None
-    result, output = _capture_yaml(_cmd_create_ca,
-        ca_id=args.ca, crt_path=crt_path, key_path=key_path,
-        crl_path=crl_path, aia_crl_base_url=args.aia_crl_base_url,
-        valid_days=args.valid_days, rsa_key_size=args.rsa_bits,
-        key_type=args.key_type, ec_curve=args.ec_curve,
-        mldsa_variant=args.mldsa_variant, conf=conf, cn=args.cn,
-        csr_path=args.csr_path,
-    )
-    if result == 0:
-        entries = editor.load('cas:\n' + output)['cas']
-        if (len(entries) != 1 or entries[0].get('id') != basename
-                or entries[0].get('display_name') != args.cn.strip()):
-            raise ValueError('Unexpected CA configuration output')
-        cas.append(entries[0])
-        _save_config(args.confadcs, editor, document)
-        print(f"CA '{args.cn.strip()}' created successfully (updated {args.confadcs}).")
-    return result
+class CrlItemResult(TypedDict):
+    """One CA: error is set on failure, CRL fields on success."""
+    ca: str
+    display_name: str
+    status: Literal['ok', 'error']
+    crl_number: int | None
+    crl_path: str | None
+    error: str | None
 
 
-def run(args: argparse.Namespace) -> int:
-    cmd = args.command
-    if cmd == 'ca-create':
-        return _create_ca(args)
-    if cmd == 'config-show':
-        with open(args.confadcs, 'r', encoding='utf-8') as file:
-            settings = yaml.load(file) or {}
-        _output_structure(_redact_configuration(settings), _format(args))
-        return 0
-    if cmd in ('callback-list', 'ca-list', 'ca-show'):
-        # Configuration inspection remains usable even without signing keys.
-        with open(args.confadcs, 'r', encoding='utf-8') as file:
-            settings = yaml.load(file) or {}
-        if cmd == 'callback-list':
-            _output_structure(public_callback_configuration(settings), _format(args))
-        elif cmd == 'ca-show':
-            _output_structure(public_ca_configuration(settings, args.ca_id)[0], _format(args))
-        else:
-            cas = public_ca_configuration(settings)
-            summary = [
-                {'id': ca.get('id', ''),
-                 'display_name': ca.get('display_name', ''),
-                 'parent': ca.get('parent', '')}
-                for ca in cas
-            ]
-            if _format(args) == 'json':
-                _output_structure(summary, 'json')
-            elif summary:
-                _table(['CA ID', 'Display name', 'Parent CA'], [
-                    [item['id'], item['display_name'], item['parent']]
-                    for item in summary
-                ], _format(args), title='CA')
-            else:
-                print('(no CAs configured)')
-        return 0
+class CrlBatchResult(TypedDict):
+    """Results of a CRL re-sign batch; skipped CAs are not counted."""
+    total: int
+    ok: int
+    failed: int
+    results: list[CrlItemResult]
 
-    read_only = cmd in ('certificate-list', 'certificate-show', 'certificate-delete')
-    conf = _load(args, read_only=read_only)
-    if cmd == 'certificate-list':
-        if args.limit < 0:
+
+class CertificateListResult(TypedDict):
+    """Filtered certificate listing, with total before the requested limit."""
+    ca: str
+    total: int
+    shown: int
+    certificates: list[dict[str, Any]]
+
+
+class CsrSubmissionResult(TypedDict):
+    """CSR status: issued/pending/denied; request_id is a decimal string.
+
+    certificate_path is set only when issued; reason only when denied.
+    """
+    status: Literal['issued', 'pending', 'denied']
+    request_id: str
+    ca: str
+    username: str
+    template: str
+    csr_path: str
+    certificate_path: str | None
+    reason: str | None
+
+
+@lru_cache(maxsize=1)
+def _callback_flask_app():
+    from flask import Flask
+    return Flask('adcs_tool_callbacks')
+
+
+@contextmanager
+def _callback_flask_context(values, request_headers=None):
+    """Run unchanged Flask-g callbacks inside an isolated request context."""
+    from flask import current_app, g, has_app_context, has_request_context
+
+    app = current_app._get_current_object() if has_app_context() else _callback_flask_app()
+    scope = (nullcontext() if has_request_context() else
+             app.test_request_context(base_url='https://localhost/',
+                                      headers=dict(request_headers or {})))
+    with scope:
+        missing = object()
+        previous = {key: getattr(g, key, missing) for key in values}
+        for key, value in values.items():
+            setattr(g, key, value)
+        try:
+            yield
+        finally:
+            for key, value in previous.items():
+                if value is missing:
+                    try:
+                        delattr(g, key)
+                    except AttributeError:
+                        pass
+                else:
+                    setattr(g, key, value)
+
+
+class AdcsTool:
+    """Python API: named arguments, native results and Python exceptions.
+
+    No CLI parsing or printing occurs in these methods. The CLI uses this same
+    API from run(), then formats its results in main().
+    """
+
+    def __init__(self, config_path: str = '/etc/adcs/adcs.yaml'):
+        self.config_path = os.fspath(config_path)
+
+    def _settings(self) -> Dict[str, Any]:
+        # Listing configuration never loads private keys.
+        with open(self.config_path, encoding='utf-8') as stream:
+            return yaml.load(stream) or {}
+
+    def _conf(self, *, read_only: bool = False) -> Dict[str, Any]:
+        return load_yaml_conf(self.config_path, bypass_read_only=read_only)
+
+    @staticmethod
+    def _record(conf: Dict[str, Any], ca_id: str, serial: str):
+        ca = _ca(conf, ca_id)
+        cert_dir, _ = _resolve_storage_paths_from_ca(ca)
+        _sync_certificate_cache(cert_dir)
+        record = cached_certificate_by_serial(cert_dir, serial)
+        return ca, cert_dir, record
+
+    @staticmethod
+    def _filters(status: str, revocation: str, limit: int, order_by: str):
+        if status not in ('any', 'expired', 'expiring', 'valid'):
+            raise ValueError(f'Invalid certificate status: {status}')
+        if revocation not in ('any', 'revoked', 'not_revoked'):
+            raise ValueError(f'Invalid revocation status: {revocation}')
+        if not isinstance(limit, int) or limit < 0:
             raise ValueError('limit must be >= 0 (0 means unlimited)')
-        parse_order_by(args.order_by)
-        ca = _ca(conf, args.ca)
+        parse_order_by(order_by)
+
+    def list_cas(self) -> list[dict[str, Any]]:
+        return [
+            {'id': ca.get('id', ''), 'display_name': ca.get('display_name', ''),
+             'parent': ca.get('parent', '')}
+            for ca in public_ca_configuration(self._settings())
+        ]
+
+    def show_ca(self, ca_id: str) -> dict[str, Any]:
+        return public_ca_configuration(self._settings(), ca_id)[0]
+
+    def show_config(self) -> dict[str, Any]:
+        return _redact_configuration(self._settings())
+
+    def list_callbacks(self) -> list[dict[str, Any]]:
+        return public_callback_configuration(self._settings())
+
+    def create_ca(self, cn: str, aia_crl_base_url: str, *, signer_ca_id=None,
+                  csr_path=None, crt_path=None, key_path=None, crl_path=None,
+                  rsa_bits=4096, key_type='rsa', ec_curve='secp256r1',
+                  mldsa_variant='mldsa65', valid_days=3650) -> dict[str, Any]:
+        if aia_crl_base_url.lower().startswith('https://'):
+            raise ValueError('--aia-crl-base-url must not start with https://')
+        if valid_days <= 0:
+            raise ValueError('--valid-days must be positive')
+        if key_type not in ('rsa', 'ec', 'ecc', 'ecdsa', 'mldsa', 'ml-dsa', 'mldsa44',
+                            'mldsa65', 'mldsa87', 'ml-dsa-44', 'ml-dsa-65', 'ml-dsa-87'):
+            raise ValueError(f'Invalid CA key type: {key_type}')
+        basename = cn.lower().replace(' ', '_')
+        crt_path = os.fspath(crt_path) if crt_path is not None else f'/var/lib/adcs/pki/certs/{basename}/{basename}.crt.pem'
+        key_path = os.fspath(key_path) if key_path is not None else f'/var/lib/adcs/pki/private/{basename}/{basename}.key.pem'
+        crl_path = os.fspath(crl_path) if crl_path is not None else f'/var/lib/adcs/pki/crl/{basename}/{basename}.crl'
+        csr_path = os.fspath(csr_path) if csr_path is not None else None
+        editor, document, cas = _config_yaml(self.config_path)
+        if any(basename in (ca.get('id'), ca.get('display_name'))
+               or cn.strip() in (ca.get('id'), ca.get('display_name')) for ca in cas):
+            raise ValueError(f"CA '{basename}' already exists")
+        conf = self._conf() if signer_ca_id else None
+        entry = _cmd_create_ca(
+            ca_id=signer_ca_id, crt_path=crt_path, key_path=key_path,
+            crl_path=crl_path, aia_crl_base_url=aia_crl_base_url,
+            valid_days=valid_days, rsa_key_size=rsa_bits,
+            key_type=key_type, ec_curve=ec_curve, mldsa_variant=mldsa_variant,
+            conf=conf, cn=cn, csr_path=csr_path,
+        )
+        if entry['id'] != basename or entry['display_name'] != cn.strip():
+            raise ValueError('Unexpected CA configuration')
+        cas.append(entry)
+        _save_config(self.config_path, editor, document)
+        return {'id': entry['id'], 'display_name': entry['display_name'],
+                'issuer_ca_id': signer_ca_id, 'certificate_path': crt_path,
+                'key_path': None if csr_path else key_path,
+                'configured_key_path': entry['pem']['key_path_pem'],
+                'csr_path': csr_path, 'crl_path': crl_path,
+                'config_path': self.config_path, 'ca': entry}
+
+    def create_ket(self, ca_id: str, *, cn=None, crt_path=None, key_path=None,
+                   rsa_bits=4096, valid_days=3650) -> dict[str, Any]:
+        editor, document, cas = _config_yaml(self.config_path)
+        matches = [ca for ca in cas if ca_id in (ca.get('id'), ca.get('display_name'))]
+        if len(matches) != 1:
+            raise ValueError(f"CA '{ca_id}' not found or ambiguous in adcs.yaml")
+        paths = _cmd_create_ket_cert(
+            ca_id=ca_id, common_name=cn or f'{ca_id}-Xchg',
+            conf=self._conf(), crt_path=os.fspath(crt_path) if crt_path is not None else None,
+            key_path=os.fspath(key_path) if key_path is not None else None,
+            rsa_bits=rsa_bits, valid_days=valid_days,
+        )
+        if (set(paths) != {'ket_cert_pem', 'ket_key_pem'}
+                or not all(isinstance(v, str) and v for v in paths.values())):
+            raise ValueError('Unexpected KET configuration output')
+        matches[0].update(paths)
+        _save_config(self.config_path, editor, document)
+        return {'ca_id': ca_id, 'config_path': self.config_path, **paths}
+
+    def list_certificates(self, ca_id: str, *, status='any', revocation='any',
+                          search='', order_by='not_before ASC', limit=None) -> CertificateListResult:
+        if limit is None:
+            limit = _default_limit()
+        self._filters(status, revocation, limit, order_by)
+        ca = _ca(self._conf(read_only=True), ca_id)
         cert_dir, _ = _resolve_storage_paths_from_ca(ca)
         records, total = list_certificate_rows(
-            cert_dir, query=args.search,
-            status='' if args.status == 'any' else args.status,
-            revocation='' if args.revocation == 'any' else args.revocation,
-            revoked_serials=_ca_revocations(ca), order_by=args.order_by,
-            limit=args.limit, synchronize=True,
+            cert_dir, query=search,
+            status='' if status == 'any' else status,
+            revocation='' if revocation == 'any' else revocation,
+            revoked_serials=_ca_revocations(ca), order_by=order_by,
+            limit=limit, synchronize=True,
         )
         entries = [{
             'serial': row.serial_nox, 'subject': row.subject,
@@ -490,233 +603,459 @@ def run(args: argparse.Namespace) -> int:
             'filename': row.filename, 'relative_path': row.cache_key,
             'sha256': row.sha256_fingerprint,
         } for row in records]
-        if _format(args) == 'json':
-            _output_structure({'ca': ca['id'], 'total': total,
-                               'shown': len(entries), 'certificates': entries}, 'json')
-        else:
-            if _format(args) == 'accessible':
-                print(f"CA: {ca['id']}\nCertificates: {len(entries)} of {total}")
-            if _format(args) == 'accessible':
-                from datetime import timezone
-                now = datetime.now(timezone.utc)
-                _table(['Serial', 'Subject', 'Expires', 'Expiration status', 'Revocation status', 'File'], [
-                    [e['serial'], e['subject'], e['not_after'],
-                     'expired' if datetime.fromisoformat(e['not_after']).replace(tzinfo=timezone.utc) <= now else 'not expired',
-                     'revoked' if e['revoked'] else 'not revoked', e['filename']]
-                    for e in entries
-                ], 'accessible', title='Certificate')
-            else:
-                _table(['Serial', 'Expires', 'Status', 'Subject', 'File'], [
-                    [e['serial'], e['not_after'], 'revoked' if e['revoked'] else 'not revoked',
-                     e['subject'], e['filename']] for e in entries
-                ], 'table', title='Certificate')
-            if _format(args) == 'table':
-                print(f'Shown: {len(entries)}/{total}', file=sys.stderr)
-        return 0
-    if cmd == 'certificate-show':
-        ca, cert_dir, record = _record(args, conf)
+        return {'ca': ca['id'], 'total': total, 'shown': len(entries), 'certificates': entries}
+
+    def show_certificate(self, ca_id: str, serial: str) -> dict[str, Any]:
+        conf = self._conf(read_only=True)
+        ca, cert_dir, record = self._record(conf, ca_id, serial)
         detail = json.loads(record['details_json']) if record.get('details_json') else {}
         detail['file'] = os.path.join(cert_dir, record['relative_path'])
         detail['revoked'] = int(str(record['serial_hex']), 16) in _ca_revocations(ca)
-        _output_structure(detail, _format(args))
-        return 0
-    if cmd in ('certificate-revoke', 'certificate-unrevoke'):
-        revoke_it = cmd == 'certificate-revoke'
-        if args.yes and args.dry_run:
-            raise ValueError('--dry-run cannot be combined with --yes')
-        if args.serial:
-            if args.yes:
-                raise ValueError('--yes is only used with --filter')
-            ca, _, record = _record(args, conf)
+        return detail
+
+    def _change_revocation(self, ca_id: str, *, revoke_it: bool, serial=None,
+                           status='any', revocation='any', search='',
+                           order_by='not_after ASC', limit=0, apply=False,
+                           dry_run=False, next_update_hours=None) -> dict[str, Any]:
+        action = 'revoke' if revoke_it else 'unrevoke'
+        if apply and dry_run:
+            raise ValueError('apply=True and dry_run=True cannot be combined')
+        if serial is None:
+            self._filters(status, revocation, limit, order_by)
+            if status == 'any' and revocation == 'any' and not search:
+                raise ValueError('--filter requires --status, --revocation or --search')
+        conf = self._conf()
+        if serial is not None:
+            if apply:
+                raise ValueError('apply is only for bulk operations')
+            ca, _, record = self._record(conf, ca_id, serial)
             serial = str(record['serial_hex'])
-            if args.dry_run:
+            if dry_run:
                 currently_revoked = int(serial, 16) in _ca_revocations(ca)
-                _table(['Action', 'CA', 'Serial', 'Current state', 'Planned state'], [[
-                    'revoke' if revoke_it else 'unrevoke', ca['id'], serial,
-                    'revoked' if currently_revoked else 'not revoked',
-                    'revoked' if revoke_it else 'not revoked',
-                ]], _format(args), title='Certificate')
-                print('DRY RUN: no certificate or CRL modified.', file=sys.stderr if _format(args) == 'json' else sys.stdout)
-                return 0
+                return {'action': action, 'ca': ca['id'], 'serial': serial,
+                        'dry_run': True, 'current_revoked': currently_revoked,
+                        'planned_revoked': revoke_it}
             change_revocation(
                 ca, serial, revoke_it=revoke_it,
-                next_update_hours=(args.next_update_hours or int(conf['next_update_hours_crl'])),
+                next_update_hours=(next_update_hours or int(conf['next_update_hours_crl'])),
             )
-            print(f"{'Revoked' if revoke_it else 'Unrevoked'} certificate {serial} on CA {ca['id']} (CRL verified).")
-            return 0
-        if args.status == 'any' and args.revocation == 'any' and not args.search:
-            raise ValueError('--filter requires --status, --revocation or --search')
-        if args.limit < 0:
-            raise ValueError('--limit must be >= 0')
-        parse_order_by(args.order_by)
-        ca = _ca(conf, args.ca)
+            return {'action': action, 'ca': ca['id'], 'serial': serial,
+                    'dry_run': False, 'revoked': revoke_it}
+        ca = _ca(conf, ca_id)
         cert_dir, _ = _resolve_storage_paths_from_ca(ca)
-        revocations = _ca_revocations(ca)
         rows, total = list_certificate_rows(
-            cert_dir, query=args.search,
-            status='' if args.status == 'any' else args.status,
-            revocation='' if args.revocation == 'any' else args.revocation,
-            revoked_serials=revocations, order_by=args.order_by,
-            limit=args.limit, synchronize=True,
-            eligible_for='revoke' if revoke_it else 'unrevoke',
+            cert_dir, query=search,
+            status='' if status == 'any' else status,
+            revocation='' if revocation == 'any' else revocation,
+            revoked_serials=_ca_revocations(ca), order_by=order_by,
+            limit=limit, synchronize=True,
+            eligible_for=action,
         )
-        candidates = rows
-        _table(['Serial', 'Expires', 'Current state', 'Planned state', 'Subject'], [
-            [row.serial_nox, row.not_after.isoformat(),
-             'revoked' if row.revoked else 'not revoked',
-             'revoked' if revoke_it else 'not revoked', row.subject]
-            for row in candidates
-        ], _format(args), title='Certificate')
-        if not args.yes:
-            print(f'DRY RUN: {len(candidates)} certificate(s) selected from {total} matching row(s). '
-                  'Add --yes to execute.', file=sys.stderr if _format(args) == 'json' else sys.stdout)
-            return 0
-        successes = failures = 0
-        for row in candidates:
+        candidates = [
+            {'serial': row.serial_nox, 'not_after': row.not_after.isoformat(),
+             'revoked': row.revoked, 'subject': row.subject}
+            for row in rows
+        ]
+        result = {'action': action, 'ca': ca['id'], 'dry_run': not apply,
+                  'total': total, 'selected': len(candidates), 'candidates': candidates,
+                  'successes': 0, 'failures': 0, 'errors': []}
+        if not apply:
+            return result
+        for row in rows:
             try:
                 change_revocation(
                     ca, row.serial_nox, revoke_it=revoke_it,
-                    next_update_hours=(args.next_update_hours or int(conf['next_update_hours_crl'])),
+                    next_update_hours=(next_update_hours or int(conf['next_update_hours_crl'])),
                 )
-                successes += 1
+                result['successes'] += 1
             except (OSError, ValueError, PermissionError) as exc:
-                failures += 1
-                print(f'ERROR: {row.serial_nox}: {exc}', file=sys.stderr)
-        print(f"{'Revoked' if revoke_it else 'Unrevoked'}: {successes}; failed: {failures}; selected: {len(candidates)}")
-        return 2 if failures else 0
-    if cmd == 'certificate-delete':
-        ca = _ca(conf, args.ca)
+                result['failures'] += 1
+                result['errors'].append({'serial': row.serial_nox, 'error': str(exc)})
+        return result
+
+    def revoke_certificate(self, ca_id: str, serial: str, *, dry_run=False,
+                           next_update_hours=None) -> dict[str, Any]:
+        return self._change_revocation(ca_id, revoke_it=True, serial=serial,
+                                       dry_run=dry_run, next_update_hours=next_update_hours)
+
+    def unrevoke_certificate(self, ca_id: str, serial: str, *, dry_run=False,
+                             next_update_hours=None) -> dict[str, Any]:
+        return self._change_revocation(ca_id, revoke_it=False, serial=serial,
+                                       dry_run=dry_run, next_update_hours=next_update_hours)
+
+    def revoke_certificates(self, ca_id: str, *, status='any', revocation='any',
+                            search='', order_by='not_after ASC', limit=0,
+                            apply=False, dry_run=False, next_update_hours=None) -> BatchResult:
+        return self._change_revocation(ca_id, revoke_it=True, status=status,
+                                       revocation=revocation, search=search,
+                                       order_by=order_by, limit=limit, apply=apply,
+                                       dry_run=dry_run, next_update_hours=next_update_hours)
+
+    def unrevoke_certificates(self, ca_id: str, *, status='any', revocation='any',
+                              search='', order_by='not_after ASC', limit=0,
+                              apply=False, dry_run=False, next_update_hours=None) -> BatchResult:
+        return self._change_revocation(ca_id, revoke_it=False, status=status,
+                                       revocation=revocation, search=search,
+                                       order_by=order_by, limit=limit, apply=apply,
+                                       dry_run=dry_run, next_update_hours=next_update_hours)
+
+    def _delete(self, ca_id: str, *, serial=None, eligible=False, status='any',
+                revocation='any', search='', order_by='not_after ASC', limit=0,
+                apply=False, dry_run=False) -> dict[str, Any]:
+        if dry_run and apply:
+            raise ValueError('apply=True and dry_run=True cannot be combined')
+        if serial is None:
+            self._filters(status, revocation, limit, order_by)
+            if eligible and (status != 'any' or revocation != 'any'):
+                raise ValueError('--eligible cannot be combined with --status or --revocation; use --filter')
+            if not eligible and status == 'any' and revocation == 'any' and not search:
+                raise ValueError('--filter requires --status, --revocation or --search')
+        conf = self._conf(read_only=True)
+        ca = _ca(conf, ca_id)
         cert_dir, _ = _resolve_storage_paths_from_ca(ca)
         revocations = _ca_revocations(ca)
-        if args.dry_run and args.yes:
-            raise ValueError('--dry-run cannot be combined with --yes')
-        if args.serial:
-            _, _, record = _record(args, conf)
-            serial = int(str(record['serial_hex']), 16)
+        if serial is not None:
+            _, _, record = self._record(conf, ca_id, serial)
+            serial_int = int(str(record['serial_hex']), 16)
             path = os.path.join(cert_dir, record['relative_path'])
             expires_at = datetime.fromisoformat(record['not_after'])
-            if args.dry_run:
+            if dry_run:
                 from adcs_actions import validate_certificate_deletion
                 validate_certificate_deletion(
-                    ca, cert_path=path, revoked=serial in revocations, expires_at=expires_at,
+                    ca, cert_path=path, revoked=serial_int in revocations,
+                    expires_at=expires_at,
                 )
                 from datetime import timezone
                 expiry = expires_at.replace(tzinfo=timezone.utc) if expires_at.tzinfo is None else expires_at
-                revoked = serial in revocations
-                _table(['CA', 'Serial', 'Expires', 'Revoked', 'Certificate'], [[
-                    ca['id'], record['serial_hex'], expiry.isoformat(),
-                    'yes' if revoked else 'no', path,
-                ]], _format(args), title='Certificate')
-                print('DRY RUN: certificate and associated key would be moved to .trash; no files modified.', file=sys.stderr if _format(args) == 'json' else sys.stdout)
-                return 0
+                return {'action': 'delete', 'ca': ca['id'], 'dry_run': True,
+                        'serial': record['serial_hex'], 'not_after': expiry.isoformat(),
+                        'revoked': serial_int in revocations, 'certificate_path': path}
             cert_n, key_n = delete_certificate(
-                ca, cert_path=path, revoked=serial in revocations, expires_at=expires_at,
+                ca, cert_path=path, revoked=serial_int in revocations,
+                expires_at=expires_at,
             )
             _sync_certificate_cache(cert_dir)
-            print(f"Deleted (moved to .trash): certificate={cert_n}, key={key_n}; serial={record['serial_hex']}")
-            return 0
-        if args.eligible and (args.status != 'any' or args.revocation != 'any'):
-            raise ValueError('--eligible cannot be combined with --status or --revocation; use --filter')
-        if args.filter and args.status == 'any' and args.revocation == 'any' and not args.search:
-            raise ValueError('--filter requires --status, --revocation or --search')
-        if args.limit < 0:
-            raise ValueError('--limit must be >= 0')
-        parse_order_by(args.order_by)
+            return {'action': 'delete', 'ca': ca['id'], 'dry_run': False,
+                    'serial': record['serial_hex'], 'deleted_certificate': cert_n,
+                    'deleted_key': key_n}
         rows, total = list_certificate_rows(
-            cert_dir, query=args.search,
-            status='' if args.eligible or args.status == 'any' else args.status,
-            revocation='' if args.eligible or args.revocation == 'any' else args.revocation,
-            revoked_serials=revocations, order_by=args.order_by,
-            limit=args.limit, synchronize=True, eligible_for='delete',
+            cert_dir, query=search,
+            status='' if eligible or status == 'any' else status,
+            revocation='' if eligible or revocation == 'any' else revocation,
+            revoked_serials=revocations, order_by=order_by,
+            limit=limit, synchronize=True, eligible_for='delete',
         )
-        candidates = [(row, row.not_after) for row in rows]
-        _table(['Serial', 'Expires', 'Revoked', 'Subject', 'File'], [
-            [r.serial_nox, e.isoformat(), 'yes' if r.revoked else 'no', r.subject, r.filename]
-            for r, e in candidates
-        ], _format(args), title='Certificate')
-        if not args.yes:
-            print(f'DRY RUN: {len(candidates)} of {total} eligible certificate(s). Add --yes to move to .trash.', file=sys.stderr if _format(args) == 'json' else sys.stdout)
-            return 0
-        successes = 0
-        failures = 0
-        for row, expiry in candidates:
+        candidates = [
+            {'serial': r.serial_nox, 'not_after': r.not_after.isoformat(),
+             'revoked': r.revoked, 'subject': r.subject, 'filename': r.filename}
+            for r in rows
+        ]
+        result = {'action': 'delete', 'ca': ca['id'], 'dry_run': not apply,
+                  'total': total, 'selected': len(candidates), 'candidates': candidates,
+                  'successes': 0, 'failures': 0, 'errors': []}
+        if not apply:
+            return result
+        for row in rows:
             try:
-                # The shared action enforces the eligibility and path safety rules.
-                delete_certificate(ca, cert_path=os.path.join(cert_dir, row.cache_key),
-                                   revoked=row.revoked, expires_at=expiry)
-                successes += 1
+                delete_certificate(
+                    ca, cert_path=os.path.join(cert_dir, row.cache_key),
+                    revoked=row.revoked, expires_at=row.not_after,
+                )
+                result['successes'] += 1
             except (OSError, ValueError, PermissionError) as exc:
-                failures += 1
-                print(f'ERROR: {row.serial_nox}: {exc}', file=sys.stderr)
+                result['failures'] += 1
+                result['errors'].append({'serial': row.serial_nox, 'error': str(exc)})
         _sync_certificate_cache(cert_dir)
-        print(f'Deleted: {successes}; failed: {failures}; selected: {len(candidates)}')
-        return 2 if failures else 0
-    if cmd == 'crl-resign':
-        ca = _ca(conf, args.ca)
-        number, serials = resign_ca_crl(
-            ca, next_update_hours=args.next_update_hours or int(conf['next_update_hours_crl']),
-            bump_number=not args.no_bump_number,
-        )
-        print(f"CRL re-signed for CA {ca['id']} (CRLNumber {number}, {len(serials)} revoked serials).")
-        return 0
-    if cmd == 'crl-resign-all':
-        ok, fail, messages = _cmd_resign_all_crls(
-            conf=conf, next_update_hours=args.next_update_hours or int(conf['next_update_hours_crl']),
-            bump_number=not args.no_bump_number,
-        )
-        for line in messages:
-            print(line)
-        if not fail:
-            print(f'All CRLs re-signed successfully ({ok}/{ok + fail}).')
-            return 0
-        print(f'Partial result: ok={ok}, failed={fail}', file=sys.stderr)
-        return 2 if ok else 1
-    if cmd == 'certificate-issue':
-        return _cmd_issue_cert_cli(
-            ca_id=args.ca, common_name=args.cn, sans=args.san,
-            rsa_bits=args.rsa_bits, valid_days=args.valid_days,
-            conf=conf, crt_path=args.crt_path, key_path=args.key_path,
-        )
-    if cmd == 'ket-create':
-        editor, document, cas = _config_yaml(args.confadcs)
-        matches = [ca for ca in cas if args.ca in (ca.get('id'), ca.get('display_name'))]
-        if len(matches) != 1:
-            raise ValueError(f"CA '{args.ca}' not found or ambiguous in adcs.yaml")
-        result, output = _capture_yaml(_cmd_create_ket_cert,
-            ca_id=args.ca, common_name=args.cn or f'{args.ca}-Xchg',
-            conf=conf, crt_path=args.crt_path, key_path=args.key_path,
-            rsa_bits=args.rsa_bits, valid_days=args.valid_days,
-        )
-        if result == 0:
-            paths = editor.load('ket:\n' + output)['ket']
-            if (set(paths) != {'ket_cert_pem', 'ket_key_pem'}
-                    or not all(isinstance(v, str) and v for v in paths.values())):
-                raise ValueError('Unexpected KET configuration output')
-            matches[0].update(paths)
-            _save_config(args.confadcs, editor, document)
-            print(f"KET certificate for CA '{args.ca}' created successfully (updated {args.confadcs}).")
         return result
-    if cmd == 'csr-submit':
-        from flask import Flask, g
 
-        cli_app = Flask(__name__)
-        cli_app.confadcs = conf
-        with cli_app.app_context():
-            g.username = args.username.strip()
-            g.auth_method = "cli"
-            return _cmd_submit_csr_cli(
-                ca_id=args.ca, username=args.username, conf=conf,
-                csr_path=args.csr_path, template_oid=args.template_oid,
-                template_name=args.template_name,
-            )
-    if cmd == 'certificate-rotate':
-        return _cmd_rotate_if_expiring(
-            ca_id=args.ca, crt_path=args.crt_path, key_path=args.key_path,
-            threshold_days=args.threshold_days, conf=conf,
-            write_fullchain_to_crt=not args.no_write_fullchain_to_crt,
-            valid_days=args.valid_days,
+    def delete_certificate(self, ca_id: str, serial: str, *, dry_run=False) -> dict[str, Any]:
+        return self._delete(ca_id, serial=serial, dry_run=dry_run)
+
+    def delete_certificates(self, ca_id: str, *, eligible=False, status='any',
+                            revocation='any', search='', order_by='not_after ASC',
+                            limit=0, apply=False, dry_run=False) -> BatchResult:
+        return self._delete(ca_id, eligible=eligible, status=status, revocation=revocation,
+                            search=search, order_by=order_by, limit=limit,
+                            apply=apply, dry_run=dry_run)
+
+    def resign_crl(self, ca_id: str, *, bump_number=True, next_update_hours=None) -> dict[str, Any]:
+        conf = self._conf()
+        ca = _ca(conf, ca_id)
+        number, serials = resign_ca_crl(
+            ca, next_update_hours=next_update_hours or int(conf['next_update_hours_crl']),
+            bump_number=bump_number,
         )
+        return {'ca': ca['id'], 'crl_number': number, 'revoked_count': len(serials)}
+
+    def resign_all_crls(self, *, bump_number=True, next_update_hours=None) -> CrlBatchResult:
+        conf = self._conf()
+        return _cmd_resign_all_crls(
+            conf=conf, next_update_hours=next_update_hours or int(conf['next_update_hours_crl']),
+            bump_number=bump_number,
+        )
+
+    def issue_certificate(self, ca_id: str, cn: str, *, sans=None, crt_path=None,
+                          key_path=None, rsa_bits=3072, valid_days=365) -> dict[str, Any]:
+        if isinstance(sans, str):
+            sans = [sans]
+        return _cmd_issue_cert_cli(
+            ca_id=ca_id, common_name=cn, sans=sans,
+            rsa_bits=rsa_bits, valid_days=valid_days,
+            conf=self._conf(),
+            crt_path=os.fspath(crt_path) if crt_path is not None else None,
+            key_path=os.fspath(key_path) if key_path is not None else None,
+        )
+
+    def submit_csr(self, ca_id: str, username: str, csr_data: bytes, *,
+                   template_oid: str | None = None, template_name: str | None = None,
+                   auth_method: str = 'cli',
+                   auth_context: Mapping[str, Any] | None = None,
+                   request_headers: Mapping[str, str] | None = None) -> CsrSubmissionResult:
+        """Submit PEM/DER CSR bytes for an already authenticated identity.
+
+        The caller must authenticate ``username`` and trust ``auth_context``
+        and ``request_headers``. This method never reads stdin. Callbacks
+        keep using flask.g; a request context is created when needed.
+        """
+        if template_oid and template_name:
+            raise ValueError('template_oid and template_name are mutually exclusive')
+        if not username or not username.strip():
+            raise ValueError('username must not be empty')
+        context = dict(auth_context or {})
+        context.update(username=username.strip(), auth_method=auth_method)
+        with _callback_flask_context(context, request_headers):
+            return submit_csr_request(
+                ca_id=ca_id, username=username.strip(), csr_data=csr_data,
+                conf=self._conf(), template_oid=template_oid,
+                template_name=template_name, auth_method=auth_method,
+                request_headers=dict(request_headers or {}),
+            )
+
+    def rotate_certificate(self, ca_id: str, crt_path, key_path, *,
+                           threshold_days=30, valid_days=365,
+                           write_fullchain_to_crt=True) -> dict[str, Any]:
+        return _cmd_rotate_if_expiring(
+            ca_id=ca_id, crt_path=os.fspath(crt_path), key_path=os.fspath(key_path),
+            threshold_days=threshold_days, conf=self._conf(),
+            write_fullchain_to_crt=write_fullchain_to_crt, valid_days=valid_days,
+        )
+
+
+def run(args: argparse.Namespace) -> Any:
+    """CLI adapter: call the Python API and return native Python data."""
+    adcs = AdcsTool(args.confadcs)
+    cmd = args.command
+    if cmd == 'ca-list':
+        return adcs.list_cas()
+    if cmd == 'ca-show':
+        return adcs.show_ca(args.ca_id)
+    if cmd == 'ca-create':
+        return adcs.create_ca(
+            cn=args.cn, aia_crl_base_url=args.aia_crl_base_url,
+            signer_ca_id=args.ca, csr_path=args.csr_path,
+            crt_path=args.crt_path, key_path=args.key_path, crl_path=args.crl_path,
+            rsa_bits=args.rsa_bits, key_type=args.key_type, ec_curve=args.ec_curve,
+            mldsa_variant=args.mldsa_variant, valid_days=args.valid_days)
+    if cmd == 'ket-create':
+        return adcs.create_ket(args.ca, cn=args.cn, crt_path=args.crt_path,
+                               key_path=args.key_path, rsa_bits=args.rsa_bits,
+                               valid_days=args.valid_days)
+    if cmd == 'callback-list':
+        return adcs.list_callbacks()
+    if cmd == 'config-show':
+        return adcs.show_config()
+    if cmd == 'certificate-list':
+        return adcs.list_certificates(args.ca, status=args.status, revocation=args.revocation,
+                                      search=args.search, order_by=args.order_by, limit=args.limit)
+    if cmd == 'certificate-show':
+        return adcs.show_certificate(args.ca, args.serial)
+    if cmd == 'certificate-issue':
+        return adcs.issue_certificate(args.ca, args.cn, sans=args.san,
+                                      crt_path=args.crt_path, key_path=args.key_path,
+                                      rsa_bits=args.rsa_bits, valid_days=args.valid_days)
+    if cmd in ('certificate-revoke', 'certificate-unrevoke'):
+        method = adcs.revoke_certificate if cmd == 'certificate-revoke' else adcs.unrevoke_certificate
+        batch_method = adcs.revoke_certificates if cmd == 'certificate-revoke' else adcs.unrevoke_certificates
+        if args.serial:
+            return method(args.ca, args.serial, dry_run=args.dry_run,
+                          next_update_hours=args.next_update_hours)
+        return batch_method(args.ca, status=args.status, revocation=args.revocation,
+                            search=args.search, order_by=args.order_by, limit=args.limit,
+                            apply=args.yes, dry_run=args.dry_run,
+                            next_update_hours=args.next_update_hours)
+    if cmd == 'certificate-delete':
+        if args.serial:
+            return adcs.delete_certificate(args.ca, args.serial, dry_run=args.dry_run)
+        return adcs.delete_certificates(args.ca, eligible=args.eligible,
+                                        status=args.status, revocation=args.revocation,
+                                        search=args.search, order_by=args.order_by,
+                                        limit=args.limit, apply=args.yes, dry_run=args.dry_run)
+    if cmd == 'crl-resign':
+        return adcs.resign_crl(args.ca, bump_number=not args.no_bump_number,
+                               next_update_hours=args.next_update_hours)
+    if cmd == 'crl-resign-all':
+        return adcs.resign_all_crls(bump_number=not args.no_bump_number,
+                                    next_update_hours=args.next_update_hours)
+    if cmd == 'csr-submit':
+        if args.csr_path:
+            with open(args.csr_path, 'rb') as stream:
+                csr_data = stream.read()
+        else:
+            if sys.stdin.isatty():
+                raise ValueError('provide --csr-path or pipe the CSR on stdin')
+            csr_data = sys.stdin.buffer.read()
+        return adcs.submit_csr(args.ca, args.username, csr_data,
+                               template_oid=args.template_oid, template_name=args.template_name)
+    if cmd == 'certificate-rotate':
+        return adcs.rotate_certificate(args.ca, args.crt_path, args.key_path,
+                                       threshold_days=args.threshold_days,
+                                       valid_days=args.valid_days,
+                                       write_fullchain_to_crt=not args.no_write_fullchain_to_crt)
     raise ValueError(f'Unknown command: {cmd}')
+
+
+def _display_result(args: argparse.Namespace, result: Any) -> None:
+    """CLI-only formatting; AdcsTool methods never print."""
+    cmd = args.command
+    output_format = _format(args)
+    if (output_format == 'json' and cmd in ('certificate-revoke', 'certificate-unrevoke',
+                                          'certificate-delete') and 'serial' not in result
+            and not result['dry_run']):
+        result = {**result, 'exit_code': _cli_exit_code(args, result)}
+    if cmd == 'ca-create':
+        print(f"CA '{result['display_name']}' created successfully (updated {result['config_path']}).")
+    elif cmd == 'ket-create':
+        print(f"KET certificate for CA '{result['ca_id']}' created successfully (updated {result['config_path']}).")
+    elif cmd == 'ca-list':
+        if output_format == 'json':
+            _output_structure(result, 'json')
+        elif result:
+            _table(['CA ID', 'Display name', 'Parent CA'], [
+                [item['id'], item['display_name'], item['parent']] for item in result
+            ], output_format, title='CA')
+        else:
+            print('(no CAs configured)')
+    elif cmd in ('config-show', 'callback-list', 'ca-show', 'certificate-show'):
+        _output_structure(result, output_format)
+    elif cmd == 'certificate-list':
+        entries = result['certificates']
+        total = result['total']
+        if output_format == 'json':
+            _output_structure(result, 'json')
+            return
+        if output_format == 'accessible':
+            print(f"CA: {result['ca']}\nCertificates: {len(entries)} of {total}")
+            from datetime import timezone
+            now = datetime.now(timezone.utc)
+            _table(['Serial', 'Subject', 'Expires', 'Expiration status', 'Revocation status', 'File'], [
+                [e['serial'], e['subject'], e['not_after'],
+                 'expired' if datetime.fromisoformat(e['not_after']).replace(tzinfo=timezone.utc) <= now else 'not expired',
+                 'revoked' if e['revoked'] else 'not revoked', e['filename']]
+                for e in entries
+            ], 'accessible', title='Certificate')
+        else:
+            _table(['Serial', 'Expires', 'Status', 'Subject', 'File'], [
+                [e['serial'], e['not_after'], 'revoked' if e['revoked'] else 'not revoked',
+                 e['subject'], e['filename']] for e in entries
+            ], 'table', title='Certificate')
+            print(f'Shown: {len(entries)}/{total}', file=sys.stderr)
+    elif cmd in ('certificate-revoke', 'certificate-unrevoke'):
+        if output_format == 'json':
+            _output_structure(result, 'json')
+            return
+        verb = 'Revoked' if result['action'] == 'revoke' else 'Unrevoked'
+        if 'serial' in result:
+            if result['dry_run']:
+                _table(['Action', 'CA', 'Serial', 'Current state', 'Planned state'], [[
+                    result['action'], result['ca'], result['serial'],
+                    'revoked' if result['current_revoked'] else 'not revoked',
+                    'revoked' if result['planned_revoked'] else 'not revoked',
+                ]], output_format, title='Certificate')
+                print('DRY RUN: no certificate or CRL modified.')
+            else:
+                print(f"{verb} certificate {result['serial']} on CA {result['ca']} (CRL verified).")
+            return
+        _table(['Serial', 'Expires', 'Current state', 'Planned state', 'Subject'], [
+            [c['serial'], c['not_after'], 'revoked' if c['revoked'] else 'not revoked',
+             'revoked' if result['action'] == 'revoke' else 'not revoked', c['subject']]
+            for c in result['candidates']
+        ], output_format, title='Certificate')
+        if result['dry_run']:
+            print(f"DRY RUN: {result['selected']} certificate(s) selected from {result['total']} matching row(s). Add --yes to execute.")
+        else:
+            for err in result['errors']:
+                print(f"ERROR: {err['serial']}: {err['error']}", file=sys.stderr)
+            print(f"{verb}: {result['successes']}; failed: {result['failures']}; selected: {result['selected']}")
+    elif cmd == 'certificate-delete':
+        if output_format == 'json':
+            _output_structure(result, 'json')
+            return
+        if 'serial' in result:
+            if result['dry_run']:
+                _table(['CA', 'Serial', 'Expires', 'Revoked', 'Certificate'], [[
+                    result['ca'], result['serial'], result['not_after'],
+                    'yes' if result['revoked'] else 'no', result['certificate_path']
+                ]], output_format, title='Certificate')
+                print('DRY RUN: certificate and associated key would be moved to .trash; no files modified.')
+            else:
+                print(f"Deleted (moved to .trash): certificate={result['deleted_certificate']}, key={result['deleted_key']}; serial={result['serial']}")
+            return
+        _table(['Serial', 'Expires', 'Revoked', 'Subject', 'File'], [
+            [c['serial'], c['not_after'], 'yes' if c['revoked'] else 'no',
+             c['subject'], c['filename']] for c in result['candidates']
+        ], output_format, title='Certificate')
+        if result['dry_run']:
+            print(f"DRY RUN: {result['selected']} of {result['total']} eligible certificate(s). Add --yes to move to .trash.")
+        else:
+            for err in result['errors']:
+                print(f"ERROR: {err['serial']}: {err['error']}", file=sys.stderr)
+            print(f"Deleted: {result['successes']}; failed: {result['failures']}; selected: {result['selected']}")
+    elif cmd == 'crl-resign':
+        print(f"CRL re-signed for CA {result['ca']} (CRLNumber {result['crl_number']}, {result['revoked_count']} revoked serials).")
+    elif cmd == 'crl-resign-all':
+        for item in result['results']:
+            if item['status'] == 'ok':
+                print(f"CRL re-signed for '{item['ca']}' -> CRLNumber {item['crl_number']} (path: {item['crl_path']})")
+                print(f"OK   {item['display_name']}")
+            else:
+                print(f"FAIL {item['display_name']}: {item['error']}")
+        if not result['failed']:
+            print(f"All CRLs re-signed successfully ({result['ok']}/{result['ok'] + result['failed']}).")
+        else:
+            print(f"Partial result: ok={result['ok']}, failed={result['failed']}", file=sys.stderr)
+    elif cmd == 'certificate-issue':
+        print('Certificate issued successfully')
+        print(f"CA:          {result['ca']}")
+        print(f"CN:          {result['common_name']}")
+        print(f"STORED CERT: {result['certificate_path']}")
+        if result['copied_certificate_path']:
+            print(f"COPIED CERT: {result['copied_certificate_path']}")
+        print(f"KEY:         {result['key_path']}")
+        print(f"RSA:         {result['rsa_bits']} bits")
+        if result['sans']:
+            print(f"SAN:  {', '.join(result['sans'])}")
+    elif cmd == 'csr-submit':
+        status = result['status']
+        stream = sys.stderr if status == 'denied' else sys.stdout
+        if status == 'denied':
+            print('Certificate request denied', file=stream)
+            print(f"REQUEST ID:  {result['request_id']}", file=stream)
+            print(f"REASON:      {result['reason']}", file=stream)
+        else:
+            print('Certificate issued successfully' if status == 'issued' else 'Certificate request is pending', file=stream)
+            print(f"REQUEST ID:  {result['request_id']}", file=stream)
+            print(f"CA:          {result['ca']}", file=stream)
+            print(f"USERNAME:    {result['username']}", file=stream)
+            print(f"TEMPLATE:    {result['template']}", file=stream)
+            if status == 'issued':
+                print(f"CERT PATH:   {result['certificate_path']}", file=stream)
+            print(f"CSR PATH:    {result['csr_path']}", file=stream)
+    elif cmd == 'certificate-rotate':
+        if result['rotated']:
+            print(f"ROTATED: cert replaced at '{result['certificate_path']}', key replaced at '{result['key_path']}' "
+                  f"(days left was {result['days_left']} <= threshold {result['threshold_days']})")
+        else:
+            print(f"OK: {result['days_left']} days left (> {result['threshold_days']}); no rotation needed.")
 
 
 def _complete_words(words: list[str]) -> list[str]:
@@ -790,6 +1129,18 @@ def _complete_words(words: list[str]) -> list[str]:
     return sorted(set(choice for choice in choices if choice.startswith(current)))
 
 
+def _cli_exit_code(args: argparse.Namespace, result: Any) -> int:
+    """Translate Python outcomes into process exit statuses only in the CLI."""
+    if args.command == 'csr-submit' and result['status'] == 'denied':
+        return 1
+    if args.command == 'crl-resign-all' and result['failed']:
+        return 2 if result['ok'] else 1
+    if args.command in ('certificate-revoke', 'certificate-unrevoke',
+                        'certificate-delete') and result.get('failures'):
+        return 2
+    return 0
+
+
 def main(argv=None) -> int:
     if argv is None:
         argv = sys.argv[1:]
@@ -817,9 +1168,12 @@ def main(argv=None) -> int:
         (group or parser).print_help()
         return 0
     try:
-        return run(args)
-    except Exception:
-        raise
+        result = run(args)
+        _display_result(args, result)
+        return _cli_exit_code(args, result)
+    except (OSError, ValueError, LookupError, PermissionError) as exc:
+        print(f'ERROR: {exc}', file=sys.stderr)
+        return 1
 
 
 if __name__ == '__main__':

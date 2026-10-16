@@ -9,7 +9,6 @@ import base64
 import os
 import shutil
 import stat
-import sys
 import textwrap
 import uuid
 from datetime import datetime, timezone
@@ -65,50 +64,44 @@ def _decode_pem_or_der_request(raw: bytes) -> bytes:
     return data
 
 
-class _CliRequest:
+class _EnrollmentRequest:
     def __init__(self, headers: Optional[Dict[str, str]] = None):
         self.headers = headers or {}
         self.host_url = "https://localhost/"
 
 
-def _cmd_submit_csr_cli(
+def submit_csr_request(
     *,
     ca_id: str,
     username: str,
     conf: Dict[str, Any],
-    csr_path: Optional[str] = None,
+    csr_data: bytes,
     template_oid: Optional[str] = None,
     template_name: Optional[str] = None,
-) -> int:
+    auth_method: str = "cli",
+    request_headers: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """Issue a request from bytes and return status/data, never CLI output."""
     try:
         ca = _cli_find_ca_by_id(conf, ca_id)
         if not ca:
-            print(f"ERROR: CA not found: {ca_id}", file=sys.stderr)
-            return 1
+            raise LookupError(f"CA not found: {ca_id}")
 
         if not username or not username.strip():
-            print("ERROR: --username is required with --submit-csr", file=sys.stderr)
-            return 1
+            raise ValueError("username is required")
 
-        if csr_path:
-            with open(csr_path, 'rb') as f:
-                request_blob = f.read()
-        else:
-            if sys.stdin.isatty():
-                print("ERROR: provide --csr-path or pipe the CSR on stdin", file=sys.stderr)
-                return 1
-            request_blob = sys.stdin.buffer.read()
-
-        request_blob = _decode_pem_or_der_request(request_blob)
+        if not isinstance(csr_data, bytes):
+            raise TypeError('csr_data must be bytes (PEM or DER)')
+        request_blob = _decode_pem_or_der_request(csr_data)
         from utils import exct_csr_from_cmc  # only CSR enrollment needs Samba
         csr_der, body_part_id, info = exct_csr_from_cmc(request_blob)
 
-        fake_request = _CliRequest(headers={})
+        fake_request = _EnrollmentRequest(headers=request_headers)
         templates_for_user, _ = build_templates_for_policy_response(
             conf,
             username=username.strip(),
             request=fake_request,
-            auth_method="cli",
+            auth_method=auth_method,
         )
 
         tmap = {(t.get("template_oid") or {}).get("value"): t for t in templates_for_user}
@@ -117,8 +110,7 @@ def _cmd_submit_csr_cli(
         selected_template_oid = (template_oid or "").strip()
         selected_template_name = (template_name or "").strip()
         if selected_template_oid and selected_template_name:
-            print("ERROR: use either --template-oid or --template-name, not both", file=sys.stderr)
-            return 1
+            raise ValueError("use either --template-oid or --template-name, not both")
 
         if selected_template_oid:
             tpl = tmap.get(selected_template_oid)
@@ -136,27 +128,22 @@ def _cmd_submit_csr_cli(
             tpl = tmap_name.get(info.get('name'))
 
         if not tpl:
-            print("ERROR: The requested template is not valid", file=sys.stderr)
-            return 1
+            raise ValueError("The requested template is not valid")
 
         if ca.get('__refid') not in set(tpl.get('__ca_refids') or []):
-            print(
-                f"ERROR: {ca['id']} not in ca_references for template "
-                f"{(tpl.get('template_oid') or {}).get('value')}",
-                file=sys.stderr
+            raise PermissionError(
+                f"{ca['id']} not in ca_references for template "
+                f"{(tpl.get('template_oid') or {}).get('value')}"
             )
-            return 1
 
         if not ((tpl.get('permissions') or {}).get('enroll')):
-            print("ERROR: You do not have permission to enroll on this template", file=sys.stderr)
-            return 1
+            raise PermissionError("You do not have permission to enroll on this template")
 
         cb = (tpl.get("__callback") if tpl else (conf.get("__default_callback"))) or {}
         cb_path = cb.get("path")
         cb_issue = cb.get("issue")
         if not cb_path or not cb_issue:
-            print("ERROR: no issue callback configured for this template", file=sys.stderr)
-            return 1
+            raise ValueError("no issue callback configured for this template")
 
         emit_certificate = load_func(cb_path, cb_issue)
 
@@ -173,7 +160,7 @@ def _cmd_submit_csr_cli(
             app_conf=conf,
             CAID=ca['id'],
             request=fake_request,
-            auth_method="cli",
+            auth_method=auth_method,
             body_part_id=body_part_id,
             p7_der=request_blob,
         )
@@ -191,28 +178,25 @@ def _cmd_submit_csr_cli(
                 f.write(pem_csr)
 
         status = str(result.get("status", "")).lower()
+        response = {
+            'status': status, 'request_id': str(request_id),
+            'ca': ca.get('display_name') or ca.get('id'),
+            'username': username.strip(), 'template': tpl.get('common_name'),
+            'csr_path': csr_path_out, 'certificate_path': None, 'reason': None,
+        }
 
         if status == "pending":
             os.makedirs(conf['path_list_request_id'], exist_ok=True)
             with open(os.path.join(conf['path_list_request_id'], str(request_id)), 'wb') as f:
                 f.write(request_blob)
-            print("Certificate request is pending")
-            print(f"REQUEST ID:  {request_id}")
-            print(f"CA:          {ca.get('display_name') or ca.get('id')}")
-            print(f"USERNAME:    {username.strip()}")
-            print(f"TEMPLATE:    {tpl.get('common_name')}")
-            print(f"CSR PATH:    {csr_path_out}")
-            return 0
+            return response
 
         if status == "denied":
-            print("Certificate request denied", file=sys.stderr)
-            print(f"REQUEST ID:  {request_id}", file=sys.stderr)
-            print(f"REASON:      {result.get('status_text') or 'Denied'}", file=sys.stderr)
-            return 1
+            response['reason'] = result.get('status_text') or 'Denied'
+            return response
 
         if status != "issued":
-            print(f"ERROR: unknown callback status '{status}'", file=sys.stderr)
-            return 1
+            raise ValueError(f"unknown callback status '{status}'")
 
         cert_val = result.get("cert")
         if isinstance(cert_val, x509.Certificate):
@@ -220,8 +204,7 @@ def _cmd_submit_csr_cli(
         elif isinstance(cert_val, (bytes, bytearray, memoryview)):
             cert_obj = x509.load_der_x509_certificate(bytes(cert_val))
         else:
-            print("ERROR: Callback(issued) must return 'cert' (x509 or DER bytes)", file=sys.stderr)
-            return 1
+            raise ValueError("Callback(issued) must return 'cert' (x509 or DER bytes)")
 
         cert_pem = cert_obj.public_bytes(encoding=serialization.Encoding.PEM)
         fullchain_pem = _compose_fullchain_pem(cert_pem, conf=conf, ca=ca)
@@ -231,14 +214,8 @@ def _cmd_submit_csr_cli(
         with open(cert_path_out, 'wb') as f:
             f.write(fullchain_pem)
 
-        print("Certificate issued successfully")
-        print(f"REQUEST ID:  {request_id}")
-        print(f"CA:          {ca.get('display_name') or ca.get('id')}")
-        print(f"USERNAME:    {username.strip()}")
-        print(f"TEMPLATE:    {tpl.get('common_name')}")
-        print(f"CERT PATH:   {cert_path_out}")
-        print(f"CSR PATH:    {csr_path_out}")
-        return 0
+        response['certificate_path'] = cert_path_out
+        return response
 
     except Exception:
         raise
@@ -254,42 +231,29 @@ def _cmd_issue_cert_cli(
     conf: Dict[str, Any],
     crt_path: Optional[str] = None,
     key_path: Optional[str] = None,
-) -> int:
+) -> Dict[str, Any]:
     try:
         ca = _cli_find_ca_by_id(conf, ca_id)
         if not ca:
-            print(f"ERROR: CA not found: {ca_id}", file=sys.stderr)
-            return 1
+            raise LookupError(f"CA not found: {ca_id}")
 
         if not common_name.strip():
-            print("ERROR: --cn is required with --issue-cert", file=sys.stderr)
-            return 1
+            raise ValueError("--cn is required with --issue-cert")
 
         if int(rsa_bits) not in (2048, 3072, 4096):
-            print("ERROR: --rsa-bits must be one of: 2048, 3072, 4096", file=sys.stderr)
-            return 1
+            raise ValueError("--rsa-bits must be one of: 2048, 3072, 4096")
 
         if int(valid_days) <= 0:
-            print("ERROR: --valid-days must be > 0", file=sys.stderr)
-            return 1
+            raise ValueError("--valid-days must be > 0")
 
         result = issue_certificate(
             ca, common_name=common_name, sans=sans, rsa_bits=int(rsa_bits),
             valid_days=int(valid_days), conf=conf, fullchain=True,
             crt_path=crt_path, key_path=key_path,
         )
-        print("Certificate issued successfully")
-        print(f"CA:          {ca.get('display_name') or ca.get('id')}")
-        print(f"CN:          {common_name.strip()}")
-        print(f"STORED CERT: {result['certificate_path']}")
-        if crt_path:
-            print(f"COPIED CERT: {crt_path}")
-        print(f"KEY:         {result['key_path']}")
-        print(f"RSA:         {int(rsa_bits)} bits")
-        if result['sans']:
-            print(f"SAN:  {', '.join(result['sans'])}")
-
-        return 0
+        return {'ca': ca.get('display_name') or ca.get('id'),
+                'common_name': common_name.strip(), 'rsa_bits': int(rsa_bits),
+                **result}
 
     except Exception:
         raise
@@ -300,38 +264,32 @@ def _cmd_resign_all_crls(
     conf: Dict[str, Any],
     next_update_hours: int,
     bump_number: bool = True,
-) -> tuple[int, int, List[str]]:
-    """Re-sign all CRLs defined in conf. Returns (ok, fail, messages)."""
-    ok = 0
-    fail = 0
-    messages: List[str] = []
-
-    for ca in (conf.get("cas_list") or []):
-        if not ca["__key_obj"] :
+) -> Dict[str, Any]:
+    """Return per-CA results; CLI owns human messages and exit codes."""
+    results = []
+    for ca in (conf.get('cas_list') or []):
+        if not ca['__key_obj']:
             continue
-        ca_name = ca.get("display_name") or ca.get("id") or "<unknown>"
+        ca_id = ca.get('id')
+        name = ca.get('display_name') or ca_id or '<unknown>'
+        item = {'ca': ca_id, 'display_name': name,
+                'status': 'ok', 'crl_number': None, 'crl_path': None, 'error': None}
         try:
-            ca_id = ca.get("id")
             if not ca_id:
-                raise KeyError("Missing CA id")
-            rc = _cmd_resign_crl(
-                ca_id=ca_id,
-                next_update_hours=next_update_hours,
-                bump_number=bump_number,
-                conf=conf,
+                raise KeyError('Missing CA id')
+            crl = _cmd_resign_crl(
+                ca_id=ca_id, next_update_hours=next_update_hours,
+                bump_number=bump_number, conf=conf,
             )
-            if rc == 0:
-                ok += 1
-                messages.append(f"OK   {ca_name}")
-            else:
-                fail += 1
-                messages.append(f"FAIL {ca_name}: rc={rc}")
-        except Exception as e:
-            fail += 1
-            messages.append(f"FAIL {ca_name}: {e}")
-
-    return ok, fail, messages
-
+            item['crl_number'] = crl['crl_number']
+            item['crl_path'] = crl['crl_path']
+        except Exception as exc:
+            item['status'] = 'error'
+            item['error'] = str(exc)
+        results.append(item)
+    ok = sum(item['status'] == 'ok' for item in results)
+    return {'total': len(results), 'ok': ok, 'failed': len(results) - ok,
+            'results': results}
 
 
 # ---------------------------------------------------------------------------
