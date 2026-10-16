@@ -139,12 +139,13 @@ install -d -o root -g adcs -m 2775 \
 
 # Allow adcs to read/write and inherit permissions
 setfacl -m g:adcs:rwx -m d:g:adcs:rwx /var/lib/adcs
+setfacl -m u:adcs:rwx -m d:u:adcs:rwx /var/lib/adcs/pki/certs /var/lib/adcs/pki/crl /var/lib/adcs/pki/newcerts
 
 # Allow Nginx to traverse parent directories
 setfacl -m u:www-data:--x /var/lib/adcs /var/lib/adcs/pki
 
 # Allow Nginx to read public certificates and CRLs, including future files
-setfacl -m u:www-data:r-x -m d:u:www-data:r-x /var/lib/adcs/pki/certs /var/lib/adcs/pki/crl /var/lib/adcs/pki/newcerts
+setfacl -m u:www-data:r-x -m d:u:www-data:r-x /var/lib/adcs/pki/certs /var/lib/adcs/pki/crl
 ```
 
 Initial configuration
