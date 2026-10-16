@@ -18,11 +18,12 @@ from io import StringIO
 from datetime import datetime
 from contextlib import contextmanager, nullcontext
 from functools import lru_cache
-from typing import Any, Dict, Literal, Mapping, TypedDict
+from typing import Any, Callable, Dict, Literal, Mapping, TypedDict
 
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedSeq
 from ruamel.yaml.error import YAMLError
+from adcs_cli_progress import CliProgress
 
 yaml = YAML(typ="safe")
 
@@ -477,8 +478,22 @@ class AdcsTool:
     API from run(), then formats its results in main().
     """
 
-    def __init__(self, config_path: str = '/etc/adcs/adcs.yaml'):
+    def __init__(self, config_path: str = '/etc/adcs/adcs.yaml', *,
+                 cache_progress: Callable[[int, int, int], None] | None = None,
+                 cache_status: Callable[[str], None] | None = None):
         self.config_path = os.fspath(config_path)
+        # Optional display callbacks; the Python API remains silent by default.
+        self._cache_progress = cache_progress
+        self._cache_status = cache_status
+
+    def _sync_cache(self, cert_dir: str) -> dict[str, int]:
+        return _sync_certificate_cache(
+            cert_dir, progress=self._cache_progress, status=self._cache_status,
+        )
+
+    def _status(self, message: str) -> None:
+        if self._cache_status is not None:
+            self._cache_status(message)
 
     def _settings(self) -> Dict[str, Any]:
         # Listing configuration never loads private keys.
@@ -488,11 +503,11 @@ class AdcsTool:
     def _conf(self, *, read_only: bool = False) -> Dict[str, Any]:
         return load_yaml_conf(self.config_path, bypass_read_only=read_only)
 
-    @staticmethod
-    def _record(conf: Dict[str, Any], ca_id: str, serial: str):
+    def _record(self, conf: Dict[str, Any], ca_id: str, serial: str):
         ca = _ca(conf, ca_id)
         cert_dir, _ = _resolve_storage_paths_from_ca(ca)
-        _sync_certificate_cache(cert_dir)
+        self._sync_cache(cert_dir)
+        self._status("Looking up certificate in SQLite cache...")
         record = cached_certificate_by_serial(cert_dir, serial)
         return ca, cert_dir, record
 
@@ -593,6 +608,7 @@ class AdcsTool:
             revocation='' if revocation == 'any' else revocation,
             revoked_serials=_ca_revocations(ca), order_by=order_by,
             limit=limit, synchronize=True,
+            cache_progress=self._cache_progress, cache_status=self._cache_status,
         )
         entries = [{
             'serial': row.serial_nox, 'subject': row.subject,
@@ -635,6 +651,7 @@ class AdcsTool:
                 return {'action': action, 'ca': ca['id'], 'serial': serial,
                         'dry_run': True, 'current_revoked': currently_revoked,
                         'planned_revoked': revoke_it}
+            self._status(f"{'Revoking' if revoke_it else 'Unrevoking'} certificate...")
             change_revocation(
                 ca, serial, revoke_it=revoke_it,
                 next_update_hours=(next_update_hours or int(conf['next_update_hours_crl'])),
@@ -650,6 +667,7 @@ class AdcsTool:
             revoked_serials=_ca_revocations(ca), order_by=order_by,
             limit=limit, synchronize=True,
             eligible_for=action,
+            cache_progress=self._cache_progress, cache_status=self._cache_status,
         )
         candidates = [
             {'serial': row.serial_nox, 'not_after': row.not_after.isoformat(),
@@ -661,6 +679,7 @@ class AdcsTool:
                   'successes': 0, 'failures': 0, 'errors': []}
         if not apply:
             return result
+        self._status(f"{'Revoking' if revoke_it else 'Unrevoking'} {len(rows)} certificate(s)...")
         for row in rows:
             try:
                 change_revocation(
@@ -734,7 +753,7 @@ class AdcsTool:
                 ca, cert_path=path, revoked=serial_int in revocations,
                 expires_at=expires_at,
             )
-            _sync_certificate_cache(cert_dir)
+            self._sync_cache(cert_dir)
             return {'action': 'delete', 'ca': ca['id'], 'dry_run': False,
                     'serial': record['serial_hex'], 'deleted_certificate': cert_n,
                     'deleted_key': key_n}
@@ -744,6 +763,7 @@ class AdcsTool:
             revocation='' if eligible or revocation == 'any' else revocation,
             revoked_serials=revocations, order_by=order_by,
             limit=limit, synchronize=True, eligible_for='delete',
+            cache_progress=self._cache_progress, cache_status=self._cache_status,
         )
         candidates = [
             {'serial': r.serial_nox, 'not_after': r.not_after.isoformat(),
@@ -755,6 +775,7 @@ class AdcsTool:
                   'successes': 0, 'failures': 0, 'errors': []}
         if not apply:
             return result
+        self._status(f"Deleting {len(rows)} certificate(s)...")
         for row in rows:
             try:
                 delete_certificate(
@@ -765,7 +786,7 @@ class AdcsTool:
             except (OSError, ValueError, PermissionError) as exc:
                 result['failures'] += 1
                 result['errors'].append({'serial': row.serial_nox, 'error': str(exc)})
-        _sync_certificate_cache(cert_dir)
+        self._sync_cache(cert_dir)
         return result
 
     def delete_certificate(self, ca_id: str, serial: str, *, dry_run=False) -> dict[str, Any]:
@@ -841,9 +862,13 @@ class AdcsTool:
         )
 
 
-def run(args: argparse.Namespace) -> Any:
+def run(args: argparse.Namespace, *, progress: CliProgress | None = None) -> Any:
     """CLI adapter: call the Python API and return native Python data."""
-    adcs = AdcsTool(args.confadcs)
+    adcs = AdcsTool(
+        args.confadcs,
+        cache_progress=progress.progress if progress is not None else None,
+        cache_status=progress.status if progress is not None else None,
+    )
     cmd = args.command
     if cmd == 'ca-list':
         return adcs.list_cas()
@@ -1168,7 +1193,26 @@ def main(argv=None) -> int:
         (group or parser).print_help()
         return 0
     try:
-        result = run(args)
+        # A spinner keeps the terminal responsive even during scans and key/CRL
+        # operations with no numeric progress. Non-TTY stderr stays silent, and
+        # JSON on stdout is never mixed with progress characters.
+        labels = {
+            'ca-create': 'Creating certificate authority...',
+            'ket-create': 'Creating KET certificate...',
+            'certificate-list': 'Preparing certificate cache...',
+            'certificate-show': 'Preparing certificate cache...',
+            'certificate-revoke': 'Preparing certificate cache...',
+            'certificate-unrevoke': 'Preparing certificate cache...',
+            'certificate-delete': 'Preparing certificate cache...',
+            'certificate-issue': 'Issuing certificate...',
+            'certificate-rotate': 'Checking certificate rotation...',
+            'csr-submit': 'Submitting certificate request...',
+            'crl-resign': 'Re-signing CRL...',
+            'crl-resign-all': 'Re-signing CRLs...',
+        }
+        with CliProgress(labels.get(args.command, 'Working...'),
+                         enabled=args.command in labels and sys.stderr.isatty()) as progress:
+            result = run(args, progress=progress)
         _display_result(args, result)
         return _cli_exit_code(args, result)
     except (OSError, ValueError, LookupError, PermissionError) as exc:

@@ -683,6 +683,8 @@ def list_certificate_rows(
     sort_column: str = "not_before", descending: bool = False,
     order_by: Optional[str] = None, limit: int = 0,
     synchronize: bool = False, eligible_for: str = "",
+    cache_progress: Optional[Callable[[int, int, int], None]] = None,
+    cache_status: Optional[Callable[[str], None]] = None,
 ) -> tuple[List[CertRow], int]:
     """Shared filter/search/sort/limit implementation for CLI and Textual UI.
 
@@ -702,7 +704,9 @@ def list_certificate_rows(
     if eligible_for not in ("", "revoke", "unrevoke", "delete"):
         raise ValueError(f"Unsupported bulk operation: {eligible_for}")
     if synchronize:
-        _sync_certificate_cache(cert_dir)
+        _sync_certificate_cache(cert_dir, progress=cache_progress, status=cache_status)
+    if cache_status is not None:
+        cache_status("Querying SQLite certificate cache...")
     raw, total = _query_certificate_cache(
         cert_dir, query=query, status=status, revocation=revocation,
         revoked_serials=revoked_serials, sort_column=sort_column,
