@@ -166,8 +166,11 @@ def _write_crl_file(crl_path: str, pem_bytes: bytes) -> None:
 # -----------------------------------------------------------------------------
 
 def revoke(ca_key, ca_cert: cx509.Certificate, serial, crl_path: str, next_update_hours: int = 8) -> None:
-    """Add a revoked entry for `serial` and write a new CRL."""
-    serial_int = _serial_to_int(serial)
+    """Revoke one or more serials and write the CRL once."""
+    serials = serial if isinstance(serial, (list, tuple, set)) else [serial]
+    serial_ints = {_serial_to_int(s) for s in serials}
+    if not serial_ints:
+        return
 
     now = datetime.now(timezone.utc)
     next_update = now + timedelta(hours=int(next_update_hours))
@@ -194,19 +197,20 @@ def revoke(ca_key, ca_cert: cx509.Certificate, serial, crl_path: str, next_updat
 
     builder = builder.add_extension(cx509.CRLNumber(crl_number), critical=False)
 
-    # Reinstate all previous revoked certs except the one being (re)added
+    # Reinstate previous revoked certs except those being (re)added
     for rc in _iter_revoked(old_crl):
-        if rc.serial_number == serial_int:
+        if rc.serial_number in serial_ints:
             continue
         builder = builder.add_revoked_certificate(rc)
 
-    rcb = (
-        cx509.RevokedCertificateBuilder()
-        .serial_number(serial_int)
-        .revocation_date(now)
-        .add_extension(cx509.CRLReason(cx509.ReasonFlags.unspecified), critical=False)
-    ).build()
-    builder = builder.add_revoked_certificate(rcb)
+    for serial_int in sorted(serial_ints):
+        rcb = (
+            cx509.RevokedCertificateBuilder()
+            .serial_number(serial_int)
+            .revocation_date(now)
+            .add_extension(cx509.CRLReason(cx509.ReasonFlags.unspecified), critical=False)
+        ).build()
+        builder = builder.add_revoked_certificate(rcb)
 
     builder = _add_aki_if_absent(builder, ca_key)
 
@@ -216,8 +220,11 @@ def revoke(ca_key, ca_cert: cx509.Certificate, serial, crl_path: str, next_updat
 
 
 def unrevoke(ca_key, ca_cert: cx509.Certificate, serial, crl_path: str, next_update_hours: int = 8) -> None:
-    """Remove a revoked entry for `serial` and write a new CRL."""
-    serial_int = _serial_to_int(serial)
+    """Unrevoke one or more serials and write the CRL once."""
+    serials = serial if isinstance(serial, (list, tuple, set)) else [serial]
+    serial_ints = {_serial_to_int(s) for s in serials}
+    if not serial_ints:
+        return
 
     now = datetime.now(timezone.utc)
     next_update = now + timedelta(hours=int(next_update_hours))
@@ -246,9 +253,9 @@ def unrevoke(ca_key, ca_cert: cx509.Certificate, serial, crl_path: str, next_upd
 
     builder = builder.add_extension(cx509.CRLNumber(crl_number), critical=False)
 
-    # Reinstate all previous revoked certs except the one being removed
+    # Reinstate all previous revoked certs except those being removed
     for rc in _iter_revoked(old_crl):
-        if rc.serial_number == serial_int:
+        if rc.serial_number in serial_ints:
             continue
         builder = builder.add_revoked_certificate(rc)
 

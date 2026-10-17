@@ -367,17 +367,19 @@ def _ca_crl_context(ca: Dict[str, Any]) -> tuple[Any, Any, str]:
 
 
 def change_revocation(
-    ca: Dict[str, Any], serial: str, *, revoke_it: bool,
+    ca: Dict[str, Any], serial: str | List[str], *, revoke_it: bool,
     next_update_hours: int,
 ) -> Set[int]:
-    """Sign the changed CRL and verify its new status before returning."""
+    """Sign one CRL for all serials and verify their new status."""
     ca_key, ca_cert, crl_path = _ca_crl_context(ca)
+    serials = [serial] if isinstance(serial, str) else serial
+    if not serials:
+        return revoked_serials_set(crl_path)
     operation = revoke if revoke_it else unrevoke
-    operation(ca_key=ca_key, ca_cert=ca_cert, serial=serial,
+    operation(ca_key=ca_key, ca_cert=ca_cert, serial=serials,
               crl_path=crl_path, next_update_hours=next_update_hours)
     current = revoked_serials_set(crl_path)
-    serial_number = int(str(serial).removeprefix('0x'), 16)
-    if (serial_number in current) != revoke_it:
+    if any((int(str(s).removeprefix('0x'), 16) in current) != revoke_it for s in serials):
         raise RuntimeError('CRL verification failed after revocation change')
     return current
 

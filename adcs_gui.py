@@ -1913,15 +1913,14 @@ class ADCSApp(App):
         failed_serials: List[str] = []
         operation_ok: List[CertRow] = []
 
-        for r in targets:
-            try:
-                change_revocation(
-                    ca, r.serial_nox, revoke_it=True,
-                    next_update_hours=self.confadcs['next_update_hours_crl'],
-                )
-                operation_ok.append(r)
-            except Exception:
-                failed_serials.append(r.serial_nox)
+        try:
+            change_revocation(
+                ca, [r.serial_nox for r in targets], revoke_it=True,
+                next_update_hours=self.confadcs['next_update_hours_crl'],
+            )
+            operation_ok = targets
+        except Exception:
+            failed_serials = [r.serial_nox for r in targets]
 
         # Reload only the CRL. A successful revoke is trusted by the UI only if
         # the serial is actually present in the freshly-read CRL.
@@ -1977,15 +1976,14 @@ class ADCSApp(App):
         failed_serials: List[str] = []
         operation_ok: List[CertRow] = []
 
-        for r in targets:
-            try:
-                change_revocation(
-                    ca, r.serial_nox, revoke_it=False,
-                    next_update_hours=self.confadcs['next_update_hours_crl'],
-                )
-                operation_ok.append(r)
-            except Exception:
-                failed_serials.append(r.serial_nox)
+        try:
+            change_revocation(
+                ca, [r.serial_nox for r in targets], revoke_it=False,
+                next_update_hours=self.confadcs['next_update_hours_crl'],
+            )
+            operation_ok = targets
+        except Exception:
+            failed_serials = [r.serial_nox for r in targets]
 
         # Reload only the CRL. A successful unrevoke is trusted by the UI only
         # if the serial is absent from the freshly-read CRL.

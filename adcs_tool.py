@@ -149,14 +149,15 @@ def build_parser(parser_class=FriendlyArgumentParser) -> argparse.ArgumentParser
     cert_show.add_argument('--json', action='store_true')
 
     for name, desc in (
-        ('certificate-revoke', 'Revoke one certificate by CA and serial; update CRL.'),
-        ('certificate-unrevoke', 'Remove one certificate serial from CRL.'),
+        ('certificate-revoke', 'Revoke certificate serials from one CA; update CRL.'),
+        ('certificate-unrevoke', 'Remove certificate serials from one CRL.'),
         ('certificate-delete', 'Move an expired or revoked certificate and its key to .trash.'),
     ):
         sub = command(name, desc)
         sub.add_argument('--ca', required=True)
         selection = sub.add_mutually_exclusive_group(required=True)
-        selection.add_argument('--serial', help='Operate on a single hexadecimal certificate serial.')
+        selection.add_argument('--serial', nargs='+' if name != 'certificate-delete' else None,
+                               help='Hexadecimal certificate serial(s) for revoke/unrevoke; one for delete.')
         if name == 'certificate-delete':
             selection.add_argument('--eligible', action='store_true',
                                    help='Select certificates that are expired OR revoked.')
@@ -644,6 +645,27 @@ class AdcsTool:
         if serial is not None:
             if apply:
                 raise ValueError('apply is only for bulk operations')
+            if isinstance(serial, list) and len(serial) > 1:
+                ca, cert_dir, first = self._record(conf, ca_id, serial[0])
+                records = [first] + [cached_certificate_by_serial(cert_dir, s) for s in serial[1:]]
+                revoked = _ca_revocations(ca)
+                candidates = [
+                    {'serial': str(r['serial_hex']), 'not_after': r['not_after'],
+                     'revoked': int(str(r['serial_hex']), 16) in revoked,
+                     'subject': r['subject']} for r in records
+                ]
+                if not dry_run:
+                    change_revocation(
+                        ca, [r['serial'] for r in candidates], revoke_it=revoke_it,
+                        next_update_hours=(next_update_hours or int(conf['next_update_hours_crl'])),
+                    )
+                return {'action': action, 'ca': ca['id'], 'dry_run': dry_run,
+                        'total': len(candidates), 'selected': len(candidates),
+                        'candidates': candidates,
+                        'successes': 0 if dry_run else len(candidates),
+                        'failures': 0, 'errors': []}
+            if isinstance(serial, list):
+                serial = serial[0]
             ca, _, record = self._record(conf, ca_id, serial)
             serial = str(record['serial_hex'])
             if dry_run:
@@ -680,24 +702,24 @@ class AdcsTool:
         if not apply:
             return result
         self._status(f"{'Revoking' if revoke_it else 'Unrevoking'} {len(rows)} certificate(s)...")
-        for row in rows:
+        if rows:
             try:
                 change_revocation(
-                    ca, row.serial_nox, revoke_it=revoke_it,
+                    ca, [row.serial_nox for row in rows], revoke_it=revoke_it,
                     next_update_hours=(next_update_hours or int(conf['next_update_hours_crl'])),
                 )
-                result['successes'] += 1
+                result['successes'] = len(rows)
             except (OSError, ValueError, PermissionError) as exc:
-                result['failures'] += 1
-                result['errors'].append({'serial': row.serial_nox, 'error': str(exc)})
+                result['failures'] = len(rows)
+                result['errors'] = [{'serial': row.serial_nox, 'error': str(exc)} for row in rows]
         return result
 
-    def revoke_certificate(self, ca_id: str, serial: str, *, dry_run=False,
+    def revoke_certificate(self, ca_id: str, serial: str | list[str], *, dry_run=False,
                            next_update_hours=None) -> dict[str, Any]:
         return self._change_revocation(ca_id, revoke_it=True, serial=serial,
                                        dry_run=dry_run, next_update_hours=next_update_hours)
 
-    def unrevoke_certificate(self, ca_id: str, serial: str, *, dry_run=False,
+    def unrevoke_certificate(self, ca_id: str, serial: str | list[str], *, dry_run=False,
                              next_update_hours=None) -> dict[str, Any]:
         return self._change_revocation(ca_id, revoke_it=False, serial=serial,
                                        dry_run=dry_run, next_update_hours=next_update_hours)
@@ -902,7 +924,8 @@ def run(args: argparse.Namespace, *, progress: CliProgress | None = None) -> Any
         method = adcs.revoke_certificate if cmd == 'certificate-revoke' else adcs.unrevoke_certificate
         batch_method = adcs.revoke_certificates if cmd == 'certificate-revoke' else adcs.unrevoke_certificates
         if args.serial:
-            return method(args.ca, args.serial, dry_run=args.dry_run,
+            return method(args.ca, args.serial if len(args.serial) > 1 else args.serial[0],
+                          dry_run=args.dry_run,
                           next_update_hours=args.next_update_hours)
         return batch_method(args.ca, status=args.status, revocation=args.revocation,
                             search=args.search, order_by=args.order_by, limit=args.limit,
@@ -1006,7 +1029,8 @@ def _display_result(args: argparse.Namespace, result: Any) -> None:
             for c in result['candidates']
         ], output_format, title='Certificate')
         if result['dry_run']:
-            print(f"DRY RUN: {result['selected']} certificate(s) selected from {result['total']} matching row(s). Add --yes to execute.")
+            hint = 'Remove --dry-run to execute.' if args.serial else 'Add --yes to execute.'
+            print(f"DRY RUN: {result['selected']} certificate(s) selected from {result['total']} matching row(s). {hint}")
         else:
             for err in result['errors']:
                 print(f"ERROR: {err['serial']}: {err['error']}", file=sys.stderr)
