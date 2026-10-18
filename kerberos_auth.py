@@ -150,6 +150,10 @@ def kerberos_authenticate(auth_header):
         if not context.complete:
             return None, response_token
 
+        # Only accept a completed Kerberos mechanism (never NTLM or another GSS mechanism).
+        if context.mech != gssapi.MechType.kerberos:
+            return None, response_token
+
         initiator_name = context.initiator_name
 
         if initiator_name is None:
