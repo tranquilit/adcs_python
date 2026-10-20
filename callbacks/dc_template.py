@@ -11,7 +11,7 @@ import uuid
 from asn1crypto import core as a_core
 from cryptography import x509 as cx509
 from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import ed25519, ed448
+from cryptography.hazmat.primitives.asymmetric import rsa, ec, dsa
 from cryptography.hazmat.primitives import serialization
 from cryptography.x509.oid import (
     NameOID,
@@ -362,10 +362,10 @@ def emit_certificate(
     builder = builder.add_extension(cx509.SubjectAlternativeName(san_items), critical=False)
 
     priv = ca["__key_obj"]
-    if isinstance(priv, (ed25519.Ed25519PrivateKey, ed448.Ed448PrivateKey)):
-        cert = builder.sign(private_key=priv, algorithm=None)
-    else:
+    if isinstance(priv, (rsa.RSAPrivateKey, ec.EllipticCurvePrivateKey, dsa.DSAPrivateKey)):
         cert = builder.sign(private_key=priv, algorithm=hashes.SHA512())
+    else:
+        cert = builder.sign(private_key=priv, algorithm=None)
 
     return {
         "status": "issued",

@@ -5,7 +5,7 @@ from typing import Optional, Dict, Any
 from asn1crypto import core as a_core
 from cryptography import x509 as cx509
 from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import rsa, ec, ed25519, ed448
+from cryptography.hazmat.primitives.asymmetric import rsa, ec, dsa
 from cryptography.x509.oid import (
     ExtensionOID,
     NameOID,
@@ -484,10 +484,10 @@ def emit_certificate(
 
     # (2) sign according to CA key type
     priv = ca["__key_obj"]
-    if isinstance(priv, (ed25519.Ed25519PrivateKey, ed448.Ed448PrivateKey)):
-        cert = builder.sign(private_key=priv, algorithm=None)
-    else:
+    if isinstance(priv, (rsa.RSAPrivateKey, ec.EllipticCurvePrivateKey, dsa.DSAPrivateKey)):
         cert = builder.sign(private_key=priv, algorithm=hashes.SHA256())
+    else:
+        cert = builder.sign(private_key=priv, algorithm=None)
 
 
     return {

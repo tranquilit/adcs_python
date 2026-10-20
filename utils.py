@@ -808,55 +808,63 @@ class CSRValidationError(ValueError):
 def validate_csr(csr_obj: cx509.CertificateSigningRequest) -> None:
     """
     Validate a CSR:
-      - explicit signature verification (RSASSA-PKCS1v1_5, ECDSA, or EdDSA)
-      - acceptable public key (RSA>=2048 & e>=65537 odd; EC P-256/384/521; Ed25519/Ed448 ok)
+      - verify its signature (RSA, ECDSA, Ed25519/Ed448, ML-DSA-44/65/87)
+      - allow only supported public key types
+      - enforce RSA >= 2048 bits with an odd exponent >= 65537
+      - restrict EC keys to P-256, P-384, or P-521
     Raise CSRValidationError if invalid.
     """
-    pub = csr_obj.public_key()
-
-    # 1) Explicit signature verification
     try:
-        if isinstance(pub, rsa.RSAPublicKey):
-            hash_algo = csr_obj.signature_hash_algorithm
-            pub.verify(
-                csr_obj.signature,
-                csr_obj.tbs_certrequest_bytes,
-                padding.PKCS1v15(),
-                hash_algo,
-            )
-        elif isinstance(pub, ec.EllipticCurvePublicKey):
-            hash_algo = csr_obj.signature_hash_algorithm
-            pub.verify(
-                csr_obj.signature,
-                csr_obj.tbs_certrequest_bytes,
-                ec.ECDSA(hash_algo),
-            )
-        elif isinstance(pub, ed25519.Ed25519PublicKey):
-            pub.verify(csr_obj.signature, csr_obj.tbs_certrequest_bytes)
-        elif isinstance(pub, ed448.Ed448PublicKey):
-            pub.verify(csr_obj.signature, csr_obj.tbs_certrequest_bytes)
-        else:
-            raise CSRValidationError("Unsupported public key type (only RSA, ECDSA, Ed25519, Ed448)")
-    except Exception as e:
-        raise CSRValidationError(f"CSR signature verification failed: {e}")
+        pub = csr_obj.public_key()
+    except Exception as exc:
+        raise CSRValidationError(f"Unable to read CSR public key: {exc}") from exc
 
-    # 2) Public key constraints
+    allowed_types = (
+        rsa.RSAPublicKey,
+        ec.EllipticCurvePublicKey,
+        ed25519.Ed25519PublicKey,
+        ed448.Ed448PublicKey,
+    )
+    if mldsa is not None:
+        allowed_types += (
+            mldsa.MLDSA44PublicKey,
+            mldsa.MLDSA65PublicKey,
+            mldsa.MLDSA87PublicKey,
+        )
+
+    if not isinstance(pub, allowed_types):
+        raise CSRValidationError(
+            f"Unsupported CSR public key type: {type(pub).__name__}"
+        )
+
+    # cryptography verifies the CSR signature with the appropriate algorithm,
+    # including ML-DSA, without a separate signature_hash_algorithm or padding.
+    try:
+        valid_signature = csr_obj.is_signature_valid
+    except Exception as exc:
+        raise CSRValidationError(f"CSR signature verification failed: {exc}") from exc
+    if not valid_signature:
+        raise CSRValidationError("CSR signature verification failed: invalid signature")
+
+    # Public key constraints
     if isinstance(pub, rsa.RSAPublicKey):
         key_size = pub.key_size
         if key_size < 2048:
             raise CSRValidationError(f"RSA key too small: {key_size} bits (min 2048)")
         try:
             e = pub.public_numbers().e
-            if e < 65537 or e % 2 == 0:
-                raise CSRValidationError(f"RSA public exponent not acceptable: {e} (must be odd >= 65537)")
-        except Exception:
-            raise CSRValidationError("Unable to read RSA public exponent")
+        except Exception as exc:
+            raise CSRValidationError("Unable to read RSA public exponent") from exc
+        if e < 65537 or e % 2 == 0:
+            raise CSRValidationError(
+                f"RSA public exponent not acceptable: {e} (must be odd >= 65537)"
+            )
     elif isinstance(pub, ec.EllipticCurvePublicKey):
         curve = getattr(pub.curve, "name", str(pub.curve)).lower()
         allowed = {"secp256r1", "prime256v1", "secp384r1", "secp521r1"}
         if curve not in allowed:
             raise CSRValidationError(f"EC curve not allowed: {curve} (allowed: P-256/384/521)")
-    # Ed25519/Ed448: no additional constraints
+    # Ed25519/Ed448 and ML-DSA: no additional key constraints.
 
 
 # -----------------------------------------------------------------------------
