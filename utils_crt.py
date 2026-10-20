@@ -377,30 +377,15 @@ def issue_cert_with_new_key(
     key_type: str = "rsa",
     rsa_key_size: int = 2048,
     ec_curve: str = "secp256r1",
+    mldsa_variant: str = "mldsa65",
     key_export_password: Optional[bytes] = None,
 ) -> Tuple[cx509.Certificate, Any, bytes, bytes]:
     """Generate a new keypair, issue an end-entity certificate, and return (cert_obj, privkey_obj, cert_pem, key_pem)."""
 
-    key_type_l = (key_type or "rsa").lower()
-    if key_type_l == "rsa":
-        if int(rsa_key_size) not in (2048, 3072, 4096):
-            raise ValueError("--rsa-bits must be one of: 2048, 3072, 4096.")
-        priv = rsa.generate_private_key(public_exponent=65537, key_size=int(rsa_key_size))
-    elif key_type_l == "ec":
-        curve_map = {
-            "secp256r1": ec.SECP256R1(),
-            "secp384r1": ec.SECP384R1(),
-            "secp521r1": ec.SECP521R1(),
-            "secp256k1": ec.SECP256K1(),
-        }
-        curve = curve_map.get((ec_curve or "secp256r1").lower(), ec.SECP256R1())
-        priv = ec.generate_private_key(curve)
-    elif key_type_l == "ed25519":
-        priv = ed25519.Ed25519PrivateKey.generate()
-    elif key_type_l == "ed448":
-        priv = ed448.Ed448PrivateKey.generate()
-    else:
-        raise ValueError(f"Unknown key_type: {key_type}")
+    priv = _generate_private_key_for_type(
+        key_type=key_type, rsa_key_size=rsa_key_size,
+        ec_curve=ec_curve, mldsa_variant=mldsa_variant,
+    )
 
     pub = priv.public_key()
 
@@ -1255,6 +1240,15 @@ def _pick_key_params_from_existing(cert: cx509.Certificate) -> dict[str, Any]:
         if isinstance(pk, ed448.Ed448PublicKey):
             params["key_type"] = "ed448"
             return params
+        if mldsa is not None:
+            for variant, cls in (
+                ("mldsa44", mldsa.MLDSA44PublicKey),
+                ("mldsa65", mldsa.MLDSA65PublicKey),
+                ("mldsa87", mldsa.MLDSA87PublicKey),
+            ):
+                if isinstance(pk, cls):
+                    params["key_type"] = variant
+                    return params
     except Exception:
         pass
 
@@ -1447,6 +1441,50 @@ def _is_mldsa_private_key(key) -> bool:
             mldsa.MLDSA87PrivateKey,
         ))
     )
+
+def _generate_private_key_for_type(
+    *, key_type: str = "rsa", rsa_key_size: int = 2048,
+    ec_curve: str = "secp256r1", mldsa_variant: str = "mldsa65",
+):
+    """Generate an RSA, ECC, EdDSA or ML-DSA key for local certificates."""
+    kind = (key_type or "rsa").strip().lower().replace("_", "-")
+    if kind == "rsa":
+        if int(rsa_key_size) not in (2048, 3072, 4096):
+            raise ValueError("--rsa-bits must be one of: 2048, 3072, 4096.")
+        return rsa.generate_private_key(public_exponent=65537, key_size=int(rsa_key_size))
+    if kind in ("ec", "ecc", "ecdsa"):
+        curves = {
+            "secp256r1": ec.SECP256R1, "prime256v1": ec.SECP256R1,
+            "p-256": ec.SECP256R1, "secp384r1": ec.SECP384R1,
+            "p-384": ec.SECP384R1, "secp521r1": ec.SECP521R1,
+            "p-521": ec.SECP521R1, "secp256k1": ec.SECP256K1,
+        }
+        curve_name = (ec_curve or "secp256r1").strip().lower()
+        curve_class = curves.get(curve_name)
+        if curve_class is None:
+            raise ValueError("--ec-curve must be one of: secp256r1, secp384r1, secp521r1 (aliases: prime256v1, p-256, p-384, p-521).")
+        return ec.generate_private_key(curve_class())
+    if kind == "ed25519":
+        return ed25519.Ed25519PrivateKey.generate()
+    if kind == "ed448":
+        return ed448.Ed448PrivateKey.generate()
+    if kind in ("mldsa", "ml-dsa", "mldsa44", "ml-dsa-44", "mldsa65", "ml-dsa-65", "mldsa87", "ml-dsa-87"):
+        if mldsa is None:
+            raise ValueError("ML-DSA requires a version of cryptography that supports ML-DSA keys and X.509 certificates (>= 49.0.0).")
+        variant = (mldsa_variant or "mldsa65").strip().lower().replace("_", "-")
+        if kind in ("mldsa44", "ml-dsa-44", "mldsa65", "ml-dsa-65", "mldsa87", "ml-dsa-87"):
+            variant = kind
+        variants = {
+            "mldsa44": mldsa.MLDSA44PrivateKey, "ml-dsa-44": mldsa.MLDSA44PrivateKey, "44": mldsa.MLDSA44PrivateKey,
+            "mldsa65": mldsa.MLDSA65PrivateKey, "ml-dsa-65": mldsa.MLDSA65PrivateKey, "65": mldsa.MLDSA65PrivateKey,
+            "mldsa87": mldsa.MLDSA87PrivateKey, "ml-dsa-87": mldsa.MLDSA87PrivateKey, "87": mldsa.MLDSA87PrivateKey,
+        }
+        cls = variants.get(variant)
+        if cls is None:
+            raise ValueError("--mldsa-variant must be one of: mldsa44, mldsa65, mldsa87 (aliases: ml-dsa-44, ml-dsa-65, ml-dsa-87, 44, 65, 87).")
+        return cls.generate()
+    raise ValueError(f"Unsupported --key-type: {key_type}")
+
 
 def _x509_signature_hash_for_key(key, hash_name: str = "sha256"):
     # Only RSA, ECDSA and DSA take an external hash algorithm.

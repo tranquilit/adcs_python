@@ -190,6 +190,17 @@ def build_parser(parser_class=FriendlyArgumentParser) -> argparse.ArgumentParser
     resign_all.add_argument('--no-bump-number', action='store_true')
     resign_all.add_argument('--next-update-hours', type=int, default=None)
 
+    def add_key_options(sub, *, rsa_default):
+        sub.add_argument('--rsa-bits', type=int, default=rsa_default)
+        sub.add_argument('--key-type', default='rsa',
+                         choices=('rsa', 'ec', 'ecc', 'ecdsa', 'mldsa', 'ml-dsa',
+                                  'mldsa44', 'mldsa65', 'mldsa87',
+                                  'ml-dsa-44', 'ml-dsa-65', 'ml-dsa-87'))
+        sub.add_argument('--ec-curve', default='secp256r1',
+                         help='ECC curve: secp256r1, secp384r1 or secp521r1 (also p-256, p-384, p-521).')
+        sub.add_argument('--mldsa-variant', default='mldsa65',
+                         help='ML-DSA variant: mldsa44, mldsa65 or mldsa87.')
+
     ca_create = command('ca-create', 'Create a root/intermediate CA and update adcs.yaml.')
     ca_create.add_argument('--cn', required=True)
     ca_create.add_argument('--signer-ca-id', '--ca-id', '--ca', dest='ca', default=None,
@@ -198,12 +209,7 @@ def build_parser(parser_class=FriendlyArgumentParser) -> argparse.ArgumentParser
     ca_create.add_argument('--crt-path')
     ca_create.add_argument('--key-path')
     ca_create.add_argument('--crl-path')
-    ca_create.add_argument('--rsa-bits', type=int, default=4096)
-    ca_create.add_argument('--key-type', default='rsa',
-                           choices=('rsa', 'ec', 'ecc', 'ecdsa', 'mldsa', 'ml-dsa', 'mldsa44', 'mldsa65',
-                                    'mldsa87', 'ml-dsa-44', 'ml-dsa-65', 'ml-dsa-87'))
-    ca_create.add_argument('--ec-curve', default='secp256r1')
-    ca_create.add_argument('--mldsa-variant', default='mldsa65')
+    add_key_options(ca_create, rsa_default=4096)
     ca_create.add_argument('--csr-path', help='Use only the CSR public key for the CA.')
     ca_create.add_argument('--valid-days', type=int, default=3650)
 
@@ -213,7 +219,7 @@ def build_parser(parser_class=FriendlyArgumentParser) -> argparse.ArgumentParser
     cert_issue.add_argument('--san', action='append', help='SANs; repeat or comma-separate.')
     cert_issue.add_argument('--crt-path')
     cert_issue.add_argument('--key-path')
-    cert_issue.add_argument('--rsa-bits', type=int, default=3072)
+    add_key_options(cert_issue, rsa_default=3072)
     cert_issue.add_argument('--valid-days', type=int, default=365)
 
     ket_create = command('ket-create', 'Create a Microsoft CAExchange/KET certificate.')
@@ -838,12 +844,15 @@ class AdcsTool:
         )
 
     def issue_certificate(self, ca_id: str, cn: str, *, sans=None, crt_path=None,
-                          key_path=None, rsa_bits=3072, valid_days=365) -> dict[str, Any]:
+                          key_path=None, rsa_bits=3072, key_type='rsa',
+                          ec_curve='secp256r1', mldsa_variant='mldsa65',
+                          valid_days=365) -> dict[str, Any]:
         if isinstance(sans, str):
             sans = [sans]
         return _cmd_issue_cert_cli(
             ca_id=ca_id, common_name=cn, sans=sans,
             rsa_bits=rsa_bits, valid_days=valid_days,
+            key_type=key_type, ec_curve=ec_curve, mldsa_variant=mldsa_variant,
             conf=self._conf(),
             crt_path=os.fspath(crt_path) if crt_path is not None else None,
             key_path=os.fspath(key_path) if key_path is not None else None,
@@ -919,7 +928,9 @@ def run(args: argparse.Namespace, *, progress: CliProgress | None = None) -> Any
     if cmd == 'certificate-issue':
         return adcs.issue_certificate(args.ca, args.cn, sans=args.san,
                                       crt_path=args.crt_path, key_path=args.key_path,
-                                      rsa_bits=args.rsa_bits, valid_days=args.valid_days)
+                                      rsa_bits=args.rsa_bits, key_type=args.key_type,
+                                      ec_curve=args.ec_curve, mldsa_variant=args.mldsa_variant,
+                                      valid_days=args.valid_days)
     if cmd in ('certificate-revoke', 'certificate-unrevoke'):
         method = adcs.revoke_certificate if cmd == 'certificate-revoke' else adcs.unrevoke_certificate
         batch_method = adcs.revoke_certificates if cmd == 'certificate-revoke' else adcs.unrevoke_certificates
@@ -1080,7 +1091,13 @@ def _display_result(args: argparse.Namespace, result: Any) -> None:
         if result['copied_certificate_path']:
             print(f"COPIED CERT: {result['copied_certificate_path']}")
         print(f"KEY:         {result['key_path']}")
-        print(f"RSA:         {result['rsa_bits']} bits")
+        print(f"KEY TYPE:    {result['key_type']}")
+        if result['key_type'] == 'rsa':
+            print(f"RSA:         {result['rsa_bits']} bits")
+        elif result['key_type'] == 'ec':
+            print(f"EC CURVE:    {result['ec_curve']}")
+        elif result['key_type'] == 'mldsa':
+            print(f"ML-DSA:      {result['mldsa_variant']}")
         if result['sans']:
             print(f"SAN:  {', '.join(result['sans'])}")
     elif cmd == 'csr-submit':

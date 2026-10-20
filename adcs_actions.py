@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa, ec
 from adcs_config import build_templates_for_policy_response, _call_callback_with_params
 from callback_loader import load_func
 from utils_crt import (
@@ -229,6 +230,9 @@ def _cmd_issue_cert_cli(
     rsa_bits: int,
     valid_days: int,
     conf: Dict[str, Any],
+    key_type: str = "rsa",
+    ec_curve: str = "secp256r1",
+    mldsa_variant: str = "mldsa65",
     crt_path: Optional[str] = None,
     key_path: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -240,7 +244,7 @@ def _cmd_issue_cert_cli(
         if not common_name.strip():
             raise ValueError("--cn is required with --issue-cert")
 
-        if int(rsa_bits) not in (2048, 3072, 4096):
+        if (key_type or "rsa").lower() == "rsa" and int(rsa_bits) not in (2048, 3072, 4096):
             raise ValueError("--rsa-bits must be one of: 2048, 3072, 4096")
 
         if int(valid_days) <= 0:
@@ -248,12 +252,12 @@ def _cmd_issue_cert_cli(
 
         result = issue_certificate(
             ca, common_name=common_name, sans=sans, rsa_bits=int(rsa_bits),
+            key_type=key_type, ec_curve=ec_curve, mldsa_variant=mldsa_variant,
             valid_days=int(valid_days), conf=conf, fullchain=True,
             crt_path=crt_path, key_path=key_path,
         )
         return {'ca': ca.get('display_name') or ca.get('id'),
-                'common_name': common_name.strip(), 'rsa_bits': int(rsa_bits),
-                **result}
+                'common_name': common_name.strip(), **result}
 
     except Exception:
         raise
@@ -302,6 +306,7 @@ def _cmd_resign_all_crls(
 def issue_certificate(
     ca: Dict[str, Any], *, common_name: str, sans: Optional[List[str]] = None,
     rsa_bits: int = 2048, valid_days: int = 365,
+    key_type: str = "rsa", ec_curve: str = "secp256r1", mldsa_variant: str = "mldsa65",
     conf: Optional[Dict[str, Any]] = None, fullchain: bool = False,
     crt_path: Optional[str] = None, key_path: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -312,7 +317,7 @@ def issue_certificate(
     """
     if not common_name or not common_name.strip():
         raise ValueError('Common Name is required')
-    if int(rsa_bits) not in (2048, 3072, 4096):
+    if (key_type or "rsa").lower() == "rsa" and int(rsa_bits) not in (2048, 3072, 4096):
         raise ValueError('RSA bits must be 2048, 3072 or 4096')
     if int(valid_days) <= 0:
         raise ValueError('valid_days must be positive')
@@ -321,9 +326,10 @@ def issue_certificate(
     os.makedirs(cert_dir, exist_ok=True)
     os.makedirs(private_dir, exist_ok=True)
     sans_parsed = _split_sans(sans)
-    cert_obj, _, cert_pem, key_pem = issue_cert_with_new_key(
+    cert_obj, priv, cert_pem, key_pem = issue_cert_with_new_key(
         ca=ca, common_name=common_name.strip(), subject_sans=sans_parsed,
-        key_type='rsa', rsa_key_size=int(rsa_bits),
+        key_type=key_type, rsa_key_size=int(rsa_bits),
+        ec_curve=ec_curve, mldsa_variant=mldsa_variant,
         validity_seconds=int(valid_days) * 86400, key_export_password=None,
     )
     request_id = uuid.uuid4().int
@@ -346,10 +352,23 @@ def issue_certificate(
     with open(final_key, 'wb') as f:
         f.write(key_pem)
     os.chmod(final_key, stat.S_IRUSR | stat.S_IWUSR)
+    if isinstance(priv, rsa.RSAPrivateKey):
+        key_details = {'key_type': 'rsa', 'rsa_bits': priv.key_size}
+    elif isinstance(priv, ec.EllipticCurvePrivateKey):
+        key_details = {'key_type': 'ec', 'ec_curve': priv.curve.name}
+    else:
+        # All ML-DSA variants have distinct concrete private key classes.
+        label = (key_type or '').lower().replace('-', '').replace('_', '')
+        if label in ('mldsa', 'mldsa44', 'mldsa65', 'mldsa87'):
+            selected = label if label != 'mldsa' else mldsa_variant
+            selected = selected.lower().replace('ml-dsa-', 'mldsa').replace('mldsa', '')
+            key_details = {'key_type': 'mldsa', 'mldsa_variant': 'mldsa' + selected}
+        else:
+            key_details = {'key_type': (key_type or '').lower()}
     return {
         'certificate_path': stored_cert, 'key_path': final_key,
         'copied_certificate_path': crt_path, 'serial': format(cert_obj.serial_number, 'x'),
-        'sans': sans_parsed,
+        'sans': sans_parsed, **key_details,
     }
 
 
