@@ -322,7 +322,11 @@ def resign_crl(
 
     builder = _add_aki_if_absent(builder, ca_key)
 
-    algo = _select_algo(hash_name)
+    algo = (
+        _select_algo(hash_name)
+        if isinstance(ca_key, (rsa.RSAPrivateKey, ec.EllipticCurvePrivateKey, dsa.DSAPrivateKey))
+        else None
+    )
     new_crl = builder.sign(private_key=ca_key, algorithm=algo)
     pem_bytes = new_crl.public_bytes(encoding=serialization.Encoding.PEM)
     _write_crl_file(crl_path, pem_bytes)
