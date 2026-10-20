@@ -602,6 +602,23 @@ def _verify_cms_signature_with_cert(cert, signer_info, signed_bytes: bytes):
         pub.verify(signature, signed_bytes)
         return
 
+    if mldsa is not None:
+        mldsa_public_key_oids = (
+            (mldsa.MLDSA44PublicKey, "2.16.840.1.101.3.4.3.17"),
+            (mldsa.MLDSA65PublicKey, "2.16.840.1.101.3.4.3.18"),
+            (mldsa.MLDSA87PublicKey, "2.16.840.1.101.3.4.3.19"),
+        )
+        for key_type, expected_oid in mldsa_public_key_oids:
+            if isinstance(pub, key_type):
+                actual_oid = signer_info["signature_algorithm"]["algorithm"].dotted
+                if actual_oid != expected_oid:
+                    raise ValueError(
+                        f"CMS ML-DSA signature OID mismatch: {actual_oid} (expected {expected_oid})"
+                    )
+                # RFC 9882 uses pure ML-DSA over DER-encoded signed attributes.
+                pub.verify(signature, signed_bytes)
+                return
+
     raise ValueError(f"Unsupported public key type: {type(pub).__name__}")
 
 
@@ -1143,6 +1160,16 @@ def _build_pkiresponse_issued_der(
     return der_encode(resp)
 
 
+def _cms_digest_algorithm_for_ca_key(ca_key):
+    """Use an RFC 9882-compliant CMS digest for ML-DSA signers."""
+    if _mldsa_ca_signature_oid(ca_key):
+        # SHA-512 suits ML-DSA-44, -65 and -87. Omit ASN.1 parameters.
+        return a_cms.DigestAlgorithm({"algorithm": "sha512", "parameters": None})
+
+    # Leave pre-existing algorithms unchanged (RSA/ECDSA/EdDSA).
+    return a_cms.DigestAlgorithm({"algorithm": "sha256"})
+
+
 def build_adcs_bst_pkiresponse_issued(
     child_der: bytes,
     ca_der: bytes,
@@ -1168,10 +1195,11 @@ def build_adcs_bst_pkiresponse_issued(
         }
     )
 
+    cms_digest_algorithm = _cms_digest_algorithm_for_ca_key(ca_key)
     signed_attrs = a_cms.CMSAttributes(
         [
             a_cms.CMSAttribute({"type": "1.2.840.113549.1.9.3", "values": [a_cms.ContentType(OID_ID_CCT_PKI_RESPONSE)]}),
-            a_cms.CMSAttribute({"type": "1.2.840.113549.1.9.4", "values": [hashlib.sha256(pkiresp_der).digest()]}),
+            a_cms.CMSAttribute({"type": "1.2.840.113549.1.9.4", "values": [hashlib.new(cms_digest_algorithm["algorithm"].native, pkiresp_der).digest()]}),
         ]
     )
     to_be_signed = _tbs_signed_attrs(signed_attrs)
@@ -1186,7 +1214,7 @@ def build_adcs_bst_pkiresponse_issued(
                         )
                     }
                 ),
-                "digest_algorithm": a_cms.DigestAlgorithm({"algorithm": "sha256"}),
+                "digest_algorithm": _cms_digest_algorithm_for_ca_key(ca_key),
                 "signed_attrs": signed_attrs,
                 "signature_algorithm": _signature_algo_for_ca_key(ca_key) if ca_key else a_cms.SignedDigestAlgorithm({"algorithm": "sha256_rsa"}),
                 "signature": _sign_tbs_with_ca_key(ca_key, to_be_signed),
@@ -1198,7 +1226,7 @@ def build_adcs_bst_pkiresponse_issued(
     sd = a_cms.SignedData(
         {
             "version": 3,
-            "digest_algorithms": [a_cms.DigestAlgorithm({"algorithm": "sha256"})],
+            "digest_algorithms": [_cms_digest_algorithm_for_ca_key(ca_key)],
             "encap_content_info": encap_content_info,
             "certificates": [leaf_cert, signer_cert],
             "signer_infos": signer_info,
@@ -1247,10 +1275,11 @@ def build_adcs_bst_pkiresponse(
         }
     )
 
+    cms_digest_algorithm = _cms_digest_algorithm_for_ca_key(ca_key)
     signed_attrs = a_cms.CMSAttributes(
         [
             a_cms.CMSAttribute({"type": "1.2.840.113549.1.9.3", "values": [a_cms.ContentType(OID_ID_CCT_PKI_RESPONSE)]}),
-            a_cms.CMSAttribute({"type": "1.2.840.113549.1.9.4", "values": [hashlib.sha256(pkiresp_der).digest()]}),
+            a_cms.CMSAttribute({"type": "1.2.840.113549.1.9.4", "values": [hashlib.new(cms_digest_algorithm["algorithm"].native, pkiresp_der).digest()]}),
         ]
     )
     to_be_signed = _tbs_signed_attrs(signed_attrs)
@@ -1265,7 +1294,7 @@ def build_adcs_bst_pkiresponse(
                     )
                 }
             ),
-            "digest_algorithm": a_cms.DigestAlgorithm({"algorithm": "sha256"}),
+            "digest_algorithm": _cms_digest_algorithm_for_ca_key(ca_key),
             "signed_attrs": signed_attrs,
             "signature_algorithm": _signature_algo_for_ca_key(ca_key) if ca_key else a_cms.SignedDigestAlgorithm({"algorithm": "sha256_rsa"}),
             "signature": b"",
@@ -1281,7 +1310,7 @@ def build_adcs_bst_pkiresponse(
     sd = a_cms.SignedData(
         {
             "version": 3,
-            "digest_algorithms": [a_cms.DigestAlgorithm({"algorithm": "sha256"})],
+            "digest_algorithms": [_cms_digest_algorithm_for_ca_key(ca_key)],
             "encap_content_info": encap_content_info,
             "certificates": [signer_cert],
             "signer_infos": [signer_info],

@@ -214,7 +214,7 @@ def revoke(ca_key, ca_cert: cx509.Certificate, serial, crl_path: str, next_updat
 
     builder = _add_aki_if_absent(builder, ca_key)
 
-    new_crl = builder.sign(private_key=ca_key, algorithm=hashes.SHA256())
+    new_crl = builder.sign(private_key=ca_key, algorithm=_x509_signature_hash_for_key(ca_key))
     pem_bytes = new_crl.public_bytes(encoding=serialization.Encoding.PEM)
     _write_crl_file(crl_path, pem_bytes)
 
@@ -261,7 +261,7 @@ def unrevoke(ca_key, ca_cert: cx509.Certificate, serial, crl_path: str, next_upd
 
     builder = _add_aki_if_absent(builder, ca_key)
 
-    new_crl = builder.sign(private_key=ca_key, algorithm=hashes.SHA256())
+    new_crl = builder.sign(private_key=ca_key, algorithm=_x509_signature_hash_for_key(ca_key))
     pem_bytes = new_crl.public_bytes(encoding=serialization.Encoding.PEM)
     _write_crl_file(crl_path, pem_bytes)
 
@@ -322,11 +322,7 @@ def resign_crl(
 
     builder = _add_aki_if_absent(builder, ca_key)
 
-    algo = (
-        _select_algo(hash_name)
-        if isinstance(ca_key, (rsa.RSAPrivateKey, ec.EllipticCurvePrivateKey, dsa.DSAPrivateKey))
-        else None
-    )
+    algo = _x509_signature_hash_for_key(ca_key, hash_name=hash_name)
     new_crl = builder.sign(private_key=ca_key, algorithm=algo)
     pem_bytes = new_crl.public_bytes(encoding=serialization.Encoding.PEM)
     _write_crl_file(crl_path, pem_bytes)
@@ -461,10 +457,7 @@ def issue_cert_with_new_key(
         if sans:
             builder = builder.add_extension(cx509.SubjectAlternativeName(sans), critical=False)
 
-    if isinstance(ca_key, (ed25519.Ed25519PrivateKey, ed448.Ed448PrivateKey)):
-        cert = builder.sign(private_key=ca_key, algorithm=None)
-    else:
-        cert = builder.sign(private_key=ca_key, algorithm=hashes.SHA256())
+    cert = builder.sign(private_key=ca_key, algorithm=_x509_signature_hash_for_key(ca_key))
 
     cert_pem = cert.public_bytes(encoding=serialization.Encoding.PEM)
 
@@ -1455,11 +1448,12 @@ def _is_mldsa_private_key(key) -> bool:
         ))
     )
 
-def _x509_signature_hash_for_key(key):
-    # Pure EdDSA and ML-DSA signatures do not take an external hash algorithm.
-    if isinstance(key, (ed25519.Ed25519PrivateKey, ed448.Ed448PrivateKey)) or _is_mldsa_private_key(key):
-        return None
-    return hashes.SHA256()
+def _x509_signature_hash_for_key(key, hash_name: str = "sha256"):
+    # Only RSA, ECDSA and DSA take an external hash algorithm.
+    # Ed25519, Ed448 and ML-DSA sign with algorithm=None.
+    if isinstance(key, (rsa.RSAPrivateKey, ec.EllipticCurvePrivateKey, dsa.DSAPrivateKey)):
+        return _select_algo(hash_name)
+    return None
 
 def _private_key_pem_format_for_key(key):
     # OpenSSL's traditional private key format is not available for modern
@@ -1932,7 +1926,7 @@ def create_ket_cert(
         .add_extension(_build_ket_application_policies_ext(), critical=False)
     )
 
-    cert = builder.sign(private_key=ca_key, algorithm=hashes.SHA256())
+    cert = builder.sign(private_key=ca_key, algorithm=_x509_signature_hash_for_key(ca_key))
 
     cert_pem = cert.public_bytes(encoding=serialization.Encoding.PEM)
     key_pem = priv.private_bytes(

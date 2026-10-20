@@ -17,7 +17,12 @@ from adcs_logging import get_logger
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, padding as sym_padding, serialization
-from utils import _signature_algo_for_ca_key, _sign_tbs_with_ca_key, _tbs_signed_attrs
+from utils import (
+    _cms_digest_algorithm_for_ca_key,
+    _signature_algo_for_ca_key,
+    _sign_tbs_with_ca_key,
+    _tbs_signed_attrs,
+)
 from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
@@ -1556,10 +1561,12 @@ def _sign_cmc_pki_response_python(
         except Exception:
             pass
 
+    cms_digest_algorithm = _cms_digest_algorithm_for_ca_key(signer_key_obj)
+    digest_name = cms_digest_algorithm["algorithm"].native
     signed_attrs = a_cms.CMSAttributes(
         [
             a_cms.CMSAttribute({"type": "1.2.840.113549.1.9.3", "values": [a_cms.ContentType(OID_ID_CCT_PKI_RESPONSE)]}),
-            a_cms.CMSAttribute({"type": "1.2.840.113549.1.9.4", "values": [hashlib.sha256(pki_response_der).digest()]}),
+            a_cms.CMSAttribute({"type": "1.2.840.113549.1.9.4", "values": [hashlib.new(digest_name, pki_response_der).digest()]}),
         ]
     )
 
@@ -1582,7 +1589,7 @@ def _sign_cmc_pki_response_python(
                         )
                     }
                 ),
-                "digest_algorithm": a_cms.DigestAlgorithm({"algorithm": "sha256", "parameters": a_core.Null()}),
+                "digest_algorithm": _cms_digest_algorithm_for_ca_key(signer_key_obj),
                 "signed_attrs": signed_attrs,
                 "signature_algorithm": sig_alg_asn1,
                 "signature": signature,
@@ -1593,7 +1600,7 @@ def _sign_cmc_pki_response_python(
     signed_data = a_cms.SignedData(
         {
             "version": "v3",
-            "digest_algorithms": [a_cms.DigestAlgorithm({"algorithm": "sha256", "parameters": a_core.Null()})],
+            "digest_algorithms": [_cms_digest_algorithm_for_ca_key(signer_key_obj)],
             "encap_content_info": {"content_type": OID_ID_CCT_PKI_RESPONSE, "content": a_cms.ParsableOctetString(pki_response_der)},
             "certificates": OrderedCertificateSet(cert_choices),
             "signer_infos": signer_info,
