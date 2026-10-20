@@ -202,6 +202,11 @@ adcs-tool ca create --cn "CA Root ECC Test" --key-type ec --ec-curve secp384r1 -
 
 Supported ECC curves are `secp256r1`, `secp384r1`, and `secp521r1`. Aliases such as `prime256v1`, `p-256`, `p-384`, and `p-521` are also accepted.
 
+Or ML-DSA (require cryptography 49.0.0) :
+
+```
+adcs-tool ca create --cn "CA Root MLDSA"  --key-type mldsa --mldsa-variant ml-dsa-87 --aia-crl-base-url "http://testadcs.mydomain.lan"
+```
 
 > A **KET certificate** (**Key Exchange Token**) is a special certificate used to protect the **exchange of encrypted enrollment data** between the client and the server in Microsoft ADCS workflows, for example for **TPM attestation**.
 
