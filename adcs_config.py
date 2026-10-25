@@ -383,6 +383,9 @@ def load_yaml_conf(path="adcs.yaml", bypass_read_only=False):
     conf['auth_kerberos'] = True
     conf['auth_tls'] = False
     conf['auth_username_password'] = False
+    conf['kerberos_hostname'] = None
+    conf['kerberos_cbt_mode'] = 'off'  # off | monitor | enforce
+    conf['kerberos_cbt_cert_path'] = "/etc/nginx/crt.pem"
 
     for adecl in (cfg.get("auth") or []):
 
@@ -395,12 +398,43 @@ def load_yaml_conf(path="adcs.yaml", bypass_read_only=False):
         if adecl.get("username_password") is not None:
             conf['auth_username_password'] = bool(adecl["username_password"])
 
+        if 'kerberos_hostname' in adecl:
+            hostname = adecl['kerberos_hostname']
+            if not isinstance(hostname, str) or not hostname.strip():
+                raise ValueError("auth.kerberos_hostname must be a non-empty DNS name")
+            hostname = hostname.strip().lower()
+            if any(c in hostname for c in ('/', ':', '@', ' ', '\t', '\n')):
+                raise ValueError("auth.kerberos_hostname must be a hostname (no scheme, port, or realm)")
+            conf['kerberos_hostname'] = hostname
+
+        if 'kerberos_cbt_mode' in adecl:
+            mode = adecl['kerberos_cbt_mode']
+            if not isinstance(mode, str) or mode.strip().lower() not in {'off', 'monitor', 'enforce'}:
+                raise ValueError("auth.kerberos_cbt_mode must be off, monitor, or enforce")
+            conf['kerberos_cbt_mode'] = mode.strip().lower()
+
+        if 'kerberos_cbt_cert_path' in adecl:
+            conf['kerberos_cbt_cert_path'] = adecl['kerberos_cbt_cert_path']
+
         cb = adecl.get("callback") or {}
         cb_path = cb.get("path")
         if not cb_path :
             continue
         cb_func = cb.get("func",'check_auth')
         conf["auth_callbacks"] = {"path": cb_path, "func": cb_func}
+
+    # Fail startup if the configured TLS endpoint cannot be bound reliably.
+    # Never derive CBT values from HTTP headers; they are client controlled.
+    if conf['kerberos_cbt_mode'] != 'off':
+        if not conf['auth_kerberos']:
+            raise ValueError("Kerberos CBT enabled but Kerberos authentication disabled")
+        if not conf['kerberos_hostname']:
+            raise ValueError("auth.kerberos_hostname is required when CBT is enabled")
+        cert_path = conf['kerberos_cbt_cert_path']
+        if not isinstance(cert_path, str) or not os.path.isabs(cert_path):
+            raise ValueError("auth.kerberos_cbt_cert_path must be an absolute certificate path")
+        from kerberos_cbt import tls_server_end_point_application_data
+        conf['kerberos_cbt_app_data'] = tls_server_end_point_application_data(cert_path)
 
     # Global fallbacks for storage
     conf["path_cert_fallback"] = storage_paths_global.get("cert_dir", "/tmp/certs")

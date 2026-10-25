@@ -133,10 +133,13 @@ def kerberos_authenticate(auth_header):
             name=service_name,
             usage="accept",
         )
-        context = gssapi.SecurityContext(
-            creds=server_creds,
-            usage="accept",
-        )
+        cbt_mode = conf.get("kerberos_cbt_mode", "off")
+        context_kwargs = {"creds": server_creds, "usage": "accept"}
+        if cbt_mode != "off":
+            context_kwargs["channel_bindings"] = gssapi.raw.ChannelBindings(
+                application_data=conf["kerberos_cbt_app_data"],
+            )
+        context = gssapi.SecurityContext(**context_kwargs)
 
         response_token_raw = context.step(token)
 
@@ -153,6 +156,26 @@ def kerberos_authenticate(auth_header):
         # Only accept a completed Kerberos mechanism (never NTLM or another GSS mechanism).
         if context.mech != gssapi.MechType.kerberos:
             return None, response_token
+
+        if cbt_mode != "off":
+            # GSSAPI can accept a client which sent NO channel bindings.
+            # Only the channel_bound return flag proves a successful match.
+            bound = gssapi.RequirementFlag.channel_bound in context.actual_flags
+            if bound:
+                log_event(
+                    logger, logging.DEBUG, "kerberos_cbt_valid",
+                    "Kerberos channel binding verified", outcome="success",
+                    mode=cbt_mode,
+                )
+            else:
+                log_event(
+                    logger, logging.WARNING, "kerberos_cbt_missing",
+                    "Kerberos authentication has no matching channel binding",
+                    outcome="failure" if cbt_mode == "enforce" else "observed",
+                    mode=cbt_mode,
+                )
+                if cbt_mode == "enforce":
+                    return None, None
 
         initiator_name = context.initiator_name
 
