@@ -1796,22 +1796,26 @@ def search_user_ldap3(
 
     No TLS; lazy import keeps the legacy Samba path independent of gssapi.
     """
-    from ldap3_auth import find_user
+    from ldap3_auth import InvalidKerberosCredentials, find_user
 
-    return find_user(
-        userauth=userauth,
-        ldap_filter=ldap_filter,
-        dc_fqdn=dc_fqdn,
-        basedn=basedn,
-        password=password,
-        bind_user=bind_user,
-        dc_cache_ttl_seconds=dc_cache_ttl_seconds,
-        realm=realm,
-        keytab=keytab,
-        attributes=attributes,
-        timeout=timeout,
-        get_dc_fqdn=get_dc_fqdn,
-    )
+    try:
+        return find_user(
+            userauth=userauth,
+            ldap_filter=ldap_filter,
+            dc_fqdn=dc_fqdn,
+            basedn=basedn,
+            password=password,
+            bind_user=bind_user,
+            dc_cache_ttl_seconds=dc_cache_ttl_seconds,
+            realm=realm,
+            keytab=keytab,
+            attributes=attributes,
+            timeout=timeout,
+            get_dc_fqdn=get_dc_fqdn,
+        )
+    except InvalidKerberosCredentials:
+        # The caller's auth callback treats None as unsuccessful login (401).
+        return None
 
 
 # -----------------------------------------------------------------------------

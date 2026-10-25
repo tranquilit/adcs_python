@@ -26,6 +26,33 @@ log = logging.getLogger(__name__)
 DOMAIN_SCOPE_OID = "1.2.840.113556.1.4.1339"
 
 
+class InvalidKerberosCredentials(Exception):
+    """Explicit username/password credentials were rejected by the KDC."""
+
+
+# MIT krb5 minor status codes, normalized to signed 32-bit integers.
+# Do not include KDC_UNREACH, DNS failures or LDAP/GSSAPI bind errors:
+# those are infrastructure errors, not a bad password.
+_KRB5_CREDENTIAL_REJECTION_CODES = frozenset({
+    -1765328383,  # KRB5KDC_ERR_NAME_EXP (account expired)
+    -1765328378,  # KRB5KDC_ERR_C_PRINCIPAL_UNKNOWN
+    -1765328366,  # KRB5KDC_ERR_CLIENT_REVOKED (disabled/locked)
+    -1765328363,  # KRB5KDC_ERR_CLIENT_NOTYET
+    -1765328361,  # KRB5KDC_ERR_KEY_EXP (password expired)
+    -1765328360,  # KRB5KDC_ERR_PREAUTH_FAILED
+    -1765328353,  # KRB5KRB_AP_ERR_BAD_INTEGRITY (wrong AS reply key)
+    -1765328253,  # KRB5_LIBOS_BADPWDMATCH (password mismatch)
+    -1765328174,  # KRB5_PREAUTH_FAILED (generic preauth failure)
+})
+
+
+def _is_credential_rejection(error: gssapi.exceptions.GSSError) -> bool:
+    """Recognize KDC credential rejection without parsing localized messages."""
+    minor = int(error.min_code) & 0xFFFFFFFF
+    if minor >= 0x80000000:
+        minor -= 0x100000000
+    return minor in _KRB5_CREDENTIAL_REJECTION_CODES
+
 
 def _dns_name(name: str, field: str) -> str:
     """Accept only DNS names, never LDAP URLs, IP addresses or short names."""
@@ -147,12 +174,19 @@ def _kerberos_credentials(userauth, realm, password, bind_user, keytab):
         if not isinstance(password, str) or not password:
             raise ValueError("password must be a nonempty string")
         name = _principal(bind_user if bind_user is not None else userauth, realm)
-        result = gssapi.raw.acquire_cred_with_password(
-            name=name,
-            password=password.encode("utf-8"),
-            mechs=[gssapi.MechType.kerberos],
-            usage="initiate",
-        )
+        try:
+            result = gssapi.raw.acquire_cred_with_password(
+                name=name,
+                password=password.encode("utf-8"),
+                mechs=[gssapi.MechType.kerberos],
+                usage="initiate",
+            )
+        except gssapi.exceptions.GSSError as exc:
+            # Only classify an explicit password's KDC rejection here.
+            # Errors later in the LDAP/GSSAPI connection remain exceptions.
+            if _is_credential_rejection(exc):
+                raise InvalidKerberosCredentials from None
+            raise
         yield result.creds
         return
 
