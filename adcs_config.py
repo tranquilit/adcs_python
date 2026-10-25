@@ -428,8 +428,6 @@ def load_yaml_conf(path="adcs.yaml", bypass_read_only=False):
     if conf['kerberos_cbt_mode'] != 'off':
         if not conf['auth_kerberos']:
             raise ValueError("Kerberos CBT enabled but Kerberos authentication disabled")
-        if not conf['kerberos_hostname']:
-            raise ValueError("auth.kerberos_hostname is required when CBT is enabled")
         cert_path = conf['kerberos_cbt_cert_path']
         if not isinstance(cert_path, str) or not os.path.isabs(cert_path):
             raise ValueError("auth.kerberos_cbt_cert_path must be an absolute certificate path")
