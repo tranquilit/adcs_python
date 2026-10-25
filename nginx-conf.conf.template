@@ -3,11 +3,13 @@ log_format combined_ssl '$remote_addr $ssl_client_s_dn $ssl_client_verify $remot
                     '"$http_referer" "$http_user_agent"';
 
 
+
 server {
     listen 80;
     listen [::]:80;
 
     access_log "/var/log/nginx/access.log" combined_ssl;
+    client_header_timeout 10s;
 
     location /crl {
         root /var/lib/adcs/pki;
@@ -32,6 +34,7 @@ server {
 
     
     access_log "/var/log/nginx/access.log" combined_ssl;
+    client_header_timeout 10s;
 
 
     ssl_certificate             "/etc/nginx/crt.pem";
@@ -68,13 +71,14 @@ server {
 
 	server_tokens off;
 
-    client_body_timeout 1800;
+    client_body_timeout 30s;
+    client_max_body_size 2m;
     
     large_client_header_buffers 4 16k;
     proxy_headers_hash_max_size 1024;
     proxy_headers_hash_bucket_size 128;    
 
-    proxy_request_buffering off;
+    proxy_request_buffering on;
 
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP  $remote_addr;
