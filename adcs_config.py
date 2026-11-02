@@ -384,7 +384,7 @@ def load_yaml_conf(path="adcs.yaml", bypass_read_only=False):
     conf['auth_tls'] = False
     conf['auth_username_password'] = False
     conf['kerberos_hostname'] = None
-    conf['kerberos_cbt_mode'] = 'off'  # off | monitor | enforce
+    conf['kerberos_cbt_mode'] = 'enforce'  # off | monitor | enforce
     conf['kerberos_cbt_cert_path'] = "/etc/nginx/crt.pem"
 
     for adecl in (cfg.get("auth") or []):
