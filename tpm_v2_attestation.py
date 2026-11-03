@@ -51,6 +51,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import os
 import struct
 from dataclasses import dataclass
@@ -437,6 +438,50 @@ def parse_wrapped_key_blob(blob: bytes) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# Optional server-side diagnosis (off by default)
+# --------------------------------------------------------------------------- #
+
+def _dump_wrapped_blob_if_requested(blob: bytes, container_name: str) -> None:
+    """Write a complete wrapped blob for a controlled interoperability test.
+
+    This is OFF unless ADCS_TPM_V2_DEBUG_DIR is configured.  A challenge is
+    normally disclosed to the requesting client, but the binary still merits
+    protection: an attacker could collect and replay it while the request is
+    pending.  Never log the plaintext HMAC key or the server state.
+    """
+    directory = os.environ.get("ADCS_TPM_V2_DEBUG_DIR", "").strip()
+    if not directory:
+        return
+
+    # Use a random name; do not place a client-controlled container name or
+    # request identifier in a filesystem path.
+    debug_dir = os.path.abspath(directory)
+    os.makedirs(debug_dir, mode=0o700, exist_ok=True)
+    if not os.path.isdir(debug_dir):
+        raise V2AttestationError("TPM V2 debug path is not a directory")
+    token = os.urandom(12).hex()
+    filename = f"tpmv2-{token}.bin"
+    path = os.path.join(debug_dir, filename)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    with os.fdopen(os.open(path, flags, 0o600), "wb") as output:
+        output.write(blob)
+
+    # Metadata intentionally excludes the secret, nonce, and the key bytes.
+    meta = {
+        "blob_filename": filename,
+        "sha256": hashlib.sha256(blob).hexdigest(),
+        "blob_size": len(blob),
+        "container_prefix_ok": container_name.startswith("V2AIK-"),
+        "wrapped_key_format": "PCP_KEY_BLOB_WIN8 (experimental)",
+    }
+    meta_path = os.path.join(debug_dir, f"tpmv2-{token}.json")
+    with os.fdopen(os.open(meta_path, flags, 0o600), "w", encoding="utf-8") as output:
+        json.dump(meta, output, indent=2, sort_keys=True)
+        output.write("\n")
+
+# --------------------------------------------------------------------------- #
 # Challenge generation (MS-WCCE 3.2.2.6.2.1.2.7)
 # --------------------------------------------------------------------------- #
 
@@ -497,6 +542,14 @@ def create_v2_challenge(*, ek_pub, aik_spki_der: bytes, container_name: str) -> 
     nonce = os.urandom(NONCE_SIZE)
     wrapped = wrap_restricted_hmac_key_to_ek(ek_pub, hmac_key)
     blob = build_wrapped_key_blob(wrapped)
+    # Fail on a malformed locally-generated envelope rather than send it to
+    # Windows, where it would produce an opaque NTE_NOT_SUPPORTED error.
+    parsed = parse_wrapped_key_blob(blob)
+    if (parsed["public"] != wrapped.public
+            or parsed["private"] != wrapped.duplicate
+            or parsed["encrypted_secret"] != wrapped.in_sym_seed):
+        raise V2AttestationError("TPM V2 blob did not round-trip canonically")
+    _dump_wrapped_blob_if_requested(blob, container_name)
     ek_algorithm, ek_parameter = ek_challenge_algorithm_attributes(ek_pub)
     return V2Challenge(
         challenge_der=build_v2_challenge_attributes(
