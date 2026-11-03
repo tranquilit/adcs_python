@@ -27,10 +27,12 @@ Interoperability notes (things Microsoft documents as CSP specific or leaves
 open; each one is isolated in a small function/constant so it is easy to adapt
 after a real Windows exchange):
 
-* The wrapped key carried in szOID_ENROLL_ATTESTATION_CHALLENGE uses the
-  "BKWT" container confirmed by Microsoft (28-byte little-endian header +
-  TPM2B_ENCRYPTED_SECRET + TPM2B_PRIVATE + TPM2B_PUBLIC).  The size fields are
-  written as the size of the whole TPM2B structure (2-byte size included).
+* The TPM 2.0 wrapped key is carried as a PCP_KEY_BLOB_WIN8 opaque key blob,
+  following the publicly documented Microsoft PCP BCRYPT_OPAQUE_KEY_BLOB
+  layout (52-byte little-endian header and TPM2B_PUBLIC, TPM2B_PRIVATE,
+  TPM2B_ENCRYPTED_SECRET in that order). The format specifically used by
+  Microsoft's V2 challenge client remains provider-specific and must be
+  validated with a Windows interoperability test.
 * The V2 challenge is a DER CRYPT_ATTRIBUTES, encoded as SET OF Attribute
   (PKCS_ATTRIBUTES).  Switch ``CRYPT_ATTRIBUTES_OUTER_TAG`` to 0x30 if a client
   ever turns out to expect SEQUENCE OF.
@@ -89,11 +91,13 @@ RESTRICTED_HMAC_OBJECT_ATTRIBUTES = (
     | tpm_mod.TPMA_OBJECT_NODA
 )
 
-# "BKWT" wrapped-key container (Microsoft, szOID_ENROLL_ATTESTATION_CHALLENGE).
-WRAPPED_KEY_MAGIC = b"BKWT"  # bytes 42 4B 57 54, i.e. the little-endian tag 'TWKB'
-WRAPPED_KEY_VERSION = 1
+# PCP_KEY_BLOB_WIN8 for BCRYPT_OPAQUE_KEY_BLOB in the Microsoft Platform
+# Crypto Provider. BCRYPT_PCP_KEY_MAGIC is the integer 0x4D504350 ('MPCP'
+# as a C multi-character constant): little-endian bytes are b'PCPM'.
+WRAPPED_KEY_MAGIC_INT = 0x4D504350
+WRAPPED_KEY_MAGIC = struct.pack("<I", WRAPPED_KEY_MAGIC_INT)
 WRAPPED_KEY_PLATFORM_TPM20 = 2
-WRAPPED_KEY_HEADER_SIZE = 28
+WRAPPED_KEY_HEADER_SIZE = 52  # 13 little-endian UINT32 values
 
 # PKCS_ATTRIBUTES: "Attributes ::= SET OF Attribute".
 CRYPT_ATTRIBUTES_OUTER_TAG = 0x31
@@ -370,42 +374,66 @@ def wrap_restricted_hmac_key_to_ek(
 
 
 def build_wrapped_key_blob(wrapped: WrappedHmacKey) -> bytes:
-    """Build the Microsoft "BKWT" value of szOID_ENROLL_ATTESTATION_CHALLENGE."""
-    encrypted_secret = _tpm2b(wrapped.in_sym_seed)
-    private = _tpm2b(wrapped.duplicate)
+    """Build a PCP_KEY_BLOB_WIN8 TPM 2.0 opaque import blob.
+
+    This is the documented Microsoft Platform Crypto Provider key-blob
+    layout. Data regions follow the header's declared order, not the order
+    used by the previous proprietary BKWT guess.
+    """
     public = _tpm2b(wrapped.public)
-    header = WRAPPED_KEY_MAGIC + struct.pack(
-        "<6I",
-        WRAPPED_KEY_VERSION,
-        WRAPPED_KEY_PLATFORM_TPM20,
+    private = _tpm2b(wrapped.duplicate)
+    encrypted_secret = _tpm2b(wrapped.in_sym_seed)
+    header = struct.pack(
+        "<13I",
+        WRAPPED_KEY_MAGIC_INT,
         WRAPPED_KEY_HEADER_SIZE,
-        len(encrypted_secret),
-        len(private),
-        len(public),
+        WRAPPED_KEY_PLATFORM_TPM20,
+        0,  # flags: no authorization value
+        len(public),           # cbPublic
+        len(private),          # cbPrivate
+        0,  # cbMigrationPublic
+        0,  # cbMigrationPrivate
+        0,  # cbPolicyDigestList
+        0,  # cbPCRBinding
+        0,  # cbPCRDigest
+        len(encrypted_secret), # cbEncryptedSecret
+        0,  # cbTpm12HostageBlob
     )
-    return header + encrypted_secret + private + public
+    assert len(header) == WRAPPED_KEY_HEADER_SIZE
+    return header + public + private + encrypted_secret
 
 
 def parse_wrapped_key_blob(blob: bytes) -> dict:
-    """Parse a BKWT blob (diagnostics and tests)."""
-    if len(blob) < WRAPPED_KEY_HEADER_SIZE or blob[:4] != WRAPPED_KEY_MAGIC:
-        raise V2AttestationError("Not a BKWT wrapped key blob")
-    version, platform, header_size, cb_secret, cb_private, cb_public = struct.unpack_from("<6I", blob, 4)
-    if (version, platform, header_size) != (
-        WRAPPED_KEY_VERSION, WRAPPED_KEY_PLATFORM_TPM20, WRAPPED_KEY_HEADER_SIZE
-    ):
-        raise V2AttestationError("Unexpected BKWT header values")
-    if header_size + cb_secret + cb_private + cb_public != len(blob):
-        raise V2AttestationError("BKWT sizes do not match the blob length")
-    areas = []
-    pos = header_size
-    for size in (cb_secret, cb_private, cb_public):
-        area = blob[pos:pos + size]
-        if len(area) < 2 or struct.unpack(">H", area[:2])[0] != len(area) - 2:
-            raise V2AttestationError("BKWT area is not a canonical TPM2B")
-        areas.append(area[2:])
-        pos += size
-    return {"encrypted_secret": areas[0], "private": areas[1], "public": areas[2]}
+    """Strictly parse the PCP_KEY_BLOB_WIN8 subset produced above."""
+    if len(blob) < WRAPPED_KEY_HEADER_SIZE:
+        raise V2AttestationError("Truncated PCP_KEY_BLOB_WIN8 header")
+    (
+        magic, header_size, platform, flags, cb_public, cb_private,
+        cb_migration_public, cb_migration_private, cb_policy,
+        cb_pcr_binding, cb_pcr_digest, cb_secret, cb_hostage,
+    ) = struct.unpack_from("<13I", blob, 0)
+    if magic != WRAPPED_KEY_MAGIC_INT or platform != WRAPPED_KEY_PLATFORM_TPM20:
+        raise V2AttestationError("Invalid PCP magic or TPM platform")
+    if header_size != WRAPPED_KEY_HEADER_SIZE or flags != 0:
+        raise V2AttestationError("Unsupported PCP header size or flags")
+    if any((cb_migration_public, cb_migration_private, cb_policy,
+            cb_pcr_binding, cb_pcr_digest, cb_hostage)):
+        raise V2AttestationError("Unexpected optional PCP key blob sections")
+    if not cb_public or not cb_private or not cb_secret:
+        raise V2AttestationError("Missing PCP key blob section")
+    if header_size + cb_public + cb_private + cb_secret != len(blob):
+        raise V2AttestationError("PCP section sizes do not match the blob length")
+
+    result = {}
+    offset = header_size
+    for label, length in (("public", cb_public), ("private", cb_private),
+                          ("encrypted_secret", cb_secret)):
+        area = blob[offset:offset + length]
+        if len(area) < 2 or struct.unpack_from(">H", area)[0] != len(area) - 2:
+            raise V2AttestationError(f"Noncanonical {label} TPM2B section")
+        result[label] = area[2:]
+        offset += length
+    return result
 
 
 # --------------------------------------------------------------------------- #
