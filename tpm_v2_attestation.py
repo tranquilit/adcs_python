@@ -428,6 +428,10 @@ def validate_container_name(container_name: Optional[str]) -> str:
         raise V2AttestationError("szOID_ENROLL_V2_CONTAINER_NAME is too long")
     if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in container_name):
         raise V2AttestationError("szOID_ENROLL_V2_CONTAINER_NAME contains control characters")
+    if not container_name.startswith("V2AIK-"):
+        raise V2AttestationError(
+            f"Invalid V2 AIK container name: {container_name!r}"
+        )
     return container_name
 
 

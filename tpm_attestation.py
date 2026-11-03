@@ -502,27 +502,82 @@ def _check_key_policy(
 
 
 def _decode_any_string(value) -> Optional[str]:
+    """Decode a Microsoft enrollment attribute without treating DER tags as text.
+
+    Windows may send a directly encoded ASN.1 string, a single-value SET OF
+    (sometimes nested), or an OCTET STRING containing a UTF-16 string.
+    """
+    if value is None:
+        return None
+
     try:
         native = getattr(value, "native", None)
         if isinstance(native, str):
-            return native
-    except Exception:
+            return native.rstrip("\x00").strip()
+    except (TypeError, ValueError):
         pass
+
     try:
         data = value.dump() if hasattr(value, "dump") else bytes(value)
-    except Exception:
+    except (TypeError, ValueError):
         return None
-    for typ in (a_core.BMPString, a_core.UTF8String, a_core.PrintableString, a_core.TeletexString):
+
+    # A SET OF wrapper (tag 0x31) is not part of a UTF-16 string.  Decode
+    # its single ASN.1 value instead of passing the DER header to .decode().
+    class _AnySet(a_core.SetOf):
+        _child_spec = a_core.Any
+
+    for _ in range(3):
+        if not data or data[0] != 0x31:
+            break
         try:
-            return typ.load(data).native
-        except Exception:
-            pass
-    for encoding in ("utf-16-le", "utf-16-be", "utf-8", "latin1"):
+            values = _AnySet.load(data, strict=True)
+            if len(values) != 1:
+                return None
+            data = values[0].dump()
+        except (TypeError, ValueError):
+            return None
+
+    for typ in (
+        a_core.BMPString,
+        a_core.UTF8String,
+        a_core.PrintableString,
+        a_core.TeletexString,
+        a_core.IA5String,
+    ):
         try:
-            return data.decode(encoding).rstrip("\x00")
-        except Exception:
+            parsed = typ.load(data, strict=True).native
+            if isinstance(parsed, str):
+                return parsed.rstrip("\x00").strip()
+        except (TypeError, ValueError, UnicodeDecodeError):
             pass
-    return None
+
+    # Some clients encode the value as OCTET STRING, with UTF-16LE/BE content.
+    try:
+        payload = a_core.OctetString.load(data, strict=True).native
+    except (TypeError, ValueError):
+        return None
+
+    if not isinstance(payload, bytes) or not payload:
+        return None
+
+    if payload.startswith(b"\xff\xfe"):
+        payload, encoding = payload[2:], "utf-16-le"
+    elif payload.startswith(b"\xfe\xff"):
+        payload, encoding = payload[2:], "utf-16-be"
+    elif (len(payload) % 2 == 0 and
+          payload[1::2].count(0) > len(payload) // 8):
+        encoding = "utf-16-le"
+    elif (len(payload) % 2 == 0 and
+          payload[0::2].count(0) > len(payload) // 8):
+        encoding = "utf-16-be"
+    else:
+        encoding = "utf-8"
+
+    try:
+        return payload.decode(encoding).rstrip("\x00").strip()
+    except UnicodeDecodeError:
+        return None
 
 
 def _load_private_key_from_pem(value, password=None):
