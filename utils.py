@@ -2,10 +2,12 @@
 # -*- coding: utf-8 -*-
 
 import base64
+from collections.abc import Mapping
 import hashlib
 import re
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional, Union
+from urllib.parse import unquote
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 
@@ -26,29 +28,45 @@ from cryptography.hazmat.primitives.asymmetric import (
     ed448,
 )
 
+import smtplib
+import ssl
+import time
+import logging
+import random
+import struct
+from contextlib import suppress
+from threading import Lock
+from email.message import EmailMessage
+from email.utils import formataddr
+
 try:
     from cryptography.hazmat.primitives.asymmetric import mldsa
 except ImportError:  # cryptography versions without ML-DSA support
     mldsa = None
 from cryptography.x509.oid import ObjectIdentifier as CObjectIdentifier
+from utils_crt import is_certificate_revoked_by_crl
 
-# Samba / AD lookup (used only by search_user).  Keep it optional so the
-# protocol codecs and unit tests can run on hosts where python3-samba is not
-# installed; search_user still fails explicitly when invoked.
+# Samba is optional: only the legacy search_user() uses it.
 try:
     from samba.credentials import Credentials
     from samba.param import LoadParm
     from samba.samdb import SamDB
-    from samba.net import Net
-    from samba.dcerpc import nbt
-except ImportError:  # pragma: no cover - depends on deployment packages
-    Credentials = LoadParm = SamDB = Net = nbt = None
+except ImportError:
+    Credentials = LoadParm = SamDB = None
 
 # pyasn1 for minimal CMC/PKIResponse structures
 from pyasn1.type import univ, namedtype, namedval, char, useful, constraint
 from pyasn1.codec.der.encoder import encode as der_encode
 
-
+# DC discovery: DNS SRV + Netlogon LDAP Ping (TCP/389).
+import dns.exception
+import dns.name
+import dns.resolver
+from dns.rdtypes.IN.SRV import SRV
+from ldap3 import BASE, NONE, Connection, Server
+from ldap3.core.exceptions import LDAPException
+from ldap3.utils.conv import escape_filter_chars
+import gssapi
 # -----------------------------------------------------------------------------
 # Useful OIDs
 # -----------------------------------------------------------------------------
@@ -534,7 +552,7 @@ def _verify_cms_signature_with_cert(cert, signer_info, signed_bytes: bytes):
             return
 
         if sig_algo == "rsassa_pss":
-            # Parametres PSS eventuellement presents
+            # Optional PSS parameters may be present
             params = signer_info["signature_algorithm"]["parameters"]
             if params is not None and params.native:
                 pss = params.native
@@ -583,6 +601,23 @@ def _verify_cms_signature_with_cert(cert, signer_info, signed_bytes: bytes):
     if isinstance(pub, ed448.Ed448PublicKey):
         pub.verify(signature, signed_bytes)
         return
+
+    if mldsa is not None:
+        mldsa_public_key_oids = (
+            (mldsa.MLDSA44PublicKey, "2.16.840.1.101.3.4.3.17"),
+            (mldsa.MLDSA65PublicKey, "2.16.840.1.101.3.4.3.18"),
+            (mldsa.MLDSA87PublicKey, "2.16.840.1.101.3.4.3.19"),
+        )
+        for key_type, expected_oid in mldsa_public_key_oids:
+            if isinstance(pub, key_type):
+                actual_oid = signer_info["signature_algorithm"]["algorithm"].dotted
+                if actual_oid != expected_oid:
+                    raise ValueError(
+                        f"CMS ML-DSA signature OID mismatch: {actual_oid} (expected {expected_oid})"
+                    )
+                # RFC 9882 uses pure ML-DSA over DER-encoded signed attributes.
+                pub.verify(signature, signed_bytes)
+                return
 
     raise ValueError(f"Unsupported public key type: {type(pub).__name__}")
 
@@ -652,7 +687,7 @@ def _verify_signer_info(sd, signer_info):
                 result["errors"].append("messageDigest attribute does not match encapsulated content")
                 return result
 
-            # En CMS, la signature porte sur le SET OF des signedAttrs
+            # In CMS, the signature covers the SET OF signedAttrs
             signed_bytes = _tbs_signed_attrs(signed_attrs)
         else:
             signed_bytes = content
@@ -790,55 +825,63 @@ class CSRValidationError(ValueError):
 def validate_csr(csr_obj: cx509.CertificateSigningRequest) -> None:
     """
     Validate a CSR:
-      - explicit signature verification (RSASSA-PKCS1v1_5, ECDSA, or EdDSA)
-      - acceptable public key (RSA>=2048 & e>=65537 odd; EC P-256/384/521; Ed25519/Ed448 ok)
+      - verify its signature (RSA, ECDSA, Ed25519/Ed448, ML-DSA-44/65/87)
+      - allow only supported public key types
+      - enforce RSA >= 2048 bits with an odd exponent >= 65537
+      - restrict EC keys to P-256, P-384, or P-521
     Raise CSRValidationError if invalid.
     """
-    pub = csr_obj.public_key()
-
-    # 1) Explicit signature verification
     try:
-        if isinstance(pub, rsa.RSAPublicKey):
-            hash_algo = csr_obj.signature_hash_algorithm
-            pub.verify(
-                csr_obj.signature,
-                csr_obj.tbs_certrequest_bytes,
-                padding.PKCS1v15(),
-                hash_algo,
-            )
-        elif isinstance(pub, ec.EllipticCurvePublicKey):
-            hash_algo = csr_obj.signature_hash_algorithm
-            pub.verify(
-                csr_obj.signature,
-                csr_obj.tbs_certrequest_bytes,
-                ec.ECDSA(hash_algo),
-            )
-        elif isinstance(pub, ed25519.Ed25519PublicKey):
-            pub.verify(csr_obj.signature, csr_obj.tbs_certrequest_bytes)
-        elif isinstance(pub, ed448.Ed448PublicKey):
-            pub.verify(csr_obj.signature, csr_obj.tbs_certrequest_bytes)
-        else:
-            raise CSRValidationError("Unsupported public key type (only RSA, ECDSA, Ed25519, Ed448)")
-    except Exception as e:
-        raise CSRValidationError(f"CSR signature verification failed: {e}")
+        pub = csr_obj.public_key()
+    except Exception as exc:
+        raise CSRValidationError(f"Unable to read CSR public key: {exc}") from exc
 
-    # 2) Public key constraints
+    allowed_types = (
+        rsa.RSAPublicKey,
+        ec.EllipticCurvePublicKey,
+        ed25519.Ed25519PublicKey,
+        ed448.Ed448PublicKey,
+    )
+    if mldsa is not None:
+        allowed_types += (
+            mldsa.MLDSA44PublicKey,
+            mldsa.MLDSA65PublicKey,
+            mldsa.MLDSA87PublicKey,
+        )
+
+    if not isinstance(pub, allowed_types):
+        raise CSRValidationError(
+            f"Unsupported CSR public key type: {type(pub).__name__}"
+        )
+
+    # cryptography verifies the CSR signature with the appropriate algorithm,
+    # including ML-DSA, without a separate signature_hash_algorithm or padding.
+    try:
+        valid_signature = csr_obj.is_signature_valid
+    except Exception as exc:
+        raise CSRValidationError(f"CSR signature verification failed: {exc}") from exc
+    if not valid_signature:
+        raise CSRValidationError("CSR signature verification failed: invalid signature")
+
+    # Public key constraints
     if isinstance(pub, rsa.RSAPublicKey):
         key_size = pub.key_size
         if key_size < 2048:
             raise CSRValidationError(f"RSA key too small: {key_size} bits (min 2048)")
         try:
             e = pub.public_numbers().e
-            if e < 65537 or e % 2 == 0:
-                raise CSRValidationError(f"RSA public exponent not acceptable: {e} (must be odd >= 65537)")
-        except Exception:
-            raise CSRValidationError("Unable to read RSA public exponent")
+        except Exception as exc:
+            raise CSRValidationError("Unable to read RSA public exponent") from exc
+        if e < 65537 or e % 2 == 0:
+            raise CSRValidationError(
+                f"RSA public exponent not acceptable: {e} (must be odd >= 65537)"
+            )
     elif isinstance(pub, ec.EllipticCurvePublicKey):
         curve = getattr(pub.curve, "name", str(pub.curve)).lower()
         allowed = {"secp256r1", "prime256v1", "secp384r1", "secp521r1"}
         if curve not in allowed:
             raise CSRValidationError(f"EC curve not allowed: {curve} (allowed: P-256/384/521)")
-    # Ed25519/Ed448: no additional constraints
+    # Ed25519/Ed448 and ML-DSA: no additional key constraints.
 
 
 # -----------------------------------------------------------------------------
@@ -1117,6 +1160,16 @@ def _build_pkiresponse_issued_der(
     return der_encode(resp)
 
 
+def _cms_digest_algorithm_for_ca_key(ca_key):
+    """Use an RFC 9882-compliant CMS digest for ML-DSA signers."""
+    if _mldsa_ca_signature_oid(ca_key):
+        # SHA-512 suits ML-DSA-44, -65 and -87. Omit ASN.1 parameters.
+        return a_cms.DigestAlgorithm({"algorithm": "sha512", "parameters": None})
+
+    # Leave pre-existing algorithms unchanged (RSA/ECDSA/EdDSA).
+    return a_cms.DigestAlgorithm({"algorithm": "sha256"})
+
+
 def build_adcs_bst_pkiresponse_issued(
     child_der: bytes,
     ca_der: bytes,
@@ -1142,10 +1195,11 @@ def build_adcs_bst_pkiresponse_issued(
         }
     )
 
+    cms_digest_algorithm = _cms_digest_algorithm_for_ca_key(ca_key)
     signed_attrs = a_cms.CMSAttributes(
         [
             a_cms.CMSAttribute({"type": "1.2.840.113549.1.9.3", "values": [a_cms.ContentType(OID_ID_CCT_PKI_RESPONSE)]}),
-            a_cms.CMSAttribute({"type": "1.2.840.113549.1.9.4", "values": [hashlib.sha256(pkiresp_der).digest()]}),
+            a_cms.CMSAttribute({"type": "1.2.840.113549.1.9.4", "values": [hashlib.new(cms_digest_algorithm["algorithm"].native, pkiresp_der).digest()]}),
         ]
     )
     to_be_signed = _tbs_signed_attrs(signed_attrs)
@@ -1160,7 +1214,7 @@ def build_adcs_bst_pkiresponse_issued(
                         )
                     }
                 ),
-                "digest_algorithm": a_cms.DigestAlgorithm({"algorithm": "sha256"}),
+                "digest_algorithm": _cms_digest_algorithm_for_ca_key(ca_key),
                 "signed_attrs": signed_attrs,
                 "signature_algorithm": _signature_algo_for_ca_key(ca_key) if ca_key else a_cms.SignedDigestAlgorithm({"algorithm": "sha256_rsa"}),
                 "signature": _sign_tbs_with_ca_key(ca_key, to_be_signed),
@@ -1172,7 +1226,7 @@ def build_adcs_bst_pkiresponse_issued(
     sd = a_cms.SignedData(
         {
             "version": 3,
-            "digest_algorithms": [a_cms.DigestAlgorithm({"algorithm": "sha256"})],
+            "digest_algorithms": [_cms_digest_algorithm_for_ca_key(ca_key)],
             "encap_content_info": encap_content_info,
             "certificates": [leaf_cert, signer_cert],
             "signer_infos": signer_info,
@@ -1221,10 +1275,11 @@ def build_adcs_bst_pkiresponse(
         }
     )
 
+    cms_digest_algorithm = _cms_digest_algorithm_for_ca_key(ca_key)
     signed_attrs = a_cms.CMSAttributes(
         [
             a_cms.CMSAttribute({"type": "1.2.840.113549.1.9.3", "values": [a_cms.ContentType(OID_ID_CCT_PKI_RESPONSE)]}),
-            a_cms.CMSAttribute({"type": "1.2.840.113549.1.9.4", "values": [hashlib.sha256(pkiresp_der).digest()]}),
+            a_cms.CMSAttribute({"type": "1.2.840.113549.1.9.4", "values": [hashlib.new(cms_digest_algorithm["algorithm"].native, pkiresp_der).digest()]}),
         ]
     )
     to_be_signed = _tbs_signed_attrs(signed_attrs)
@@ -1239,7 +1294,7 @@ def build_adcs_bst_pkiresponse(
                     )
                 }
             ),
-            "digest_algorithm": a_cms.DigestAlgorithm({"algorithm": "sha256"}),
+            "digest_algorithm": _cms_digest_algorithm_for_ca_key(ca_key),
             "signed_attrs": signed_attrs,
             "signature_algorithm": _signature_algo_for_ca_key(ca_key) if ca_key else a_cms.SignedDigestAlgorithm({"algorithm": "sha256_rsa"}),
             "signature": b"",
@@ -1255,7 +1310,7 @@ def build_adcs_bst_pkiresponse(
     sd = a_cms.SignedData(
         {
             "version": 3,
-            "digest_algorithms": [a_cms.DigestAlgorithm({"algorithm": "sha256"})],
+            "digest_algorithms": [_cms_digest_algorithm_for_ca_key(ca_key)],
             "encap_content_info": encap_content_info,
             "certificates": [signer_cert],
             "signer_infos": [signer_info],
@@ -1273,6 +1328,18 @@ def format_b64_for_soap(data: bytes) -> str:
     """Base64-encode bytes for inclusion into SOAP text nodes."""
     return base64.b64encode(data).decode("ascii")
 
+
+def _wrap_b64(data: bytes, line_len: int = 64, with_crlf: bool = True) -> str:
+    """
+    Base64-encode bytes and optionally wrap lines to a fixed length.
+    If with_crlf is True, lines are joined using CRLF (\r\n).
+    """
+    s = base64.b64encode(data).decode("ascii")
+    if not line_len:
+        return s
+    lines = [s[i:i + line_len] for i in range(0, len(s), line_len)]
+    sep = "\r\n" if with_crlf else "\n"
+    return sep.join(lines)
 
 
 # -----------------------------------------------------------------------------
@@ -1404,19 +1471,262 @@ def build_ws_trust_response(
 
 
 # -----------------------------------------------------------------------------
-# Active Directory user resolution (SAMBA/LDAP)
+# Active Directory: DNS/LDAP DC discovery and Samba/LDAP user lookup
 # -----------------------------------------------------------------------------
+
+# Helpers for ldap3 Connection.response entries (case-insensitive AD attributes).
+def _attribute(entry: Any, section: str, name: str) -> Any:
+    """Return the first value of an attribute, or None if it is absent."""
+    if not isinstance(entry, Mapping) or not isinstance(name, str):
+        return None
+    attrs = entry.get(section)
+    if not isinstance(attrs, Mapping):
+        return None
+    wanted = name.casefold()
+    for key, value in attrs.items():
+        if isinstance(key, str) and key.casefold() == wanted:
+            if isinstance(value, (tuple, list)):
+                return value[0] if value else None
+            return value
+    return None
+
+
+def ldap_text(entry: Any, name: str) -> Optional[str]:
+    """Read one textual LDAP attribute, or None if unavailable/invalid."""
+    value = _attribute(entry, "attributes", name)
+    if value is None:
+        value = _attribute(entry, "raw_attributes", name)
+
+    if isinstance(value, str):
+        return value if value and "\x00" not in value else None
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        try:
+            decoded = bytes(value).decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+        return decoded if decoded and "\x00" not in decoded else None
+    return None
+
+
+def ldap_raw(entry: Any, name: str) -> Optional[bytes]:
+    """Read the bytes of one LDAP attribute, e.g. AD's objectGUID."""
+    value = _attribute(entry, "raw_attributes", name)
+    if value is None:
+        value = _attribute(entry, "attributes", name)
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return bytes(value)
+    return None
+
+
+def _binary_sid(value: bytes) -> Optional[str]:
+    """Decode an MS-DTYP SID: revision, authority, LE subauthorities."""
+    if len(value) < 12 or value[0] != 1:
+        return None
+    count = value[1]
+    if not 1 <= count <= 15 or len(value) != 8 + 4 * count:
+        return None
+    authority = int.from_bytes(value[2:8], "big")
+    parts = [str(int.from_bytes(value[8 + i * 4:12 + i * 4], "little"))
+             for i in range(count)]
+    return "S-1-{}-{}".format(authority, "-".join(parts))
+
+
+def _text_sid(value: str) -> Optional[str]:
+    parts = value.split("-")
+    if len(parts) < 4 or len(parts) > 18 or parts[:2] != ["S", "1"]:
+        return None
+    if any(not part or not part.isascii() or not part.isdecimal()
+           for part in parts[2:]):
+        return None
+    # Bound string lengths before converting untrusted LDAP values to ints.
+    if len(parts[2]) > 15 or any(len(part) > 10 for part in parts[3:]):
+        return None
+    nums = [int(part) for part in parts[2:]]
+    if nums[0] >= 1 << 48 or any(number >= 1 << 32 for number in nums[1:]):
+        return None
+    return "S-1-" + "-".join(str(number) for number in nums)
+
+
+def ldap_sid(entry: Any) -> Optional[str]:
+    """Return a canonical objectSid such as S-1-5-21-..., or None.
+
+    Prefer the original binary bytes to a transformed LDAP3 value. If binary
+    data is present but invalid, refuse it instead of trusting a second copy.
+    """
+    raw = _attribute(entry, "raw_attributes", "objectSid")
+    if raw is not None:
+        if isinstance(raw, (bytes, bytearray, memoryview)):
+            return _binary_sid(bytes(raw))
+        return None
+
+    parsed = _attribute(entry, "attributes", "objectSid")
+    if isinstance(parsed, str):
+        return _text_sid(parsed)
+    if isinstance(parsed, (bytes, bytearray, memoryview)):
+        return _binary_sid(bytes(parsed))
+    return None
+
 
 BAD_LDAP_CHARS_RE = re.compile(r'[\x00()*\\]')
 
-def search_user(userauth: str,ldap_filter='',dc_fqdn=None,basedn=None,password=None,bind_user=None):
+
+log = logging.getLogger(__name__)
+_dc_cache: dict[str, tuple[str, float]] = {}
+_cache_lock = Lock()
+
+
+def _parse_netlogon(data: bytes, realm: str) -> tuple[str, str]:
+    """Decode NETLOGON_SAM_LOGON_RESPONSE_EX: (FQDN, client site)."""
+    if len(data) < 40:
+        raise ValueError("Reponse Netlogon trop courte")
+
+    opcode, reserved, flags = struct.unpack_from("<HHI", data)
+    # LOGON_SAM_LOGON_RESPONSE_EX and DS_LDAP_FLAG.
+    if opcode != 23 or reserved != 0 or not (flags & 0x08):
+        raise ValueError("DC indisponible ou reponse Netlogon inattendue")
+
+    offset = 24  # Opcode + reserved + flags + 16-byte GUID.
+    names = []
+    for _ in range(8):
+        name, consumed = dns.name.from_wire(data, offset)
+        offset += consumed  # from_wire returns the number of bytes consumed, not an offset.
+        names.append(b".".join(name.labels[:-1]).decode("utf-8"))
+
+    # NtVer=4 requires neither an IP address nor an additional site field.
+    if len(data) != offset + 8:
+        raise ValueError("Longueur Netlogon inattendue")
+    version, token1, token2 = struct.unpack_from("<IHH", data, offset)
+    if not (version & 0x04) or (token1, token2) != (0xFFFF, 0xFFFF):
+        raise ValueError("Terminaison Netlogon invalide")
+    if names[1].lower() != realm or not names[2]:
+        raise ValueError("Domaine inattendu ou FQDN absent")
+
+    # forest, domain, host, netbios_domain, netbios_host, user, dc_site, client_site
+    return names[2], names[7]
+
+
+def _ldap_ping(host: str, port: int, realm: str, timeout: int) -> tuple[str, str]:
+    server = Server(host, port=port, get_info=NONE, connect_timeout=timeout)
+    conn = Connection(
+        server,
+        check_names=False,
+        raise_exceptions=True,
+        auto_referrals=False,
+        receive_timeout=timeout,
+    )
+    try:
+        # No bind: perform only an anonymous search on the rootDSE.
+        conn.open(read_server_info=False)
+        ok = conn.search(
+            search_base="",
+            search_filter=(
+                f"(&(DnsDomain={escape_filter_chars(realm)})"
+                r"(NtVer=\04\00\00\00))"
+            ),
+            search_scope=BASE,
+            attributes=["Netlogon"],
+            time_limit=timeout,
+        )
+        if ok:
+            for entry in conn.response:
+                for name, values in entry.get("raw_attributes", {}).items():
+                    if name.lower() == "netlogon" and values:
+                        return _parse_netlogon(values[0], realm)
+        raise ValueError(f"{host}: aucune reponse Netlogon exploitable")
+    finally:
+        with suppress(LDAPException, OSError):
+            conn.unbind()
+
+
+def _srv_records(realm: str, site: Optional[str], timeout: int) -> list[SRV]:
+    # Treat the site name as a single DNS label, even if it contains a dot.
+    labels = [b"_ldap", b"_tcp"]
+    if site:
+        labels += [site.encode("utf-8"), b"_sites"]
+    labels += [b"dc", b"_msdcs"]
+    query = dns.name.Name(labels) + dns.name.from_text(realm)
+    answer = dns.resolver.resolve(query, "SRV", lifetime=timeout, search=False)
+    records = [r for r in answer if r.target != dns.name.root]
+
+    # Ascending SRV priority, then weighted selection (RFC 2782).
+    ordered = []
+    for priority in sorted({r.priority for r in records}):
+        group = [r for r in records if r.priority == priority]
+        random.shuffle(group)
+        group.sort(key=lambda r: r.weight != 0)
+        while group:
+            draw = random.randint(0, sum(r.weight for r in group))
+            cumulative = 0
+            for i, record in enumerate(group):
+                cumulative += record.weight
+                if cumulative >= draw:
+                    ordered.append(group.pop(i))
+                    break
+    return ordered
+
+
+def _first_dc(records: list[SRV], realm: str, timeout: int) -> tuple[str, str]:
+    last_error = None
+    for record in records:
+        host = record.target.to_text(omit_final_dot=True)
+        try:
+            return _ldap_ping(host, record.port, realm, timeout)
+        except (LDAPException, OSError, ValueError, dns.exception.DNSException) as exc:
+            last_error = exc
+            log.debug("DC ignore: %s: %s", host, exc)
+    raise RuntimeError(f"Aucun DC LDAP utilisable pour {realm}") from last_error
+
+
+def get_dc_fqdn(
+    realm: str,
+    dc_cache_ttl_seconds: float = 3600,
+    *,
+    timeout: int = 3,
+) -> str:
+    """Return a DC, preferably in the client site. Cache for 1 hour by default."""
+    realm = realm.strip().rstrip(".").lower()
+    if not realm:
+        raise ValueError("realm ne doit pas etre vide")
+    if dc_cache_ttl_seconds < 0:
+        raise ValueError("Le TTL doit etre positif ou nul")
+    if not isinstance(timeout, int) or timeout <= 0:
+        raise ValueError("timeout doit etre un entier strictement positif")
+
+    with _cache_lock:
+        cached = _dc_cache.get(realm)
+        if dc_cache_ttl_seconds > 0 and cached and time.monotonic() < cached[1]:
+            return cached[0]
+
+    # 1. Discover a domain DC and query it for the client site.
+    initial_dc, client_site = _first_dc(_srv_records(realm, None, timeout), realm, timeout)
+    chosen_dc = initial_dc
+
+    # 2. Prefer a DC in the client site; otherwise keep the initial valid DC.
+    if client_site:
+        try:
+            chosen_dc, _ = _first_dc(
+                _srv_records(realm, client_site, timeout), realm, timeout
+            )
+        except (dns.exception.DNSException, RuntimeError) as exc:
+            log.debug("Repli sur %s: %s", initial_dc, exc)
+
+    # Application-level TTL, as in the original function, not the DNS TTL.
+    with _cache_lock:
+        if dc_cache_ttl_seconds > 0:
+            _dc_cache[realm] = (chosen_dc, time.monotonic() + dc_cache_ttl_seconds)
+        else:
+            _dc_cache.pop(realm, None)
+    return chosen_dc
+
+
+def search_user(userauth: str,ldap_filter='',dc_fqdn=None,basedn=None,password=None,bind_user=None,dc_cache_ttl_seconds=300):
     """
     Resolve the SAM/LDAP entry for the Kerberos user 'user@REALM'.
     Returns (SamDB, entry) if found.
     """
 
-    if Credentials is None:
-        raise RuntimeError("search_user requires the optional python3-samba package")
+    if Credentials is None or LoadParm is None or SamDB is None:
+        raise ImportError("Samba is required by search_user(); use search_user_ldap3() without Samba")
 
     username = userauth.split("@", 1)[0].strip()
 
@@ -1445,10 +1755,7 @@ def search_user(userauth: str,ldap_filter='',dc_fqdn=None,basedn=None,password=N
 
     realm = lp.get("realm")
     if not dc_fqdn:
-        net = Net(creds=creds, lp=lp)
-        flags = nbt.NBT_SERVER_LDAP
-        dc_info = net.finddc(domain=realm, flags=flags)
-        dc_fqdn = str(dc_info.pdc_dns_name)
+        dc_fqdn = get_dc_fqdn(realm,dc_cache_ttl_seconds=dc_cache_ttl_seconds)
 
     ldap_url = f"ldap://{dc_fqdn}"
 
@@ -1469,6 +1776,46 @@ def search_user(userauth: str,ldap_filter='',dc_fqdn=None,basedn=None,password=N
 
     for entry in res:
         return samdbr, entry
+
+
+def search_user_ldap3(
+    userauth: str,
+    ldap_filter: str = "",
+    dc_fqdn: Optional[str] = None,
+    basedn: Optional[str] = None,
+    password: Optional[str] = None,
+    bind_user: Optional[str] = None,
+    dc_cache_ttl_seconds: float = 300,
+    *,
+    realm: Optional[str] = None,
+    keytab: str = "/etc/krb5.keytab",
+    attributes: Optional[Union[list[str], tuple[str, ...]]] = None,
+    timeout: int = 10,
+) -> Optional[dict]:
+    """LDAP3 + Kerberos SASL, with GSSAPI encryption when available.
+
+    No TLS; lazy import keeps the legacy Samba path independent of gssapi.
+    """
+    from ldap3_auth import InvalidKerberosCredentials, find_user
+
+    try:
+        return find_user(
+            userauth=userauth,
+            ldap_filter=ldap_filter,
+            dc_fqdn=dc_fqdn,
+            basedn=basedn,
+            password=password,
+            bind_user=bind_user,
+            dc_cache_ttl_seconds=dc_cache_ttl_seconds,
+            realm=realm,
+            keytab=keytab,
+            attributes=attributes,
+            timeout=timeout,
+            get_dc_fqdn=get_dc_fqdn,
+        )
+    except InvalidKerberosCredentials:
+        # The caller's auth callback treats None as unsuccessful login (401).
+        return None
 
 
 # -----------------------------------------------------------------------------
@@ -1610,7 +1957,7 @@ def build_get_policies_response(
                 return oo.get("__refid")
         return None
 
-    def _ensure_oid(oids_list: list, value: str, group: int, default_name: str, refid: int | None = None) -> int:
+    def _ensure_oid(oids_list: list, value: str, group: int, default_name: str, refid: Optional[int] = None) -> int:
         existing = _find_oid_refid(oids_list, value, group, default_name)
         if existing is not None:
             return int(existing)
@@ -1982,22 +2329,7 @@ def _txt(elem, value):
 def _prettify(xml_bytes: bytes) -> str:
     return minidom.parseString(xml_bytes).toprettyxml(indent="  ", encoding="utf-8").decode("utf-8")
 
-def build_ces_response(
-    uuid_request: str,
-    uuid_random: str,
-    p7b_der: str,
-    leaf_der: str,
-    body_part_id: str,
-    *,
-    leaf_value_type: str = "x509",
-) -> str:
-    normalized_leaf_type = (leaf_value_type or "x509").strip().lower()
-    if normalized_leaf_type == "x509":
-        bst_value_type = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#X509v3"
-    elif normalized_leaf_type == "pkcs7":
-        bst_value_type = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd#PKCS7"
-    else:
-        raise ValueError(f"Unsupported CES leaf_value_type: {leaf_value_type!r}")
+def build_ces_response(uuid_request: str, uuid_random: str, p7b_der: str, leaf_der: str, body_part_id: str) -> str:
     env = ET.Element(ET.QName(NS_CES['s'], 'Envelope'))
 
     hdr = ET.SubElement(env, ET.QName(NS_CES['s'], 'Header'))
@@ -2036,7 +2368,7 @@ def build_ces_response(
     bst_leaf = ET.SubElement(
         req_tok, ET.QName(NS_CES['wsse'], 'BinarySecurityToken'),
         {
-            "ValueType":    bst_value_type,
+            "ValueType":    "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#X509v3",
             "EncodingType": "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd#base64binary",
         }
     )
@@ -2049,30 +2381,14 @@ def build_ces_response(
     return _prettify(raw)
 
 
-def build_ket_response(
-    uuid_request: str,
-    uuid_random: str,
-    ket_cert_der: str,
-    *,
-    value_type: str = "x509",
-) -> str:
+def build_ket_response(uuid_request: str, uuid_random: str, ket_cert_der: str) -> str:
     """
     Build CES/WSTEP WS-Trust RSTR/KETFinal response.
 
     - uuid_request: the UUID from the request MessageID (without "urn:uuid:" prefix is fine; we add it)
     - uuid_random: correlation id for diag:ActivityId
-    - ket_cert_der: base64 of the DER certificate or certificates-only PKCS#7
-    - value_type: ``x509`` for the legacy KET, ``pkcs7`` for the V2 RA bundle
+    - ket_cert_der: base64 of the DER-encoded X.509 certificate to return as the KeyExchangeToken (BinarySecurityToken)
     """
-    normalized_type = (value_type or "x509").strip().lower()
-    if normalized_type == "pkcs7":
-        token_type_uri = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#PKCS7"
-        bst_value_type = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd#PKCS7"
-    elif normalized_type == "x509":
-        token_type_uri = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#X509v3"
-        bst_value_type = token_type_uri
-    else:
-        raise ValueError(f"Unsupported KET value_type: {value_type!r}")
     env = ET.Element(ET.QName(NS_CES['s'], 'Envelope'))
 
     hdr = ET.SubElement(env, ET.QName(NS_CES['s'], 'Header'))
@@ -2092,7 +2408,7 @@ def build_ket_response(
     rstr = ET.SubElement(rstrc, ET.QName(NS_CES['wst'], 'RequestSecurityTokenResponse'))
 
     tok_type = ET.SubElement(rstr, ET.QName(NS_CES['wst'], 'TokenType'))
-    _txt(tok_type, token_type_uri)
+    _txt(tok_type, "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#X509v3")
 
     req_tok = ET.SubElement(rstr, ET.QName(NS_CES['wst'], 'RequestedSecurityToken'))
     ket = ET.SubElement(req_tok, ET.QName(NS_CES['wst'], 'KeyExchangeToken'))
@@ -2100,7 +2416,7 @@ def build_ket_response(
     bst_ket = ET.SubElement(
         ket, ET.QName(NS_CES['wsse'], 'BinarySecurityToken'),
         {
-            "ValueType":    bst_value_type,
+            "ValueType":    "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#X509v3",
             "EncodingType": "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd#base64binary",
         }
     )
@@ -2167,6 +2483,126 @@ def is_directly_issued_by_cert_in_folder(cert: cx509.Certificate, folder: str):
         except Exception:
             pass
     return False, None, None
+
+
+def is_client_certificate_valid_for_ca_reference(
+    client_cert,
+    ca_reference,
+    template_oid= None,
+) -> bool:
+    """Validate a TLS client certificate against one or more CA references.
+
+    ``client_cert`` may be a cryptography Certificate, PEM bytes, or the
+    URL-escaped PEM value received in ``X-Ssl-Client-Cert``.
+
+    ``ca_reference`` may be a resolved CA dict, a CA id/display name/refid,
+    or a list of those values. String/integer references are resolved from
+    ``current_app.confadcs``. A matching CA must explicitly allow X.509
+    authentication, directly issue the client certificate, and its configured
+    CRL must not revoke the certificate. If the client certificate carries a
+    BasicConstraints extension, it must have ``ca=False``. A missing
+    BasicConstraints extension is accepted. When ``template_oid`` is provided,
+    the certificate must also contain that template OID.
+    """
+    if isinstance(client_cert, cx509.Certificate):
+        cert = client_cert
+    else:
+        try:
+            if isinstance(client_cert, str):
+                client_cert = unquote(client_cert).encode("utf-8")
+            elif isinstance(client_cert, bytearray):
+                client_cert = bytes(client_cert)
+
+            if not isinstance(client_cert, bytes):
+                return False
+
+            cert = cx509.load_pem_x509_certificate(client_cert)
+        except (TypeError, ValueError):
+            return False
+
+    now = datetime.now(timezone.utc)
+    try:
+        not_before = cert.not_valid_before_utc
+        not_after = cert.not_valid_after_utc
+    except AttributeError:
+        # Compatibility with older cryptography releases.
+        not_before = cert.not_valid_before.replace(tzinfo=timezone.utc)
+        not_after = cert.not_valid_after.replace(tzinfo=timezone.utc)
+
+    if now < not_before or now > not_after:
+        return False
+
+    try:
+        basic_constraints = cert.extensions.get_extension_for_class(
+            cx509.BasicConstraints
+        ).value
+    except cx509.ExtensionNotFound:
+        basic_constraints = None
+
+    if basic_constraints is not None and basic_constraints.ca:
+        return False
+
+    if template_oid and not _cert_has_template_oid(cert, template_oid):
+        return False
+
+    if isinstance(ca_reference, (list, tuple, set)):
+        references = ca_reference
+    else:
+        references = [ca_reference]
+
+    conf = None
+
+    for reference in references:
+        if isinstance(reference, dict):
+            ca = reference
+        else:
+            if conf is None:
+                try:
+                    from flask import current_app
+                    conf = current_app.confadcs
+                except (ImportError, RuntimeError, AttributeError):
+                    return False
+
+            if isinstance(reference, int):
+                ca = (conf.get("cas_by_refid") or {}).get(reference)
+            elif isinstance(reference, str):
+                ca = (
+                    (conf.get("cas_by_id") or {}).get(reference)
+                    or (conf.get("cas_by_display_name") or {}).get(reference)
+                )
+            else:
+                ca = None
+
+        if not isinstance(ca, dict):
+            continue
+
+        if not any(
+            (entry.get("method") or "").strip().lower() == "x509"
+            for entry in (ca.get("auth_methods") or [])
+        ):
+            continue
+
+        ca_cert_path = ca.get("pem", {}).get("certificate_path_pem")
+        if not ca_cert_path:
+            continue
+
+        issued, issuer_cert, _issuer_path = is_directly_issued_by_cert_in_folder(
+            cert,
+            ca_cert_path,
+        )
+        if not issued or issuer_cert is None:
+            continue
+
+        if is_certificate_revoked_by_crl(
+            cert,
+            ca.get("crl", {}).get("path_crl"),
+            issuer_cert=issuer_cert,
+        ):
+            continue
+
+        return True
+
+    return False
 
 # -----------------------------------------------------------------------------
 # ML-DSA / raw SubjectPublicKeyInfo helpers for certificate issuance callbacks
@@ -2257,8 +2693,8 @@ def _raw_x509_extension(oid: str, critical: bool, extn_value_der: bytes) -> a_x5
       extnValue OCTET STRING -- containing DER of the real extension value
     }
 
-    On fait ça en DER brut pour éviter qu'asn1crypto essaie de parser
-    certaines extensions reconnues.
+    Construct this using raw DER to prevent asn1crypto from parsing
+    certain recognized extensions.
     """
     contents = a_core.ObjectIdentifier(oid).dump()
 
@@ -2272,12 +2708,12 @@ def _raw_x509_extension(oid: str, critical: bool, extn_value_der: bytes) -> a_x5
 
 def _csr_spki_from_der(csr_der: bytes):
     """
-    Retourne:
-      - spki_obj: SubjectPublicKeyInfo ASN.1 brut, utilisable dans TbsCertificate
-      - oid: OID de l'algorithme de clé publique
-      - ski: SubjectKeyIdentifier calculé depuis le BIT STRING brut
+    Returns:
+      - spki_obj: raw ASN.1 SubjectPublicKeyInfo, usable in TbsCertificate
+      - oid: public-key algorithm OID
+      - ski: SubjectKeyIdentifier calculated from the raw BIT STRING
 
-    Ne déclenche pas le parse typé de la clé publique, donc compatible ML-DSA.
+    Avoids typed public-key parsing, preserving ML-DSA compatibility.
     """
 
     # CertificationRequest ::= SEQUENCE {
@@ -2342,8 +2778,8 @@ def _csr_spki_from_der(csr_der: bytes):
     public_key_bytes = bitstr_contents[1:]
     ski = hashlib.sha1(public_key_bytes).digest()
 
-    # Important : on charge l'objet brut, mais on ne fait pas spki_obj["algorithm"]
-    # ni spki_obj["public_key"] ensuite, sinon asn1crypto tente de parser ML-DSA.
+    # Important: load the raw object without accessing spki_obj["algorithm"]
+    # or spki_obj["public_key"], which would make asn1crypto attempt to parse ML-DSA.
     spki_obj = a_keys.PublicKeyInfo.load(spki_der)
 
     return spki_obj, oid, ski
@@ -2437,3 +2873,198 @@ def _sign_tbs_with_ca_key(priv, tbs_der: bytes) -> bytes:
         return priv.sign(tbs_der)
 
     raise ValueError(f"Unsupported CA private key type: {type(priv).__name__}")
+
+def send_mail(
+    *,
+    smtp_conf: dict,
+    to,
+    subject: str,
+    body: str,
+    html: str = None,
+):
+    """
+    Send an email using the Python standard library.
+
+    Supported security modes:
+      - starttls
+      - ssl
+      - none
+    """
+
+    if not smtp_conf:
+        raise ValueError("SMTP configuration is missing")
+
+    if not smtp_conf.get("enabled", False):
+        return False
+
+    host = smtp_conf.get("host")
+
+    if not host:
+        raise ValueError("SMTP host is missing")
+
+    port = int(smtp_conf.get("port", 587))
+    security = str(
+        smtp_conf.get("security", "starttls")
+    ).strip().lower()
+
+    timeout = float(smtp_conf.get("timeout", 10))
+
+    username = smtp_conf.get("username")
+    password = smtp_conf.get("password")
+
+    # password_file takes precedence over password
+    password_file = smtp_conf.get("password_file")
+
+    if password_file:
+        try:
+            with open(
+                password_file,
+                "r",
+                encoding="utf-8",
+            ) as f:
+                password = f.readline().strip()
+
+        except OSError as exc:
+            raise ValueError(
+                f"Unable to read SMTP password file "
+                f"'{password_file}': {exc}"
+            ) from exc
+
+        if not password:
+            raise ValueError(
+                f"SMTP password file is empty: {password_file}"
+            )
+
+    sender = smtp_conf.get("sender") or username
+    sender_name = smtp_conf.get("sender_name")
+
+    if not sender:
+        raise ValueError("SMTP sender is missing")
+
+    # Accept either:
+    # to="admin@domain.lan"
+    # or:
+    # to=["admin1@domain.lan", "admin2@domain.lan"]
+    if isinstance(to, str):
+        recipients = [to]
+    else:
+        recipients = list(to or [])
+
+    recipients = [
+        str(recipient).strip()
+        for recipient in recipients
+        if recipient
+    ]
+
+    if not recipients:
+        raise ValueError("No email recipient specified")
+
+    message = EmailMessage()
+
+    if sender_name:
+        message["From"] = formataddr(
+            (sender_name, sender)
+        )
+    else:
+        message["From"] = sender
+
+    message["To"] = ", ".join(recipients)
+    message["Subject"] = subject
+
+    message.set_content(body)
+
+    if html:
+        message.add_alternative(
+            html,
+            subtype="html",
+        )
+
+    ca_file = smtp_conf.get("ca_file")
+
+    ssl_context = ssl.create_default_context(
+        cafile=ca_file if ca_file else None
+    )
+
+    #
+    # SMTPS / implicit SSL
+    #
+    if security == "ssl":
+
+        with smtplib.SMTP_SSL(
+            host,
+            port,
+            timeout=timeout,
+            context=ssl_context,
+        ) as smtp:
+
+            if username:
+                if password is None:
+                    raise ValueError(
+                        "SMTP password is missing"
+                    )
+
+                smtp.login(
+                    username,
+                    password,
+                )
+
+            smtp.send_message(
+                message,
+                from_addr=sender,
+                to_addrs=recipients,
+            )
+
+    #
+    # SMTP / STARTTLS
+    #
+    else:
+
+        with smtplib.SMTP(
+            host,
+            port,
+            timeout=timeout,
+        ) as smtp:
+
+            smtp.ehlo()
+
+            if security == "starttls":
+
+                smtp.starttls(
+                    context=ssl_context
+                )
+
+                smtp.ehlo()
+
+            elif security != "none":
+
+                raise ValueError(
+                    f"Unknown SMTP security mode: "
+                    f"{security}"
+                )
+
+            if username:
+                if password is None:
+                    raise ValueError(
+                        "SMTP password is missing"
+                    )
+
+                smtp.login(
+                    username,
+                    password,
+                )
+
+            smtp.send_message(
+                message,
+                from_addr=sender,
+                to_addrs=recipients,
+            )
+
+    return True
+
+def get_default_realm():
+    name = gssapi.Name(
+        "dummy",
+        name_type=gssapi.NameType.kerberos_principal,
+    )
+    principal = name.canonicalize(gssapi.MechType.kerberos)
+    return str(principal).rsplit("@", 1)[1].upper()

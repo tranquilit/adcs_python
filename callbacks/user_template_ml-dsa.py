@@ -1,6 +1,6 @@
+from utils import ldap_text, ldap_sid
 from datetime import datetime, timedelta
-from typing import Iterable, Optional, Dict, Any
-from urllib.parse import unquote
+from typing import Optional, Dict, Any
 
 from asn1crypto import core as a_core, x509 as a_x509
 
@@ -12,6 +12,7 @@ from cryptography.x509.oid import (
     ObjectIdentifier as CObjectIdentifier,
 )
 
+from flask import g
 from utils import (
     NtdsCASecurityExt,
     _aia_extension_der,
@@ -21,24 +22,12 @@ from utils import (
     _cdp_extension_der,
     _csr_spki_from_der,
     _raw_x509_extension,
-    is_directly_issued_by_cert_in_folder,
-    _cert_has_template_oid,
-    search_user,
+    is_client_certificate_valid_for_ca_reference,
+    search_user_ldap3,
 )
-from tpm_certificate_extensions import required_tpm_attestation_extension_specs
-from utils_crt import is_certificate_revoked_by_crl
 
 
 
-# ---------- helpers (optional) ----------
-def _is_member_of(sam_entry: dict, groups: Iterable[str]) -> bool:
-    member_of = sam_entry.get("memberOf") or []
-    for raw in member_of:
-        dn = raw.decode("utf-8", "ignore") if isinstance(raw, (bytes, bytearray)) else str(raw)
-        for frag in groups:
-            if frag.lower() in dn.lower():
-                return True
-    return False
 
 
 # -----------------------------------------------------------------------------
@@ -100,7 +89,7 @@ def _build_cert_der_with_raw_spki(
     return cert.dump()
 
 
-def define_template(*, app_conf, username=None, request=None, params=None):
+def define_template(*, app_conf, username=None, request=None, params=None, auth_method=None):
     validity_seconds = 31536000       # 1 year
     renewal_seconds = 3628800         # 42 days
     auto_enroll = True
@@ -111,20 +100,33 @@ def define_template(*, app_conf, username=None, request=None, params=None):
     XSslClientDn = request.headers.get('X-Ssl-Client-Dn', None)
     XSslClientCert = request.headers.get('X-Ssl-Client-Cert', None)
 
-    if username :
-       username = username
-    else:
-       username = XSslClientDn.split('=',1)[1] 
-    r = search_user(username, "(!(userAccountControl:1.2.840.113556.1.4.803:=4096))(!(userAccountControl:1.2.840.113556.1.4.803:=8192))")
-    if not r:
-        return
-    samdbr, sam_entry = r
+    if auth_method == "tls":
+        if not is_client_certificate_valid_for_ca_reference(
+            XSslClientCert,
+            (params or {}).get("ca_references", []),
+            template_oid=template_oid,
+        ):
+            return None
+        username = XSslClientDn.split('=', 1)[1]
 
-    # Example: special group = duration x2
-    if _is_member_of(sam_entry or {}, ["CN=PKI-LongLived"]):
-        validity_seconds *= 2
-        renewal_seconds *= 2
-        
+    pac = g.get("pac_info", {})
+    flags = pac.get("account_flags")
+    if flags is not None:
+        # Samba flags: 0x10 = user, 0x80 = machine, 0x100 = DC.
+        # Reject non-user accounts
+        if not (flags & 0x10) or flags & 0x180:
+            return None
+        cn, sid_str, upn = pac.get("sam_name"), pac.get("sid"), pac.get("upn")
+    else:
+        # PAC account flags are missing: validate and resolve through LDAP.
+        r = search_user_ldap3(userauth=username, ldap_filter="(!(userAccountControl:1.2.840.113556.1.4.803:=4096))(!(userAccountControl:1.2.840.113556.1.4.803:=8192))")
+        if not r:
+            return {"status": "denied", "status_text": "denied"}
+        cn = ldap_text(r, "sAMAccountName")
+        sid_str = ldap_sid(r)
+        upn = ldap_text(r, "userPrincipalName")
+        if not cn or not sid_str:
+            return None
     return {
     # MS-XCEP Attributes/commonName: friendly/unique name of the policy item returned by CEP/XCEP
     # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cd22d3a0-f469-4a44-95ed-d10ce4dc2063
@@ -189,6 +191,7 @@ def define_template(*, app_conf, username=None, request=None, params=None):
     },
 
     "flags": {
+        "hash_algorithm": "sha256",
         # MS-XCEP Attributes: privateKeyFlags / subjectNameFlags / enrollmentFlags / generalFlags (bitmasks)
         # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cd22d3a0-f469-4a44-95ed-d10ce4dc2063
         #
@@ -212,7 +215,6 @@ def define_template(*, app_conf, username=None, request=None, params=None):
             # TPM Key Attestation (AD CS)
             "attest_preferred": False,                      # Prefer key attestation if client can
             "attest_required": False,                       # Require key attestation
-            "require_v2_attestation": False,               # Require MS-WCCE 55 Restricted-HMAC V2 (0x8000)
             "attestation_without_policy": False,            # Attest but do not add issuance policy
 
             # EK trust model (AD CS)
@@ -398,6 +400,7 @@ def emit_certificate(
     body_part_id,
     p7_der=None,
     tpm_result=None,
+    auth_method=None,
     params=None
 ) -> Dict[str, Any]:
 
@@ -407,34 +410,38 @@ def emit_certificate(
     XSslClientDn = request.headers.get('X-Ssl-Client-Dn', None)
     XSslClientCert = request.headers.get('X-Ssl-Client-Cert', None)
 
-    if username:
-        username = username
-    else:
-        client_cert = cx509.load_pem_x509_certificate(unquote(XSslClientCert).encode("utf-8"))
-        if not is_directly_issued_by_cert_in_folder(client_cert, ca['pem']['certificate_path_pem'])[0]:
+    if auth_method == "tls":
+        if not is_client_certificate_valid_for_ca_reference(
+            XSslClientCert,
+            (params or {}).get("ca_references", []),
+            template_oid=template_oid,
+        ):
             return {
                 "status": "denied",
                 "status_text": "denied",
             }
-        if is_certificate_revoked_by_crl(client_cert, ca.get("crl", {}).get("path_crl")):
-            return {
-                "status": "denied",
-                "status_text": "denied",
-            }
-        if not _cert_has_template_oid(client_cert, template_oid):
-            return {
-                "status": "denied",
-                "status_text": "denied",
-            }
+
+
         username = XSslClientDn.split('=', 1)[1]
 
-    r = search_user(username, "(!(userAccountControl:1.2.840.113556.1.4.803:=4096))(!(userAccountControl:1.2.840.113556.1.4.803:=8192))")
-    if not r:
-        return {
-            "status": "denied",
-            "status_text": "denied",
-        }
-    samdbr, sam_entry = r
+    pac = g.get("pac_info", {})
+    flags = pac.get("account_flags")
+    if flags is not None:
+        # Samba ACB_*: 0x10 = user, 0x80 = workstation, 0x100 = DC.
+        if not (flags & 0x10) or flags & 0x180:
+            return {"status": "denied", "status_text": "denied"}
+        cn, sid_str = pac.get("sam_name"), pac.get("sid")
+        if not cn or not sid_str:
+            return {"status": "denied", "status_text": "denied"}
+    else:
+        # PAC account flags are missing: validate and resolve through LDAP.
+        r = search_user_ldap3(userauth=username, ldap_filter="(!(userAccountControl:1.2.840.113556.1.4.803:=4096))(!(userAccountControl:1.2.840.113556.1.4.803:=8192))")
+        if not r:
+            return {"status": "denied", "status_text": "denied"}
+        cn = ldap_text(r, "sAMAccountName")
+        sid_str = ldap_sid(r)
+        if not cn or not sid_str:
+            return {"status": "denied", "status_text": "denied"}
 
     denied = False
     must_pending = False
@@ -477,17 +484,12 @@ def emit_certificate(
 
     
     # CN = sAMAccountName
-    cn = (sam_entry.get("sAMAccountName") or [b"user"])[0].decode("utf-8", "ignore")
     validity_seconds = (template or {}).get("validity", {}).get("validity_seconds") or 31536000
 
     priv = ca["__key_obj"]
     not_after = now + timedelta(seconds=int(validity_seconds))
 
     # SID / NTDS extension
-    sid_str = samdbr.schema_format_value(
-        "objectSID",
-        sam_entry["objectSID"][0],
-    ).decode("utf-8")
 
     sid_bytes = sid_str.encode("ascii")
 
@@ -549,16 +551,6 @@ def emit_certificate(
                 ext["oid"],
                 bool(ext.get("critical", False)),
                 der,
-            )
-        )
-
-    # Extensions required by a successful TPM V2 attestation.
-    for spec in required_tpm_attestation_extension_specs(tpm_result):
-        extensions.append(
-            _raw_x509_extension(
-                spec["oid"],
-                spec["critical"],
-                spec["value_der"],
             )
         )
 

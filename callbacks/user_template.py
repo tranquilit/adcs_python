@@ -1,8 +1,11 @@
+from utils import ldap_text, ldap_sid
+import re
 from datetime import datetime, timedelta
-from typing import Iterable, Optional, Dict, Any
+from typing import Optional, Dict, Any
+from asn1crypto import core as a_core
 from cryptography import x509 as cx509
 from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import ed25519, ed448
+from cryptography.hazmat.primitives.asymmetric import rsa, ec, dsa
 from cryptography.x509.oid import (
     ExtensionOID,
     NameOID,
@@ -13,22 +16,11 @@ from cryptography.x509.oid import (
 from cryptography.x509.extensions import ExtensionNotFound
 
 # As before
-from utils import NtdsCASecurityExt,search_user,validate_csr, is_directly_issued_by_cert_in_folder, _cert_has_template_oid
-from tpm_certificate_extensions import apply_tpm_attestation_extensions
+from flask import g
+from utils import NtdsCASecurityExt,search_user_ldap3,validate_csr, is_client_certificate_valid_for_ca_reference
 from utils import _apply_static_extensions
-from utils_crt import is_certificate_revoked_by_crl
-from urllib.parse import unquote
-
-
-# ---------- helpers (optional) ----------
-def _is_member_of(sam_entry: dict, groups: Iterable[str]) -> bool:
-    member_of = sam_entry.get("memberOf") or []
-    for raw in member_of:
-        dn = raw.decode("utf-8", "ignore") if isinstance(raw, (bytes, bytearray)) else str(raw)
-        for frag in groups:
-            if frag.lower() in dn.lower():
-                return True
-    return False
+from tpm_support import apply_tpm_attestation_extensions
+import hashlib
 
 
 # ============================================================
@@ -44,7 +36,7 @@ template_major_version = 100
 template_minor_version = 3
 auto_enroll            = True
 
-def define_template(*, app_conf, username=None, request=None, params=None):
+def define_template(*, app_conf, username=None, request=None, params=None, auth_method=None):
     validity_seconds = 31536000       # 1 year
     renewal_seconds = 3628800         # 42 days
     auto_enroll = True
@@ -55,20 +47,32 @@ def define_template(*, app_conf, username=None, request=None, params=None):
     XSslClientDn = request.headers.get('X-Ssl-Client-Dn', None)
     XSslClientCert = request.headers.get('X-Ssl-Client-Cert', None)
 
-    if username :
-       username = username
-    else:
-       username = XSslClientDn.split('=',1)[1] 
-    r = search_user(username, "(!(userAccountControl:1.2.840.113556.1.4.803:=4096))(!(userAccountControl:1.2.840.113556.1.4.803:=8192))")
-    if not r:
-        return
-    samdbr, sam_entry = r
+    if auth_method == "tls":
+        if not is_client_certificate_valid_for_ca_reference(
+            XSslClientCert,
+            (params or {}).get("ca_references", []),
+            template_oid=template_oid,
+        ):
+            return None
+        username = XSslClientDn.split('=', 1)[1]
 
-    # Example: special group = duration x2
-    if _is_member_of(sam_entry or {}, ["CN=PKI-LongLived"]):
-        validity_seconds *= 2
-        renewal_seconds *= 2
-        
+    pac = g.get("pac_info", {})
+    flags = pac.get("account_flags")
+    # 0x0010 = ACB_NORMAL: regular user account
+    # 0x0180 = workstation (0x80) or domain controller (0x100) account
+    if flags is not None:
+        is_user = bool(flags & 0x10) and not (flags & 0x180)
+        if not is_user:
+            return None
+    elif not search_user_ldap3(
+        userauth=username,
+        ldap_filter=(
+            "(!(userAccountControl:1.2.840.113556.1.4.803:=4096))"
+            "(!(userAccountControl:1.2.840.113556.1.4.803:=8192))"
+        ),
+    ):
+        # Query LDAP only when PAC flags are unavailable.
+        return None
     return {
     # MS-XCEP Attributes/commonName: friendly/unique name of the policy item returned by CEP/XCEP
     # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cd22d3a0-f469-4a44-95ed-d10ce4dc2063
@@ -133,6 +137,7 @@ def define_template(*, app_conf, username=None, request=None, params=None):
     },
 
     "flags": {
+        "hash_algorithm": "sha256",
         # MS-XCEP Attributes: privateKeyFlags / subjectNameFlags / enrollmentFlags / generalFlags (bitmasks)
         # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/cd22d3a0-f469-4a44-95ed-d10ce4dc2063
         #
@@ -156,8 +161,8 @@ def define_template(*, app_conf, username=None, request=None, params=None):
             # TPM Key Attestation (AD CS)
             "attest_preferred": False,                      # Prefer key attestation if client can
             "attest_required": False,                       # Require key attestation
-            "require_v2_attestation": False,               # Require MS-WCCE 55 Restricted-HMAC V2 (0x8000)
             "attestation_without_policy": False,            # Attest but do not add issuance policy
+            "require_v2_attestation": False,                # Require Key Attestation V2 (refuse the relay-prone V1 protocol)
 
             # EK trust model (AD CS)
             "ek_trust_on_use": False,                       # EK trust on first use / credentials
@@ -328,7 +333,7 @@ def define_template(*, app_conf, username=None, request=None, params=None):
 
 
 # =======================================
-# 2) Certificate issuance and TPM policy
+# 2) Certificate issuance (CES callback)
 # =======================================
 def emit_certificate(
     *,
@@ -344,6 +349,7 @@ def emit_certificate(
     body_part_id,
     p7_der=None,
     tpm_result=None,
+    auth_method=None,
     params=None
 ) -> Dict[str, Any]:
 
@@ -353,34 +359,40 @@ def emit_certificate(
     XSslClientDn = request.headers.get('X-Ssl-Client-Dn', None)
     XSslClientCert = request.headers.get('X-Ssl-Client-Cert', None)
 
-    if username:
-        username = username
-    else:
-        client_cert = cx509.load_pem_x509_certificate(unquote(XSslClientCert).encode("utf-8"))
-        if not is_directly_issued_by_cert_in_folder(client_cert, ca['pem']['certificate_path_pem'])[0]:
+    if auth_method == "tls":
+        if not is_client_certificate_valid_for_ca_reference(
+            XSslClientCert,
+            (params or {}).get("ca_references", []),
+            template_oid=template_oid,
+        ):
             return {
                 "status": "denied",
                 "status_text": "denied",
             }
-        if is_certificate_revoked_by_crl(client_cert, ca.get("crl", {}).get("path_crl")):
-            return {
-                "status": "denied",
-                "status_text": "denied",
-            }
-        if not _cert_has_template_oid(client_cert, template_oid):
-            return {
-                "status": "denied",
-                "status_text": "denied",
-            }
+
+
         username = XSslClientDn.split('=', 1)[1]
 
-    r = search_user(username, "(!(userAccountControl:1.2.840.113556.1.4.803:=4096))(!(userAccountControl:1.2.840.113556.1.4.803:=8192))")
-    if not r:
-        return {
-            "status": "denied",
-            "status_text": "denied",
-        }
-    samdbr, sam_entry = r
+    pac = g.get("pac_info", {})
+    flags = pac.get("account_flags")
+    if flags is not None:
+        # Samba flags: 0x10 = user, 0x80 = machine, 0x100 = DC.
+        # Reject non-user accounts
+        if not (flags & 0x10) or flags & 0x180:
+            return {"status": "denied", "status_text": "denied"}
+        cn, sid_str, upn = pac.get("sam_name"), pac.get("sid"), pac.get("upn")
+        if not cn or not sid_str:
+            return {"status": "denied", "status_text": "denied"}
+    else:
+        # PAC account flags are missing: validate and resolve through LDAP.
+        r = search_user_ldap3(userauth=username, ldap_filter="(!(userAccountControl:1.2.840.113556.1.4.803:=4096))(!(userAccountControl:1.2.840.113556.1.4.803:=8192))")
+        if not r:
+            return {"status": "denied", "status_text": "denied"}
+        cn = ldap_text(r, "sAMAccountName")
+        sid_str = ldap_sid(r)
+        upn = ldap_text(r, "userPrincipalName")
+        if not cn or not sid_str:
+            return {"status": "denied", "status_text": "denied"}
 
     denied = False
     must_pending = False
@@ -423,7 +435,6 @@ def emit_certificate(
 
     
     # CN = sAMAccountName
-    cn = (sam_entry.get("sAMAccountName") or [b"user"])[0].decode("utf-8", "ignore")
     validity_seconds = (template or {}).get("validity", {}).get("validity_seconds") or 31536000
 
     builder = (
@@ -457,9 +468,10 @@ def emit_certificate(
 
     # ✅ Apply static template extensions (EKU/KU/AppPolicies/TemplateInfo)
     builder = _apply_static_extensions(builder, template)
+    # Key Attestation V2: add szOID_CERTSRV_V2_ATTESTATION_VERIFIED once the EK was accepted above
+    builder = apply_tpm_attestation_extensions(builder, tpm_result)
 
     # ➕ dynamic NTDS (SID)
-    sid_str = samdbr.schema_format_value("objectSID", sam_entry["objectSID"][0]).decode('utf-8')
     sid_bytes = sid_str.encode("ascii")
     
     ntds_der = NtdsCASecurityExt({
@@ -474,14 +486,12 @@ def emit_certificate(
         critical=False
     )
 
-    builder = apply_tpm_attestation_extensions(builder, tpm_result)
-
     # (2) sign according to CA key type
     priv = ca["__key_obj"]
-    if isinstance(priv, (ed25519.Ed25519PrivateKey, ed448.Ed448PrivateKey)):
-        cert = builder.sign(private_key=priv, algorithm=None)
-    else:
+    if isinstance(priv, (rsa.RSAPrivateKey, ec.EllipticCurvePrivateKey, dsa.DSAPrivateKey)):
         cert = builder.sign(private_key=priv, algorithm=hashes.SHA256())
+    else:
+        cert = builder.sign(private_key=priv, algorithm=None)
 
 
     return {

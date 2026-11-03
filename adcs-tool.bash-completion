@@ -1,0 +1,21 @@
+# Bash completion for adcs-tool. Source this file or install it in bash-completion/completions.
+_adcs_tool_complete() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    local executable="${COMP_WORDS[0]}"
+    local candidate
+    local -a matches=()
+    # Completing paths should use Bash's native filename completion.
+    if (( COMP_CWORD > 0 )); then
+        case "${COMP_WORDS[COMP_CWORD-1]}" in
+            --confadcs|--crt-path|--key-path|--crl-path|--csr-path)
+                COMPREPLY=( $(compgen -f -- "$cur") )
+                compopt -o filenames 2>/dev/null || true
+                return 0 ;;
+        esac
+    fi
+    while IFS= read -r candidate; do
+        [[ -n "$candidate" ]] && matches+=("$candidate")
+    done < <("$executable" --_complete "${COMP_WORDS[@]:1}" 2>/dev/null)
+    COMPREPLY=("${matches[@]}")
+}
+complete -F _adcs_tool_complete adcs-tool ./adcs-tool adcs_tool.py ./adcs_tool.py

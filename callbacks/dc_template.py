@@ -1,12 +1,18 @@
+from utils import ldap_text, ldap_raw
+import sys
+import argparse
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List, Set
 
+import os
+import re
 import uuid
 
 from asn1crypto import core as a_core
 from cryptography import x509 as cx509
 from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import ed25519, ed448
+from cryptography.hazmat.primitives.asymmetric import rsa, ec, dsa
+from cryptography.hazmat.primitives import serialization
 from cryptography.x509.oid import (
     NameOID,
     AuthorityInformationAccessOID,
@@ -14,9 +20,13 @@ from cryptography.x509.oid import (
     ObjectIdentifier as CObjectIdentifier,
 )
 
-from utils import search_user
-from tpm_certificate_extensions import apply_tpm_attestation_extensions
+from flask import g
+from utils import search_user_ldap3, get_default_realm
 from utils import _apply_static_extensions, validate_csr
+from tpm_support import apply_tpm_attestation_extensions
+import base64
+import json
+import textwrap
 
 
 
@@ -47,24 +57,28 @@ template_major_version = 100
 template_minor_version = 3
 auto_enroll            = True
 
-def define_template(*, app_conf, username=None, request=None, params=None):
+def define_template(*, app_conf, username=None, request=None, params=None, auth_method=None):
 
     validity_seconds = 31536000       # 1 year
     renewal_seconds  = 3628800        # 42 days
 
-    if request is not None and request.headers.get('X-Ssl-Client-Sha1'):
-        return
+    XSslClientDn = request.headers.get('X-Ssl-Client-Dn', None) if request is not None else None
+    XSslClientCert = request.headers.get('X-Ssl-Client-Cert', None) if request is not None else None
 
-    username = username
+    if auth_method == "tls":
+        return None
 
     if not username:
         return
 
-    r = search_user(username,"(userAccountControl:1.2.840.113556.1.4.803:=8192)")
-    if not r:
-        return
-
-    samdbr, sam_entry = r
+    pac = g.get("pac_info", {})
+    flags = pac.get("account_flags")
+    # Samba ACB_SVRTRUST (0x0100): domain controller account.
+    if flags is not None:
+        if not flags & 0x100:
+            return None
+    elif not search_user_ldap3(userauth=username, ldap_filter="(userAccountControl:1.2.840.113556.1.4.803:=8192)"):
+        return None
 
 
     return {
@@ -96,15 +110,9 @@ def define_template(*, app_conf, username=None, request=None, params=None):
         },
 
         "flags": {
+            "hash_algorithm": "sha256",
             "private_key_flags": {
                 "exportable_key": False,
-                "attest_preferred": False,
-                "attest_required": False,
-                "require_v2_attestation": False,
-                "attestation_without_policy": False,
-                "ek_trust_on_use": False,
-                "ek_validate_cert": False,
-                "ek_validate_key": False,
             },
 
             "subject_name_flags": {
@@ -229,37 +237,48 @@ def emit_certificate(
     request=None,
     body_part_id=None,
     tpm_result=None,
+    auth_method=None,
     params=None,
     **kwargs
 ) -> Dict[str, Any]:
 
-    if request is not None and request.headers.get('X-Ssl-Client-Sha1'):
+    XSslClientDn = request.headers.get('X-Ssl-Client-Dn', None) if request is not None else None
+    XSslClientCert = request.headers.get('X-Ssl-Client-Cert', None) if request is not None else None
+
+    if auth_method == "tls":
         return {
             "status": "denied",
             "status_text": "denied",
         }
 
+
+        username = XSslClientDn.split('=', 1)[1]
+
+    # Reject a known non-DC account without querying LDAP.
+    flags = g.get("pac_info", {}).get("account_flags")
+    if flags is not None and not flags & 0x100:
+        return {"status": "denied", "status_text": "denied"}
+
     csr = cx509.load_der_x509_csr(csr_der)
     validate_csr(csr)
 
-    r = search_user(username,"(userAccountControl:1.2.840.113556.1.4.803:=8192)")
+    r = search_user_ldap3(userauth=username, ldap_filter="(userAccountControl:1.2.840.113556.1.4.803:=8192)")
     if not r:
         return {
             "status": "denied",
             "status_text": "denied",
         }
-    samdbr, sam_entry = r
+    sam_name = ldap_text(r, "sAMAccountName")
+    objectGUID = ldap_raw(r, "objectGUID")
+    if not sam_name or not objectGUID:
+        return {"status": "denied", "status_text": "denied"}
 
-
-    csr = cx509.load_der_x509_csr(csr_der)
     ca_cert = cx509.load_der_x509_certificate(ca["__certificate_der"])
     now = datetime.utcnow() - timedelta(minutes=5)
 
-    raw_sam = sam_entry["sAMAccountName"][0].decode('utf-8').lower()
+    raw_sam = sam_name.lower()
     realm = username.split('$@')[1].lower()
     dc_fqdn = raw_sam.replace('$','') + '.' + realm
-    objectGUID = sam_entry["objectGUID"][0]
-
     dc_guid_ad_bytes_le = _guid_to_ad_bytes_le(objectGUID)
 
     validity_seconds = (template or {}).get("validity", {}).get("validity_seconds") or 31536000
@@ -311,6 +330,8 @@ def emit_certificate(
 
     # ✅ static template extensions (EKU/KU/AppPolicies/TemplateInfo)
     builder = _apply_static_extensions(builder, template)
+    # Key Attestation V2: add szOID_CERTSRV_V2_ATTESTATION_VERIFIED once the EK was accepted above
+    builder = apply_tpm_attestation_extensions(builder, tpm_result)
 
     san_items: List[cx509.GeneralName] = []
     seen: Set[str] = set()
@@ -343,13 +364,11 @@ def emit_certificate(
 
     builder = builder.add_extension(cx509.SubjectAlternativeName(san_items), critical=False)
 
-    builder = apply_tpm_attestation_extensions(builder, tpm_result)
-
     priv = ca["__key_obj"]
-    if isinstance(priv, (ed25519.Ed25519PrivateKey, ed448.Ed448PrivateKey)):
-        cert = builder.sign(private_key=priv, algorithm=None)
-    else:
+    if isinstance(priv, (rsa.RSAPrivateKey, ec.EllipticCurvePrivateKey, dsa.DSAPrivateKey)):
         cert = builder.sign(private_key=priv, algorithm=hashes.SHA512())
+    else:
+        cert = builder.sign(private_key=priv, algorithm=None)
 
     return {
         "status": "issued",

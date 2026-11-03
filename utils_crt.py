@@ -16,6 +16,7 @@ from datetime import datetime, timezone, timedelta
 from cryptography import x509 as cx509
 from cryptography.x509.oid import NameOID, ObjectIdentifier
 from cryptography.hazmat.primitives import hashes, serialization
+from asn1crypto import core as a_core
 from cryptography.hazmat.primitives.asymmetric import (
     rsa,
     ec,
@@ -91,12 +92,7 @@ def _read_sidecar_num(path: str) -> Optional[int]:
 
 
 def _write_sidecar_num(path: str, num: int) -> None:
-    tmp = path + ".tmp"
-    with open(tmp, "wt", encoding="utf-8") as f:
-        f.write(str(int(num)))
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)  # atomic on POSIX
+    _atomic_write(path, str(int(num)).encode("ascii"), mode=0o644)
 
 
 def _next_crl_number_persistent(crl_path: str, crl, bump: bool = True) -> int:
@@ -162,10 +158,7 @@ def _write_crl_file(crl_path: str, pem_bytes: bytes) -> None:
     """Write a PEM CRL to disk safely (create dirs, fsync, replace)."""
     dirn = os.path.dirname(crl_path) or "."
     os.makedirs(dirn, exist_ok=True)
-    with open(crl_path, "wb") as f:
-        f.write(pem_bytes)
-        f.flush()
-        os.fsync(f.fileno())
+    _atomic_write(crl_path, pem_bytes, mode=0o644)
 
 
 # -----------------------------------------------------------------------------
@@ -173,8 +166,11 @@ def _write_crl_file(crl_path: str, pem_bytes: bytes) -> None:
 # -----------------------------------------------------------------------------
 
 def revoke(ca_key, ca_cert: cx509.Certificate, serial, crl_path: str, next_update_hours: int = 8) -> None:
-    """Add a revoked entry for `serial` and write a new CRL."""
-    serial_int = _serial_to_int(serial)
+    """Revoke one or more serials and write the CRL once."""
+    serials = serial if isinstance(serial, (list, tuple, set)) else [serial]
+    serial_ints = {_serial_to_int(s) for s in serials}
+    if not serial_ints:
+        return
 
     now = datetime.now(timezone.utc)
     next_update = now + timedelta(hours=int(next_update_hours))
@@ -201,30 +197,34 @@ def revoke(ca_key, ca_cert: cx509.Certificate, serial, crl_path: str, next_updat
 
     builder = builder.add_extension(cx509.CRLNumber(crl_number), critical=False)
 
-    # Reinstate all previous revoked certs except the one being (re)added
+    # Reinstate previous revoked certs except those being (re)added
     for rc in _iter_revoked(old_crl):
-        if rc.serial_number == serial_int:
+        if rc.serial_number in serial_ints:
             continue
         builder = builder.add_revoked_certificate(rc)
 
-    rcb = (
-        cx509.RevokedCertificateBuilder()
-        .serial_number(serial_int)
-        .revocation_date(now)
-        .add_extension(cx509.CRLReason(cx509.ReasonFlags.unspecified), critical=False)
-    ).build()
-    builder = builder.add_revoked_certificate(rcb)
+    for serial_int in sorted(serial_ints):
+        rcb = (
+            cx509.RevokedCertificateBuilder()
+            .serial_number(serial_int)
+            .revocation_date(now)
+            .add_extension(cx509.CRLReason(cx509.ReasonFlags.unspecified), critical=False)
+        ).build()
+        builder = builder.add_revoked_certificate(rcb)
 
     builder = _add_aki_if_absent(builder, ca_key)
 
-    new_crl = builder.sign(private_key=ca_key, algorithm=hashes.SHA256())
+    new_crl = builder.sign(private_key=ca_key, algorithm=_x509_signature_hash_for_key(ca_key))
     pem_bytes = new_crl.public_bytes(encoding=serialization.Encoding.PEM)
     _write_crl_file(crl_path, pem_bytes)
 
 
 def unrevoke(ca_key, ca_cert: cx509.Certificate, serial, crl_path: str, next_update_hours: int = 8) -> None:
-    """Remove a revoked entry for `serial` and write a new CRL."""
-    serial_int = _serial_to_int(serial)
+    """Unrevoke one or more serials and write the CRL once."""
+    serials = serial if isinstance(serial, (list, tuple, set)) else [serial]
+    serial_ints = {_serial_to_int(s) for s in serials}
+    if not serial_ints:
+        return
 
     now = datetime.now(timezone.utc)
     next_update = now + timedelta(hours=int(next_update_hours))
@@ -253,15 +253,15 @@ def unrevoke(ca_key, ca_cert: cx509.Certificate, serial, crl_path: str, next_upd
 
     builder = builder.add_extension(cx509.CRLNumber(crl_number), critical=False)
 
-    # Reinstate all previous revoked certs except the one being removed
+    # Reinstate all previous revoked certs except those being removed
     for rc in _iter_revoked(old_crl):
-        if rc.serial_number == serial_int:
+        if rc.serial_number in serial_ints:
             continue
         builder = builder.add_revoked_certificate(rc)
 
     builder = _add_aki_if_absent(builder, ca_key)
 
-    new_crl = builder.sign(private_key=ca_key, algorithm=hashes.SHA256())
+    new_crl = builder.sign(private_key=ca_key, algorithm=_x509_signature_hash_for_key(ca_key))
     pem_bytes = new_crl.public_bytes(encoding=serialization.Encoding.PEM)
     _write_crl_file(crl_path, pem_bytes)
 
@@ -322,7 +322,7 @@ def resign_crl(
 
     builder = _add_aki_if_absent(builder, ca_key)
 
-    algo = _select_algo(hash_name)
+    algo = _x509_signature_hash_for_key(ca_key, hash_name=hash_name)
     new_crl = builder.sign(private_key=ca_key, algorithm=algo)
     pem_bytes = new_crl.public_bytes(encoding=serialization.Encoding.PEM)
     _write_crl_file(crl_path, pem_bytes)
@@ -377,30 +377,15 @@ def issue_cert_with_new_key(
     key_type: str = "rsa",
     rsa_key_size: int = 2048,
     ec_curve: str = "secp256r1",
+    mldsa_variant: str = "mldsa65",
     key_export_password: Optional[bytes] = None,
 ) -> Tuple[cx509.Certificate, Any, bytes, bytes]:
     """Generate a new keypair, issue an end-entity certificate, and return (cert_obj, privkey_obj, cert_pem, key_pem)."""
 
-    key_type_l = (key_type or "rsa").lower()
-    if key_type_l == "rsa":
-        if int(rsa_key_size) not in (2048, 3072, 4096):
-            raise ValueError("--rsa-bits must be one of: 2048, 3072, 4096.")
-        priv = rsa.generate_private_key(public_exponent=65537, key_size=int(rsa_key_size))
-    elif key_type_l == "ec":
-        curve_map = {
-            "secp256r1": ec.SECP256R1(),
-            "secp384r1": ec.SECP384R1(),
-            "secp521r1": ec.SECP521R1(),
-            "secp256k1": ec.SECP256K1(),
-        }
-        curve = curve_map.get((ec_curve or "secp256r1").lower(), ec.SECP256R1())
-        priv = ec.generate_private_key(curve)
-    elif key_type_l == "ed25519":
-        priv = ed25519.Ed25519PrivateKey.generate()
-    elif key_type_l == "ed448":
-        priv = ed448.Ed448PrivateKey.generate()
-    else:
-        raise ValueError(f"Unknown key_type: {key_type}")
+    priv = _generate_private_key_for_type(
+        key_type=key_type, rsa_key_size=rsa_key_size,
+        ec_curve=ec_curve, mldsa_variant=mldsa_variant,
+    )
 
     pub = priv.public_key()
 
@@ -457,10 +442,7 @@ def issue_cert_with_new_key(
         if sans:
             builder = builder.add_extension(cx509.SubjectAlternativeName(sans), critical=False)
 
-    if isinstance(ca_key, (ed25519.Ed25519PrivateKey, ed448.Ed448PrivateKey)):
-        cert = builder.sign(private_key=ca_key, algorithm=None)
-    else:
-        cert = builder.sign(private_key=ca_key, algorithm=hashes.SHA256())
+    cert = builder.sign(private_key=ca_key, algorithm=_x509_signature_hash_for_key(ca_key))
 
     cert_pem = cert.public_bytes(encoding=serialization.Encoding.PEM)
 
@@ -476,6 +458,69 @@ def issue_cert_with_new_key(
     )
 
     return cert, priv, cert_pem, key_pem
+
+
+# -----------------------------------------------------------------------------
+# Microsoft AD CS / Active Directory certificate OIDs
+# -----------------------------------------------------------------------------
+
+OID_MS_CERT_TEMPLATE_NAME = "1.3.6.1.4.1.311.20.2"
+OID_MS_CERT_TEMPLATE_INFO = "1.3.6.1.4.1.311.21.7"
+OID_MS_NTDS_CA_SECURITY = "1.3.6.1.4.1.311.25.2"
+OID_MS_NTDS_OBJECT_SID = "1.3.6.1.4.1.311.25.2.1"
+OID_MS_UPN = "1.3.6.1.4.1.311.20.2.3"
+OID_MS_AD_GUID = "1.3.6.1.4.1.311.25.1"
+OID_MS_APPLICATION_POLICIES = "1.3.6.1.4.1.311.21.10"
+
+_KNOWN_OID_NAMES = {
+    OID_MS_CERT_TEMPLATE_NAME: "Microsoft Certificate Template Name",
+    OID_MS_CERT_TEMPLATE_INFO: "Microsoft Certificate Template Information",
+    OID_MS_NTDS_CA_SECURITY: "Microsoft NTDS CA Security Extension",
+    OID_MS_NTDS_OBJECT_SID: "Microsoft NTDS Object SID",
+    OID_MS_UPN: "Microsoft User Principal Name",
+    OID_MS_AD_GUID: "Microsoft AD Object GUID",
+    OID_MS_APPLICATION_POLICIES: "Microsoft Application Policies",
+    "1.3.6.1.4.1.311.20.2.2": "Microsoft Smart Card Logon",
+    "1.3.6.1.4.1.311.10.3.4": "Microsoft Encrypting File System",
+}
+
+
+class _MsCertificateTemplateInfo(a_core.Sequence):
+    _fields = [
+        ("template_id", a_core.ObjectIdentifier),
+        ("major_version", a_core.Integer, {"optional": True}),
+        ("minor_version", a_core.Integer, {"optional": True}),
+    ]
+
+
+class _ExplicitOctetString0(a_core.Sequence):
+    class_ = 2
+    tag = 0
+    _fields = [("value", a_core.OctetString)]
+
+
+class _NtdsOtherName(a_core.Sequence):
+    class_ = 2
+    tag = 0
+    _fields = [
+        ("type_id", a_core.ObjectIdentifier),
+        ("value", _ExplicitOctetString0),
+    ]
+
+
+class _NtdsCASecurityExt(a_core.Sequence):
+    _fields = [("other_name", _NtdsOtherName)]
+
+
+class _ApplicationPolicyInfo(a_core.Sequence):
+    _fields = [
+        ("policy_identifier", a_core.ObjectIdentifier),
+        ("policy_qualifiers", a_core.Any, {"optional": True}),
+    ]
+
+
+class _ApplicationPolicyInfos(a_core.SequenceOf):
+    _child_spec = _ApplicationPolicyInfo
 
 
 # -----------------------------------------------------------------------------
@@ -687,12 +732,406 @@ def get_public_key_info(cert: cx509.Certificate) -> Tuple[str, Optional[int]]:
         return ("Ed448", None)
     return (pk.__class__.__name__, None)
 
+
+
+def oid_display(oid: Any) -> str:
+    """Return a readable OID label while preserving the dotted value."""
+    dotted = getattr(oid, "dotted_string", None) or str(oid)
+    friendly = _KNOWN_OID_NAMES.get(dotted)
+    if friendly:
+        return f"{friendly} ({dotted})"
+    name = getattr(oid, "_name", None)
+    if not name and isinstance(oid, str):
+        try:
+            name = getattr(ObjectIdentifier(oid), "_name", None)
+        except Exception:
+            name = None
+    if name and name != "Unknown OID":
+        return f"{name} ({dotted})"
+    return dotted
+
+
+def get_raw_extension_value(cert: cx509.Certificate, oid: str) -> Optional[bytes]:
+    """Return an extension's DER payload, including Microsoft/private OIDs."""
+    try:
+        value = cert.extensions.get_extension_for_oid(ObjectIdentifier(oid)).value
+    except Exception:
+        return None
+
+    raw = getattr(value, "value", None)
+    if isinstance(raw, (bytes, bytearray)):
+        return bytes(raw)
+
+    public_bytes = getattr(value, "public_bytes", None)
+    if callable(public_bytes):
+        try:
+            return bytes(public_bytes())
+        except Exception:
+            pass
+    return None
+
+
+def decode_asn1_text(data: bytes) -> Optional[str]:
+    """Decode a DER string used by Microsoft template/OtherName extensions."""
+    try:
+        native = a_core.Asn1Value.load(data).native
+        if isinstance(native, str):
+            return native
+        if isinstance(native, (bytes, bytearray)):
+            data = bytes(native)
+    except Exception:
+        pass
+
+    for encoding in ("utf-8", "utf-16-be", "utf-16-le", "ascii"):
+        try:
+            text = data.decode(encoding).strip("\x00")
+            if text:
+                return text
+        except Exception:
+            continue
+    return None
+
+
+def get_certificate_template_info(cert: cx509.Certificate) -> Dict[str, Any]:
+    """Return Microsoft certificate template name, OID and major/minor version."""
+    result: Dict[str, Any] = {
+        "name": None,
+        "oid": None,
+        "major": None,
+        "minor": None,
+    }
+
+    raw_name = get_raw_extension_value(cert, OID_MS_CERT_TEMPLATE_NAME)
+    if raw_name:
+        result["name"] = decode_asn1_text(raw_name)
+
+    raw_info = get_raw_extension_value(cert, OID_MS_CERT_TEMPLATE_INFO)
+    if not raw_info:
+        return result
+
+    try:
+        info = _MsCertificateTemplateInfo.load(raw_info)
+        result["oid"] = info["template_id"].dotted
+        major = info["major_version"].native
+        minor = info["minor_version"].native
+        result["major"] = int(major) if major is not None else None
+        result["minor"] = int(minor) if minor is not None else None
+        return result
+    except Exception:
+        pass
+
+    # Be tolerant of non-canonical encoders / omitted version fields.
+    try:
+        seq = a_core.Sequence.load(raw_info)
+        if len(seq) > 0:
+            first = seq[0].native
+            result["oid"] = str(first) if first is not None else None
+        if len(seq) > 1 and seq[1].native is not None:
+            result["major"] = int(seq[1].native)
+        if len(seq) > 2 and seq[2].native is not None:
+            result["minor"] = int(seq[2].native)
+    except Exception:
+        pass
+    return result
+
+
+
+def get_certificate_object_sid(cert: cx509.Certificate) -> Optional[str]:
+    """Return the Object SID from the Microsoft NTDS CA Security extension."""
+    raw = get_raw_extension_value(cert, OID_MS_NTDS_CA_SECURITY)
+    if not raw:
+        return None
+    try:
+        ntds = _NtdsCASecurityExt.load(raw)
+        other_name = ntds["other_name"]
+        if other_name["type_id"].dotted != OID_MS_NTDS_OBJECT_SID:
+            return None
+        sid_value = other_name["value"]["value"].native
+        if isinstance(sid_value, str):
+            return sid_value
+        if isinstance(sid_value, (bytes, bytearray)):
+            return bytes(sid_value).decode("ascii", "replace")
+    except Exception:
+        return None
+    return None
+
+
+def get_certificate_san_entries(cert: cx509.Certificate) -> List[Dict[str, Any]]:
+    """Return structured SAN entries, decoding Microsoft UPN and AD objectGUID."""
+    try:
+        san = cert.extensions.get_extension_for_class(cx509.SubjectAlternativeName).value
+    except Exception:
+        return []
+
+    result: List[Dict[str, Any]] = []
+    for name in san:
+        item: Dict[str, Any] = {"type": None, "value": None, "oid": None, "display": None}
+        if isinstance(name, cx509.DNSName):
+            item.update(type="DNS", value=name.value, display=f"DNS={name.value}")
+        elif isinstance(name, cx509.RFC822Name):
+            item.update(type="Email", value=name.value, display=f"Email={name.value}")
+        elif isinstance(name, cx509.UniformResourceIdentifier):
+            item.update(type="URI", value=name.value, display=f"URI={name.value}")
+        elif isinstance(name, cx509.IPAddress):
+            value = str(name.value)
+            item.update(type="IP", value=value, display=f"IP={value}")
+        elif isinstance(name, cx509.RegisteredID):
+            value = name.value.dotted_string
+            item.update(type="RID", value=value, oid=value, display=f"RID={value}")
+        elif isinstance(name, cx509.DirectoryName):
+            value = name.value.rfc4514_string()
+            item.update(type="DirectoryName", value=value, display=f"DirectoryName={value}")
+        elif isinstance(name, cx509.OtherName):
+            oid = name.type_id.dotted_string
+            item["oid"] = oid
+            if oid == OID_MS_UPN:
+                value = decode_asn1_text(name.value) or name.value.hex()
+                item.update(type="UPN", value=value, display=f"UPN={value}")
+            elif oid == OID_MS_AD_GUID:
+                value = None
+                try:
+                    raw_guid = a_core.OctetString.load(name.value).native
+                    if isinstance(raw_guid, (bytes, bytearray)) and len(raw_guid) == 16:
+                        value = str(uuid.UUID(bytes_le=bytes(raw_guid)))
+                except Exception:
+                    pass
+                value = value or name.value.hex()
+                item.update(type="AD-GUID", value=value, display=f"AD-GUID={value}")
+            else:
+                value = decode_asn1_text(name.value) or name.value.hex()
+                item.update(
+                    type="OtherName",
+                    value=value,
+                    display=f"OtherName[{oid}]={value}",
+                )
+        else:
+            value = str(getattr(name, "value", name))
+            item.update(type=name.__class__.__name__, value=value, display=value)
+        result.append(item)
+    return result
+
+
+def get_certificate_san_details(cert: cx509.Certificate) -> List[str]:
+    """Return display-ready SAN entries; use get_certificate_san_entries for structure."""
+    return [str(item["display"]) for item in get_certificate_san_entries(cert)]
+
+
+def get_certificate_application_policies(cert: cx509.Certificate) -> List[Dict[str, str]]:
+    """Decode Microsoft Application Policies (1.3.6.1.4.1.311.21.10)."""
+    raw = get_raw_extension_value(cert, OID_MS_APPLICATION_POLICIES)
+    if not raw:
+        return []
+    try:
+        infos = _ApplicationPolicyInfos.load(raw)
+    except Exception:
+        return []
+
+    result: List[Dict[str, str]] = []
+    for info in infos:
+        try:
+            dotted = info["policy_identifier"].dotted
+        except Exception:
+            continue
+        result.append({"oid": dotted, "display": oid_display(dotted)})
+    return result
+
+
+def get_certificate_key_usage(cert: cx509.Certificate) -> List[str]:
+    """Return enabled KeyUsage flags with X.509 spelling."""
+    try:
+        ku = cert.extensions.get_extension_for_class(cx509.KeyUsage).value
+    except Exception:
+        return []
+
+    values: List[str] = []
+    for attr, label in (
+        ("digital_signature", "digitalSignature"),
+        ("content_commitment", "contentCommitment"),
+        ("key_encipherment", "keyEncipherment"),
+        ("data_encipherment", "dataEncipherment"),
+        ("key_agreement", "keyAgreement"),
+        ("key_cert_sign", "keyCertSign"),
+        ("crl_sign", "cRLSign"),
+    ):
+        if getattr(ku, attr):
+            values.append(label)
+    if ku.key_agreement:
+        if ku.encipher_only:
+            values.append("encipherOnly")
+        if ku.decipher_only:
+            values.append("decipherOnly")
+    return values
+
+
+def get_certificate_extended_key_usage(cert: cx509.Certificate) -> List[Dict[str, str]]:
+    """Return EKUs as structured OID/display entries."""
+    try:
+        eku = cert.extensions.get_extension_for_class(cx509.ExtendedKeyUsage).value
+    except Exception:
+        return []
+    return [
+        {"oid": oid.dotted_string, "display": oid_display(oid)}
+        for oid in eku
+    ]
+
+
+def get_certificate_policies(cert: cx509.Certificate) -> List[Dict[str, str]]:
+    """Return standard X.509 Certificate Policies."""
+    try:
+        policies = cert.extensions.get_extension_for_class(cx509.CertificatePolicies).value
+    except Exception:
+        return []
+    result: List[Dict[str, str]] = []
+    for policy in policies:
+        oid = policy.policy_identifier
+        result.append({"oid": oid.dotted_string, "display": oid_display(oid)})
+    return result
+
+
+def get_certificate_aia(cert: cx509.Certificate) -> List[Dict[str, str]]:
+    """Return Authority Information Access entries."""
+    try:
+        aia = cert.extensions.get_extension_for_class(cx509.AuthorityInformationAccess).value
+    except Exception:
+        return []
+    result: List[Dict[str, str]] = []
+    for desc in aia:
+        location = str(getattr(desc.access_location, "value", desc.access_location))
+        result.append({
+            "method_oid": desc.access_method.dotted_string,
+            "method": oid_display(desc.access_method),
+            "location": location,
+        })
+    return result
+
+
+def get_certificate_crl_distribution_points(cert: cx509.Certificate) -> List[str]:
+    """Return all full-name CRL distribution point values."""
+    try:
+        cdp = cert.extensions.get_extension_for_class(cx509.CRLDistributionPoints).value
+    except Exception:
+        return []
+    result: List[str] = []
+    for point in cdp:
+        for general_name in point.full_name or []:
+            result.append(str(getattr(general_name, "value", general_name)))
+    return result
+
+
+def get_certificate_extension_summaries(cert: cx509.Certificate) -> List[Dict[str, Any]]:
+    """Return a generic inventory of every X.509 extension present in the certificate."""
+    result: List[Dict[str, Any]] = []
+    for ext in cert.extensions:
+        result.append({
+            "oid": ext.oid.dotted_string,
+            "name": oid_display(ext.oid),
+            "critical": bool(ext.critical),
+            "value_type": ext.value.__class__.__name__,
+        })
+    return result
+
+
+def parse_certificate_details(
+    cert: cx509.Certificate,
+) -> Dict[str, Any]:
+    """Parse a certificate into reusable structured details.
+
+    In addition to generic X.509 metadata, this decodes the Microsoft AD CS
+    extensions carried by the certificate itself: template information, NTDS
+    Object SID, UPN/AD objectGUID SAN OtherNames, and Application Policies.
+    No AD CS configuration or callback metadata is consulted.
+    """
+    try:
+        basic_constraints = cert.extensions.get_extension_for_class(cx509.BasicConstraints).value
+        is_ca = bool(basic_constraints.ca)
+        path_length = basic_constraints.path_length
+    except Exception:
+        is_ca = False
+        path_length = None
+
+    try:
+        sig_hash = cert.signature_hash_algorithm.name
+    except Exception:
+        sig_hash = None
+
+    try:
+        ski = cert.extensions.get_extension_for_class(cx509.SubjectKeyIdentifier).value.digest.hex()
+    except Exception:
+        ski = None
+
+    try:
+        aki_value = cert.extensions.get_extension_for_class(cx509.AuthorityKeyIdentifier).value
+        aki = aki_value.key_identifier.hex() if aki_value.key_identifier else None
+    except Exception:
+        aki = None
+
+    pk_type, pk_bits = get_public_key_info(cert)
+    template = get_certificate_template_info(cert)
+    app_policies = get_certificate_application_policies(cert)
+    eku = get_certificate_extended_key_usage(cert)
+    aia = get_certificate_aia(cert)
+
+    not_before = getattr(cert, "not_valid_before_utc", None) or cert.not_valid_before
+    not_after = getattr(cert, "not_valid_after_utc", None) or cert.not_valid_after
+
+    return {
+        "subject": cert.subject.rfc4514_string(),
+        "issuer": cert.issuer.rfc4514_string(),
+        "serial_number": cert.serial_number,
+        "serial_hex": format(cert.serial_number, "x"),
+        "version": getattr(cert.version, "name", str(cert.version)),
+        "not_valid_before": not_before,
+        "not_valid_after": not_after,
+        "basic_constraints": {
+            "is_ca": is_ca,
+            "path_length": path_length,
+        },
+        "signature": {
+            "oid": cert.signature_algorithm_oid.dotted_string,
+            "display": oid_display(cert.signature_algorithm_oid),
+            "hash": sig_hash,
+        },
+        "public_key": {
+            "type": pk_type,
+            "bits": pk_bits,
+        },
+        "fingerprints": {
+            "sha256": cert.fingerprint(hashes.SHA256()).hex(),
+        },
+        "subject_key_identifier": ski,
+        "authority_key_identifier": aki,
+        "microsoft": {
+            "template": template,
+            "object_sid": get_certificate_object_sid(cert),
+            "application_policies": app_policies,
+        },
+        "san": get_certificate_san_entries(cert),
+        "key_usage": get_certificate_key_usage(cert),
+        "extended_key_usage": eku,
+        "certificate_policies": get_certificate_policies(cert),
+        "aia": aia,
+        "crl_distribution_points": get_certificate_crl_distribution_points(cert),
+        "extensions": get_certificate_extension_summaries(cert),
+    }
+
+
+def parse_certificate_file(
+    path: str,
+) -> Dict[str, Any]:
+    """Load and parse a PEM/DER/base64 certificate file in one call."""
+    details = parse_certificate_details(load_certificate_file(path))
+    details["file"] = path
+    return details
+
+
 def scan_cert_paths(cert_dir: str) -> List[str]:
-    """Return a sorted list of certificate file paths in `cert_dir` (recursive)."""
-    files: List[str] = []
-    for ext in _CERT_EXTS:
-        files.extend(glob.glob(os.path.join(cert_dir, f"**/*{ext}"), recursive=True))
-    return sorted(set(files))
+    return [
+        os.path.join(root, name)
+        for root, _, files in os.walk(cert_dir)
+        for name in files
+        if os.path.splitext(name)[1].lower() in _CERT_EXTS
+    ]
+
 
 def revoked_serials_set(crl_path: Optional[str]) -> Set[int]:
     """Return the set of revoked serial numbers (as ints) from the CRL at `crl_path`."""
@@ -704,16 +1143,59 @@ def revoked_serials_set(crl_path: Optional[str]) -> Set[int]:
     return {rc.serial_number for rc in _iter_revoked(crl)}
 
 
-def is_certificate_revoked_by_crl(cert: Optional[cx509.Certificate], crl_path: Optional[str]) -> bool:
-    """Return True when `cert` serial is present in the CRL at `crl_path`.
+def is_certificate_revoked_by_crl(
+    cert: Optional[cx509.Certificate],
+    crl_path: Optional[str],
+    issuer_cert: Optional[cx509.Certificate] = None,
+) -> bool:
+    """Return True when the certificate must be treated as revoked.
 
-    Missing CRL configuration/file is treated as "not revoked" so callers can
-    decide separately whether the CRL must be mandatory for their flow.
-    Invalid/unreadable CRLs still raise, making configuration problems visible.
+    This helper is intentionally fail-closed for authentication flows: a missing,
+    unreadable, stale, not-yet-valid, wrongly issued, or badly signed CRL is
+    treated exactly like a revoked certificate.
     """
-    if cert is None or not crl_path:
-        return False
-    return cert.serial_number in revoked_serials_set(crl_path)
+    if cert is None or not crl_path or issuer_cert is None:
+        return True
+
+    try:
+        crl = _load_existing_crl(crl_path)
+        if crl is None:
+            return True
+
+        if crl.issuer != issuer_cert.subject:
+            return True
+
+        if not crl.is_signature_valid(issuer_cert.public_key()):
+            return True
+
+        now = datetime.now(timezone.utc)
+
+        try:
+            last_update = crl.last_update_utc
+        except AttributeError:
+            last_update = crl.last_update
+            if last_update.tzinfo is None:
+                last_update = last_update.replace(tzinfo=timezone.utc)
+
+        try:
+            next_update = crl.next_update_utc
+        except AttributeError:
+            next_update = crl.next_update
+            if next_update is not None and next_update.tzinfo is None:
+                next_update = next_update.replace(tzinfo=timezone.utc)
+
+        if last_update is None or next_update is None:
+            return True
+
+        if now < last_update or now >= next_update:
+            return True
+
+        return any(
+            revoked.serial_number == cert.serial_number
+            for revoked in _iter_revoked(crl)
+        )
+    except Exception:
+        return True
 
 def _extract_cn_and_sans(cert: cx509.Certificate) -> tuple[str, list[str]]:
     try:
@@ -758,6 +1240,15 @@ def _pick_key_params_from_existing(cert: cx509.Certificate) -> dict[str, Any]:
         if isinstance(pk, ed448.Ed448PublicKey):
             params["key_type"] = "ed448"
             return params
+        if mldsa is not None:
+            for variant, cls in (
+                ("mldsa44", mldsa.MLDSA44PublicKey),
+                ("mldsa65", mldsa.MLDSA65PublicKey),
+                ("mldsa87", mldsa.MLDSA87PublicKey),
+            ):
+                if isinstance(pk, cls):
+                    params["key_type"] = variant
+                    return params
     except Exception:
         pass
 
@@ -818,6 +1309,7 @@ def _resolve_storage_paths_from_ca(ca: Dict[str, Any]) -> Tuple[str, str]:
     )
     private_dir = (
         storage.get("private_dir")
+        or ca.get("__path_private")
         or os.path.dirname(ca.get("__path_key") or "")
     )
 
@@ -837,29 +1329,27 @@ def _cmd_rotate_if_expiring(
     conf,
     write_fullchain_to_crt: bool = True,
     valid_days=365
-) -> int:
+) -> Dict[str, Any]:
 
     ca = _cli_find_ca_by_id(conf, ca_id)
     if not ca:
-        print(f"ERROR: CA '{ca_id}' not found in adcs.yaml", file=sys.stderr)
-        return 3
+        raise LookupError(f"CA '{ca_id}' not found in adcs.yaml")
 
     if not os.path.isfile(crt_path):
-        print(f"ERROR: crt file not found: {crt_path}", file=sys.stderr)
-        return 4
+        raise FileNotFoundError(f"crt file not found: {crt_path}")
 
     try:
         cert = load_certificate_file(crt_path)
     except Exception as e:
-        print(f"ERROR: cannot parse certificate '{crt_path}': {e}", file=sys.stderr)
-        return 5
+        raise ValueError(f"cannot parse certificate '{crt_path}': {e}") from e
 
     now = datetime.now(timezone.utc)
     not_after = cert.not_valid_after_utc
     days_left = (not_after - now).days
     if days_left > threshold_days:
-        print(f"OK: {days_left} days left (> {threshold_days}); no rotation needed.")
-        return 0
+        return {'ca_id': ca_id, 'rotated': False, 'days_left': days_left,
+                'threshold_days': threshold_days, 'certificate_path': crt_path,
+                'key_path': key_path}
 
     cn, sans = _extract_cn_and_sans(cert)
     request_id = uuid.uuid4().int
@@ -906,11 +1396,9 @@ def _cmd_rotate_if_expiring(
     _atomic_write(os.path.join(private_storage_dir, f"{request_id}.key.pem"), key_pem, mode=stat.S_IRUSR | stat.S_IWUSR)
     _atomic_write(key_path, key_pem, mode=stat.S_IRUSR | stat.S_IWUSR)
 
-    print(
-        f"ROTATED: cert replaced at '{crt_path}', key replaced at '{key_path}' "
-        f"(days left was {days_left} ≤ threshold {threshold_days})"
-    )
-    return 0
+    return {'ca_id': ca_id, 'rotated': True, 'days_left': days_left,
+            'threshold_days': threshold_days, 'certificate_path': crt_path,
+            'key_path': key_path}
 
 
 def _cli_find_ca_by_id(conf: Dict[str, Any], ca_id: str) -> Optional[Dict[str, Any]]:
@@ -954,11 +1442,56 @@ def _is_mldsa_private_key(key) -> bool:
         ))
     )
 
-def _x509_signature_hash_for_key(key):
-    # Pure EdDSA and ML-DSA signatures do not take an external hash algorithm.
-    if isinstance(key, (ed25519.Ed25519PrivateKey, ed448.Ed448PrivateKey)) or _is_mldsa_private_key(key):
-        return None
-    return hashes.SHA256()
+def _generate_private_key_for_type(
+    *, key_type: str = "rsa", rsa_key_size: int = 2048,
+    ec_curve: str = "secp256r1", mldsa_variant: str = "mldsa65",
+):
+    """Generate an RSA, ECC, EdDSA or ML-DSA key for local certificates."""
+    kind = (key_type or "rsa").strip().lower().replace("_", "-")
+    if kind == "rsa":
+        if int(rsa_key_size) not in (2048, 3072, 4096):
+            raise ValueError("--rsa-bits must be one of: 2048, 3072, 4096.")
+        return rsa.generate_private_key(public_exponent=65537, key_size=int(rsa_key_size))
+    if kind in ("ec", "ecc", "ecdsa"):
+        curves = {
+            "secp256r1": ec.SECP256R1, "prime256v1": ec.SECP256R1,
+            "p-256": ec.SECP256R1, "secp384r1": ec.SECP384R1,
+            "p-384": ec.SECP384R1, "secp521r1": ec.SECP521R1,
+            "p-521": ec.SECP521R1, "secp256k1": ec.SECP256K1,
+        }
+        curve_name = (ec_curve or "secp256r1").strip().lower()
+        curve_class = curves.get(curve_name)
+        if curve_class is None:
+            raise ValueError("--ec-curve must be one of: secp256r1, secp384r1, secp521r1 (aliases: prime256v1, p-256, p-384, p-521).")
+        return ec.generate_private_key(curve_class())
+    if kind == "ed25519":
+        return ed25519.Ed25519PrivateKey.generate()
+    if kind == "ed448":
+        return ed448.Ed448PrivateKey.generate()
+    if kind in ("mldsa", "ml-dsa", "mldsa44", "ml-dsa-44", "mldsa65", "ml-dsa-65", "mldsa87", "ml-dsa-87"):
+        if mldsa is None:
+            raise ValueError("ML-DSA requires a version of cryptography that supports ML-DSA keys and X.509 certificates (>= 49.0.0).")
+        variant = (mldsa_variant or "mldsa65").strip().lower().replace("_", "-")
+        if kind in ("mldsa44", "ml-dsa-44", "mldsa65", "ml-dsa-65", "mldsa87", "ml-dsa-87"):
+            variant = kind
+        variants = {
+            "mldsa44": mldsa.MLDSA44PrivateKey, "ml-dsa-44": mldsa.MLDSA44PrivateKey, "44": mldsa.MLDSA44PrivateKey,
+            "mldsa65": mldsa.MLDSA65PrivateKey, "ml-dsa-65": mldsa.MLDSA65PrivateKey, "65": mldsa.MLDSA65PrivateKey,
+            "mldsa87": mldsa.MLDSA87PrivateKey, "ml-dsa-87": mldsa.MLDSA87PrivateKey, "87": mldsa.MLDSA87PrivateKey,
+        }
+        cls = variants.get(variant)
+        if cls is None:
+            raise ValueError("--mldsa-variant must be one of: mldsa44, mldsa65, mldsa87 (aliases: ml-dsa-44, ml-dsa-65, ml-dsa-87, 44, 65, 87).")
+        return cls.generate()
+    raise ValueError(f"Unsupported --key-type: {key_type}")
+
+
+def _x509_signature_hash_for_key(key, hash_name: str = "sha256"):
+    # Only RSA, ECDSA and DSA take an external hash algorithm.
+    # Ed25519, Ed448 and ML-DSA sign with algorithm=None.
+    if isinstance(key, (rsa.RSAPrivateKey, ec.EllipticCurvePrivateKey, dsa.DSAPrivateKey)):
+        return _select_algo(hash_name)
+    return None
 
 def _private_key_pem_format_for_key(key):
     # OpenSSL's traditional private key format is not available for modern
@@ -1156,7 +1689,7 @@ def create_ca(
             format=_private_key_pem_format_for_key(key),
             encryption_algorithm=serialization.NoEncryption(),
         )
-        _atomic_write(key_path, key_pem, mode=stat.S_IRUSR | stat.S_IWUSR)
+        _atomic_write(key_path, key_pem, mode=0o640)
 
         crl_builder = (
             cx509.CertificateRevocationListBuilder()
@@ -1204,7 +1737,7 @@ def _cmd_create_ca(
     conf=None,
     cn=None,
     csr_path: Optional[str] = None,
-) -> int:
+) -> Dict[str, Any]:
     parent_ca = None
     effective_crt_path = crt_path
     effective_key_path = key_path
@@ -1216,8 +1749,7 @@ def _cmd_create_ca(
             raise ValueError('Configuration is required when --ca-id is used.')
         parent_ca = _cli_find_ca_by_id(conf, ca_id)
         if not parent_ca:
-            print(f"ERROR: parent CA '{ca_id}' not found in adcs.yaml", file=sys.stderr)
-            return 3
+            raise LookupError(f"parent CA '{ca_id}' not found in adcs.yaml")
 
         certs_dir, private_dir = _resolve_storage_paths_from_ca(parent_ca)
         os.makedirs(certs_dir, exist_ok=True)
@@ -1251,61 +1783,41 @@ def _cmd_create_ca(
             _copy_if_different(
                 effective_key_path,
                 user_key_path,
-                mode=stat.S_IRUSR | stat.S_IWUSR,
+                mode=0o640,
             )
 
 
-    print("")
-
-    slug = cn.lower().replace(' ','_')
+    slug = cn.lower().replace(' ', '_')
     display_name = cn.strip()
     aia_crl_base_url = aia_crl_base_url.rstrip('/')
-
-    print(f'  - id: "{slug}"')
-    print("")
-
-    if ca_id:
-        print(f'    issuer_ca_id: "{ca_id}"')
-        print("")
-
-    print(f'    display_name: "{display_name}"')
-    print("    urls:")
-    if result.get('key_path'):
-        print(f'      crl_http:        "{aia_crl_base_url}/crl/{slug}/{os.path.basename(crl_path)}"')
-    else:
-        print("      crl_http:        null")
-    print(f'      ca_issuers_http: "{aia_crl_base_url}/certs/{slug}/{os.path.basename(crt_path)}"')
-    print("    pem:")
-    print(f"      certificate_path_pem: {crt_path}")
-    if result.get('key_path'):
-        print(f"      key_path_pem:         {key_path}")
-        print("      key_passphrase: null")
-    else:
-        print("      key_path_pem:         null")
-        print("      key_passphrase: null")
-    print("")
-    print("    crl:")
-    if result.get('key_path'):
-        print(f"      path_crl: {crl_path}")
-    else:
-        print("      path_crl: null")
-        print("      # No CRL was created: --csr-path supplies only a public key, not the CA private key needed to sign CRLs.")
-    print("")
-    print("    storage_paths:")
-    print(f"      cert_dir: /var/lib/adcs/pki/newcerts/{slug}/")
-    print(f"      csr_dir:  /var/lib/adcs/pki/csr/{slug}/")
-    print(f"      private_dir: /var/lib/adcs/pki/private/{slug}/")
+    return {
+        'id': slug,
+        **({'issuer_ca_id': ca_id} if ca_id else {}),
+        'display_name': display_name,
+        'urls': {
+            'crl_http': f'{aia_crl_base_url}/crl/{slug}/{os.path.basename(crl_path)}',
+            'ca_issuers_http': f'{aia_crl_base_url}/certs/{slug}/{os.path.basename(crt_path)}',
+        },
+        'pem': {
+            'certificate_path_pem': crt_path,
+            'key_path_pem': key_path if result.get('key_path') else
+                            f'/var/lib/adcs/pki/private/{slug}/{slug}.key.pem',
+            'key_passphrase': None,
+        },
+        'crl': {'path_crl': crl_path},
+        'storage_paths': {
+            'cert_dir': f'/var/lib/adcs/pki/newcerts/{slug}/',
+            'csr_dir': f'/var/lib/adcs/pki/csr/{slug}/',
+            'private_dir': f'/var/lib/adcs/pki/private/{slug}/',
+        },
+    }
 
 
 
-    return 0
-
-
-def _cmd_resign_crl(ca_id: str, next_update_hours: int = 8, bump_number: bool = True, conf=None) -> int:
+def _cmd_resign_crl(ca_id: str, next_update_hours: int = 8, bump_number: bool = True, conf=None) -> Dict[str, Any]:
     ca = _cli_find_ca_by_id(conf, ca_id)
     if not ca:
-        print(f"ERROR: CA '{ca_id}' not found in adcs.yaml", file=sys.stderr)
-        return 3
+        raise LookupError(f"CA '{ca_id}' not found in adcs.yaml")
 
     ca_key = ca["__key_obj"]
     ca_cert_der = ca["__certificate_der"]
@@ -1321,8 +1833,7 @@ def _cmd_resign_crl(ca_id: str, next_update_hours: int = 8, bump_number: bool = 
         bump_number=bump_number,
         next_update_hours=next_update_hours,
     )
-    print(f"CRL re-signed for '{ca_id}' -> CRLNumber {new_num} (path: {crl_path})")
-    return 0
+    return {'ca_id': ca_id, 'crl_number': new_num, 'crl_path': crl_path}
 
 
 
@@ -1453,7 +1964,7 @@ def create_ket_cert(
         .add_extension(_build_ket_application_policies_ext(), critical=False)
     )
 
-    cert = builder.sign(private_key=ca_key, algorithm=hashes.SHA256())
+    cert = builder.sign(private_key=ca_key, algorithm=_x509_signature_hash_for_key(ca_key))
 
     cert_pem = cert.public_bytes(encoding=serialization.Encoding.PEM)
     key_pem = priv.private_bytes(
@@ -1474,22 +1985,18 @@ def _cmd_create_ket_cert(
     rsa_bits: int = 2048,
     valid_days: int = 7,
     subject_dc: Optional[List[str]] = None,
-) -> int:
+) -> Dict[str, str]:
     try:
         ca = _cli_find_ca_by_id(conf, ca_id)
         if not ca:
-            print(f"ERROR: CA not found: {ca_id}", file=sys.stderr)
-            return 1
+            raise LookupError(f"CA not found: {ca_id}")
 
         if not common_name.strip():
-            print("ERROR: --cn is required with --create-ket-cert", file=sys.stderr)
-            return 1
+            raise ValueError("--cn is required with --create-ket-cert")
         if int(rsa_bits) not in (2048, 3072, 4096):
-            print("ERROR: --rsa-bits must be one of: 2048, 3072, 4096", file=sys.stderr)
-            return 1
+            raise ValueError("--rsa-bits must be one of: 2048, 3072, 4096")
         if int(valid_days) <= 0:
-            print("ERROR: --valid-days must be > 0", file=sys.stderr)
-            return 1
+            raise ValueError("--valid-days must be > 0")
 
         certs_dir, private_dir = _resolve_storage_paths_from_ca(ca)
         os.makedirs(certs_dir, exist_ok=True)
@@ -1510,19 +2017,29 @@ def _cmd_create_ket_cert(
         fullchain_pem = _compose_fullchain_pem(cert_pem, conf=conf, ca=ca)
 
         _atomic_write(storage_crt_path, fullchain_pem, mode=0o644)
-        _atomic_write(storage_key_path, key_pem, mode=stat.S_IRUSR | stat.S_IWUSR)
+        _atomic_write(storage_key_path, key_pem, mode=0o640)
 
         if crt_path:
             _copy_if_different(storage_crt_path, crt_path, mode=0o644)
         if key_path:
-            _copy_if_different(storage_key_path, key_path, mode=stat.S_IRUSR | stat.S_IWUSR)
-        print(f"    ket_cert_pem: {storage_crt_path}")
-        print(f"    ket_key_pem: {storage_key_path}")
-        return 0
+            _copy_if_different(storage_key_path, key_path, mode=0o640)
+        return {'ket_cert_pem': storage_crt_path, 'ket_key_pem': storage_key_path}
 
-    except Exception as e:
-        print(f"ERROR: create KET certificate failed: {e}", file=sys.stderr)
-        return 1
+    except Exception:
+        raise
+
+def _read_all_bytes(paths: list[str]) -> bytes:
+    out = b""
+    for p in paths:
+        if not p:
+            continue
+        if not os.path.isfile(p):
+            raise FileNotFoundError(f"chain file not found: {p}")
+        with open(p, "rb") as f:
+            out += f.read()
+            if not out.endswith(b"\n"):
+                out += b"\n"
+    return out
 
 def _build_ca_chain_pem(conf: Dict[str, Any], ca: Dict[str, Any]) -> bytes:
     """

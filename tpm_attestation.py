@@ -2,7 +2,6 @@ from pathlib import Path
 import base64
 import hashlib
 import hmac
-import logging
 import os
 import struct
 from datetime import datetime, timezone
@@ -13,38 +12,27 @@ from asn1crypto import algos as a_algos
 from asn1crypto import cms as a_cms
 from asn1crypto import core as a_core
 from asn1crypto import csr as a_csr
-from asn1crypto import keys as a_keys
+from adcs_logging import get_logger
+
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, padding as sym_padding, serialization
-from cms_crypto import _signature_algo_for_ca_key, _sign_tbs_with_ca_key, _tbs_signed_attrs
+from utils import (
+    _cms_digest_algorithm_for_ca_key,
+    _signature_algo_for_ca_key,
+    _sign_tbs_with_ca_key,
+    _tbs_signed_attrs,
+)
 from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-try:
-    from cryptography.hazmat.decrepit.ciphers.algorithms import TripleDES
-except ImportError:  # cryptography < 43
-    TripleDES = algorithms.TripleDES
 
-logger = logging.getLogger("adcs.tpm_attestation")
+logger = get_logger("tpm_attestation")
 
 OID_MS_ENROLL_EK_INFO = "1.3.6.1.4.1.311.21.23"
 OID_MS_ENROLL_AIK_INFO = "1.3.6.1.4.1.311.21.39"
 OID_MS_ENROLL_KSP_NAME = "1.3.6.1.4.1.311.21.25"
 OID_MS_ENROLL_ATTESTATION_STATEMENT = "1.3.6.1.4.1.311.21.33"
-# Windows CertEnroll requests observed in the field can carry the base KAST
-# under .21.24, including requests that also contain the MS-WCCE 55 V2
-# attributes.  Keep the historical constant name for API compatibility, but
-# treat .21.24 and the documented .21.33 as alternative encodings of the same
-# base key-attestation statement at the protocol-selection boundary.
 OID_MS_ENROLL_ATTESTATION_STATEMENT_LEGACY = "1.3.6.1.4.1.311.21.24"
-OID_MS_ENROLL_V2_CONTAINER_NAME = "1.3.6.1.4.1.311.21.44"
-OID_MS_ENROLL_V2_EK_ALGORITHM = "1.3.6.1.4.1.311.21.45"
-OID_MS_ENROLL_V2_EK_PARAMETER = "1.3.6.1.4.1.311.21.46"
-OID_MS_ENROLL_V2_AIK_INFO = "1.3.6.1.4.1.311.21.47"
-OID_MS_ENROLL_V2_ATTESTATION_STATEMENT = "1.3.6.1.4.1.311.21.48"
-OID_MS_CERTSRV_V2_ATTESTATION_VERIFIED = "1.3.6.1.4.1.311.21.49"
-OID_VERISIGN_SENDER_NONCE = "2.16.840.1.113733.1.9.5"
-OID_TCG_KP_AIK_CERTIFICATE = "2.23.133.8.3"
 OID_CMC_STATUS_INFO = "1.3.6.1.5.5.7.7.1"
 OID_MS_CMC_CHALLENGE_WRAPPER = "1.3.6.1.4.1.311.10.10.1"
 OID_ENROLL_KSP_NAME = "1.3.6.1.4.1.311.21.25"
@@ -53,6 +41,16 @@ OID_ENROLL_ATTESTATION_CHALLENGE = "1.3.6.1.4.1.311.21.28"
 OID_ENROLL_ENCRYPTION_ALGORITHM = "1.3.6.1.4.1.311.21.29"
 OID_ID_CCT_PKI_RESPONSE = "1.3.6.1.5.5.7.12.3"
 OID_ID_SIGNED_DATA = "1.2.840.113549.1.7.2"
+
+# Key Attestation V2 (MS-WCCE 2.2.2.7.x): EK-wrapped restricted HMAC key flow.
+OID_ENROLL_V2_CONTAINER_NAME = "1.3.6.1.4.1.311.21.44"
+OID_ENROLL_V2_EK_ALGORITHM = "1.3.6.1.4.1.311.21.45"
+OID_ENROLL_V2_EK_PARAMETER = "1.3.6.1.4.1.311.21.46"
+OID_ENROLL_V2_AIK_INFO = "1.3.6.1.4.1.311.21.47"
+OID_ENROLL_V2_ATTESTATION_STATEMENT = "1.3.6.1.4.1.311.21.48"
+# Non-critical certificate extension (ASN.1 NULL) added once V2 attestation succeeded.
+OID_CERTSRV_V2_ATTESTATION_VERIFIED = "1.3.6.1.4.1.311.21.49"
+OID_VERISIGN_SENDER_NONCE = "2.16.840.1.113733.1.9.5"
 
 TPM2_ST_ATTEST_CERTIFY = 0x8017
 TPM2_ST_ATTEST_QUOTE = 0x8018
@@ -116,10 +114,11 @@ class TPMAttestationBundle:
     ms_aik_info_raw: Optional[bytes] = None
     ms_ksp_name: Optional[str] = None
     ms_ksp_name_raw: Optional[bytes] = None
-    ms_v2_container_name: Optional[str] = None
-    ms_v2_container_name_raw: Optional[bytes] = None
+
+    # Key Attestation V2 attributes (szOID_ENROLL_V2_*).
     ms_v2_aik_info_raw: Optional[bytes] = None
     ms_v2_attestation_statement_raw: Optional[bytes] = None
+    ms_v2_container_name: Optional[str] = None
 
     # EK material recovered from Microsoft EK_INFO. This is still Microsoft-only
     # state, not a generic attestation mode.
@@ -130,45 +129,6 @@ class TPMAttestationBundle:
 
 class TPMAttestationError(Exception):
     pass
-
-
-def select_microsoft_key_attestation_statement(
-    bundle: TPMAttestationBundle | None,
-) -> Optional[bytes]:
-    """Return the unambiguous base Microsoft KeyAttestationStatement.
-
-    MS-WCCE documents ``szOID_ENROLL_ATTESTATION_STATEMENT`` as .21.33, while
-    current Windows CertEnroll traffic has also been observed using .21.24 for
-    the base KAST.  Both are accepted for V1/V2 interoperability.  If a request
-    supplies both OIDs, their decoded OCTET STRING payloads must be identical;
-    otherwise the request is ambiguous and is rejected instead of silently
-    preferring one value.
-    """
-    if bundle is None:
-        return None
-
-    documented = getattr(bundle, "ms_attestation_statement_raw", None)
-    compat = getattr(bundle, "ms_attestation_blob_raw", None)
-
-    def _coerce(value, label: str) -> Optional[bytes]:
-        if value in (None, b"", ""):
-            return None
-        if not isinstance(value, (bytes, bytearray, memoryview)):
-            raise ValueError(f"{label} must contain a byte string")
-        raw = bytes(value)
-        return raw or None
-
-    documented_raw = _coerce(documented, "The .21.33 attestation statement")
-    compat_raw = _coerce(compat, "The .21.24 attestation statement")
-
-    if documented_raw is not None and compat_raw is not None:
-        if not hmac.compare_digest(documented_raw, compat_raw):
-            raise ValueError(
-                "The request contains conflicting Microsoft key-attestation "
-                "statements in OIDs .21.33 and .21.24"
-            )
-        return documented_raw
-    return documented_raw or compat_raw
 
 
 class _Reader:
@@ -272,7 +232,7 @@ class TPMPublicKey:
     ecc_curve: int = 0
     ecc_x: bytes = b""
     ecc_y: bytes = b""
-    _raw_bytes: bytes | None = None
+    _raw_bytes: Optional[bytes] = None
 
     def to_cryptography_public_key(self):
         if self.alg_type == TPM2_ALG_RSA:
@@ -487,87 +447,6 @@ def _verify_microsoft_key_attestation_signature(data: bytes, signature: bytes, a
 
     raise TPMAttestationError("Microsoft keyAttestation signature verification failed") from last_error
 
-
-def _verify_microsoft_key_attestation_signature_with_public_key(
-    data: bytes,
-    signature: bytes,
-    public_key,
-) -> None:
-    """Verify a Microsoft keyAttestation signature with an X.509 AIK key.
-
-    AIK_INFO subject-only requests carry an AIK certificate instead of an
-    idBinding TPMT_PUBLIC.  Windows accepts both marshalled TPMT_SIGNATURE
-    values and provider-specific raw signatures, so mirror the tolerant
-    verification strategy of the legacy path while keeping the trust decision
-    anchored in the validated AIK certificate.
-    """
-    last_error: Exception | None = None
-
-    # First try a marshalled TPMT_SIGNATURE.  This path lets the encoded hash
-    # algorithm drive verification rather than guessing it.
-    try:
-        r = _Reader(signature)
-        sig_alg = r.u16()
-        hash_alg = r.u16()
-        hash_obj = _tpm_alg_to_hash_obj(hash_alg)
-
-        if isinstance(public_key, rsa.RSAPublicKey) and sig_alg in (TPM2_ALG_RSASSA, TPM2_ALG_RSAPSS):
-            sig_bytes = r.tpm2b()
-            r.ensure_eof("TPMT_SIGNATURE")
-            rsa_padding = (
-                padding.PKCS1v15()
-                if sig_alg == TPM2_ALG_RSASSA
-                else padding.PSS(mgf=padding.MGF1(hash_obj), salt_length=padding.PSS.MAX_LENGTH)
-            )
-            public_key.verify(sig_bytes, data, rsa_padding, hash_obj)
-            return
-
-        if isinstance(public_key, ec.EllipticCurvePublicKey) and sig_alg == TPM2_ALG_ECDSA:
-            from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
-
-            r_int = int.from_bytes(r.raw(r.u16()), "big")
-            s_int = int.from_bytes(r.raw(r.u16()), "big")
-            r.ensure_eof("TPMT_SIGNATURE")
-            public_key.verify(encode_dss_signature(r_int, s_int), data, ec.ECDSA(hash_obj))
-            return
-    except Exception as exc:
-        last_error = exc
-
-    hash_algs = [hashes.SHA256(), hashes.SHA384(), hashes.SHA512(), hashes.SHA1()]
-    if isinstance(public_key, rsa.RSAPublicKey):
-        for hash_obj in hash_algs:
-            for rsa_padding in (
-                padding.PKCS1v15(),
-                padding.PSS(mgf=padding.MGF1(hash_obj), salt_length=padding.PSS.MAX_LENGTH),
-            ):
-                try:
-                    public_key.verify(signature, data, rsa_padding, hash_obj)
-                    return
-                except Exception as exc:
-                    last_error = exc
-
-    elif isinstance(public_key, ec.EllipticCurvePublicKey):
-        from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
-
-        candidates = [signature]
-        if len(signature) % 2 == 0:
-            half = len(signature) // 2
-            candidates.append(
-                encode_dss_signature(
-                    int.from_bytes(signature[:half], "big"),
-                    int.from_bytes(signature[half:], "big"),
-                )
-            )
-        for candidate in candidates:
-            for hash_obj in hash_algs:
-                try:
-                    public_key.verify(candidate, data, ec.ECDSA(hash_obj))
-                    return
-                except Exception as exc:
-                    last_error = exc
-
-    raise TPMAttestationError("Microsoft keyAttestation signature verification failed") from last_error
-
 def _check_aik_attributes(aik: TPMPublicKey):
     required = (
         TPMA_OBJECT_RESTRICTED
@@ -660,21 +539,7 @@ def _load_private_key_from_pem(value, password=None):
     return serialization.load_pem_private_key(data, password=password)
 
 
-def _decrypt_cms_enveloped_data(
-    content_info_der: bytes,
-    recipient_cert_der: Optional[bytes],
-    recipient_key,
-    *,
-    allow_rsa_pkcs1v15: bool = True,
-    allow_3des: bool = True,
-) -> bytes:
-    """Decrypt a CryptoAPI-compatible CMS EnvelopedData message.
-
-    Windows ``CryptEncryptMessage`` commonly uses RSAES-PKCS1-v1_5 for RSA
-    recipient key transport.  It is accepted for protocol interoperability;
-    callers can disable it explicitly in non-Windows contexts.  Errors remain
-    generic so this helper is not exposed as a padding oracle.
-    """
+def _decrypt_cms_enveloped_data(content_info_der: bytes, recipient_cert_der: Optional[bytes], recipient_key) -> bytes:
     def _unwrap(blob: bytes) -> bytes:
         if not blob:
             raise ValueError("Empty CMS blob")
@@ -744,14 +609,7 @@ def _decrypt_cms_enveloped_data(
         key_alg = getattr(key_alg_field, "dotted", None) or key_alg_field.native
         encrypted_key = ktri["encrypted_key"].native
         if key_alg in ("rsa", "rsaes_pkcs1v15", "1.2.840.113549.1.1.1"):
-            if not allow_rsa_pkcs1v15:
-                raise ValueError("CMS RSAES-PKCS1-v1_5 key transport is disabled")
-            try:
-                cek = recipient_key.decrypt(encrypted_key, padding.PKCS1v15())
-            except Exception as exc:
-                raise ValueError(
-                    "Could not decrypt CMS recipient key with the provided certificate/private key"
-                ) from exc
+            raise ValueError("Insecure CMS key transport algorithm RSAES-PKCS1-v1_5 is not accepted")
         elif key_alg in ("rsaes_oaep", "1.2.840.113549.1.1.7"):
             oaep_params = ktri["key_encryption_algorithm"]["parameters"]
             hash_alg = hashes.SHA1()
@@ -787,9 +645,7 @@ def _decrypt_cms_enveloped_data(
     if enc_name in ("aes128_cbc", "aes192_cbc", "aes256_cbc"):
         cipher = Cipher(algorithms.AES(cek), modes.CBC(params))
     elif enc_name == "tripledes_3key":
-        if not allow_3des:
-            raise ValueError("CMS 3DES content encryption is disabled")
-        cipher = Cipher(TripleDES(cek), modes.CBC(params))
+        raise ValueError("Insecure CMS content encryption algorithm 3DES is not accepted")
     else:
         raise ValueError(f"Unsupported CMS content encryption algorithm: {enc_name}")
 
@@ -831,20 +687,10 @@ def _find_der_certificates_in_blob(blob: bytes) -> list[bytes]:
     return certs
 
 
-def decrypt_microsoft_hardware_key_info(
-    hardware_key_info_raw: bytes,
-    ket_cert_der: Optional[bytes],
-    ket_private_key,
-) -> dict:
-    """Decrypt Microsoft EK_INFO or AIK_INFO Client_HardwareKeyInfo.
-
-    Both attributes use the same CMS EnvelopedData carrier and the same
-    CRYPT_SEQUENCE_OF_ANY payload layout.  Keeping the parser generic is
-    important for subject-only AIK attestation introduced by Windows 10.
-    """
-    if not hardware_key_info_raw:
-        raise ValueError("hardware_key_info_raw is empty")
-    value = a_core.Any.load(hardware_key_info_raw)
+def decrypt_microsoft_ek_info(ek_info_raw: bytes, ket_cert_der: Optional[bytes], ket_private_key) -> dict:
+    if not ek_info_raw:
+        raise ValueError("ek_info_raw is empty")
+    value = a_core.Any.load(ek_info_raw)
     content_info_der = None
     for candidate in (getattr(value, "parsed", None), value):
         if candidate is None:
@@ -868,112 +714,19 @@ def decrypt_microsoft_hardware_key_info(
     certs = _find_der_certificates_in_blob(decrypted)
     return {
         "decrypted_raw": decrypted,
-        # Backward-compatible field name retained for the legacy EK path.
         "ek_cert_der": certs[0] if certs else None,
-        "leaf_cert_der": certs[0] if certs else None,
         "embedded_certificates_der": certs,
     }
 
 
-def decrypt_microsoft_ek_info(ek_info_raw: bytes, ket_cert_der: Optional[bytes], ket_private_key) -> dict:
-    """Backward-compatible alias for EK_INFO callers."""
-    return decrypt_microsoft_hardware_key_info(ek_info_raw, ket_cert_der, ket_private_key)
+def decrypt_microsoft_v2_aik_info(aik_info_raw: bytes, ket_cert_der: Optional[bytes], ket_private_key) -> bytes:
+    """Decrypt szOID_ENROLL_V2_AIK_INFO (CMS EnvelopedData for the CA exchange cert).
 
-
-def decrypt_microsoft_v2_aik_info(
-    v2_aik_info_raw: bytes,
-    ket_cert_der: Optional[bytes],
-    ket_private_key,
-) -> dict:
-    """Decrypt ``szOID_ENROLL_V2_AIK_INFO`` and return the V2 AIK SPKI.
-
-    MS-WCCE 55.0 requires the encrypted content to be a DER-encoded
-    ``SubjectPublicKeyInfo``.  Validate the original bytes as a complete DER
-    PublicKeyInfo object, then normalize the public key for stable internal
-    comparison and hashing.
-
-    Do not require a byte-for-byte match with ``cryptography``'s serializer:
-    Windows can emit a valid RSA AlgorithmIdentifier with omitted parameters,
-    while ``cryptography`` re-encodes the same key with an explicit NULL.  Both
-    encodings identify the same public key and the original value can still be
-    strict, canonical DER at the ASN.1 level.
+    The decrypted content is the DER SubjectPublicKeyInfo of the V2 AIK.
     """
-    decrypted = decrypt_microsoft_hardware_key_info(
-        v2_aik_info_raw, ket_cert_der, ket_private_key
-    )
-    clear = bytes(decrypted.get("decrypted_raw") or b"")
-    if not clear:
-        raise ValueError("V2_AIK_INFO decrypted to an empty payload")
-
-    class _AnySequence(a_core.SequenceOf):
-        _child_spec = a_core.Any
-
-    class _AnySet(a_core.SetOf):
-        _child_spec = a_core.Any
-
-    # MS-WCCE 55.0 documents a direct SubjectPublicKeyInfo.  Patched Windows
-    # clients have also been observed emitting the strict DER compatibility
-    # wrapper below:
-    #
-    #     SEQUENCE { SubjectPublicKeyInfo, NULL }
-    #
-    # Accept only that exact two-element SEQUENCE, plus the historical
-    # one-element SEQUENCE/SET wrappers already accepted by this parser.  An
-    # arbitrary second value, certificate, or trailing element remains invalid.
-    candidates = [("direct", clear)]
-    for wrapper_type in (_AnySequence, _AnySet):
-        try:
-            wrapped = wrapper_type.load(clear, strict=True)
-            if wrapped.dump() != clear:
-                continue
-            if len(wrapped) == 1:
-                candidates.insert(0, ("single_element_wrapper", wrapped[0].dump()))
-            elif (
-                wrapper_type is _AnySequence
-                and len(wrapped) == 2
-                and wrapped[1].dump() == b"\x05\x00"
-            ):
-                candidates.insert(0, ("windows_spki_null_sequence", wrapped[0].dump()))
-        except Exception:
-            pass
-
-    seen = set()
-    for wrapper_name, candidate in candidates:
-        candidate = bytes(candidate)
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-        try:
-            # PublicKeyInfo.load(strict=True) validates complete DER framing and
-            # rejects trailing bytes.  dump() equality additionally ensures the
-            # ASN.1 value itself was encoded canonically.
-            public_key_info = a_keys.PublicKeyInfo.load(candidate, strict=True)
-            if public_key_info.dump() != candidate:
-                continue
-            public_key = serialization.load_der_public_key(candidate)
-            normalized = public_key.public_bytes(
-                serialization.Encoding.DER,
-                serialization.PublicFormat.SubjectPublicKeyInfo,
-            )
-            was_normalized = not hmac.compare_digest(normalized, candidate)
-            if was_normalized:
-                logger.info(
-                    "Normalized a valid V2_AIK_INFO SubjectPublicKeyInfo for "
-                    "stable internal comparison"
-                )
-            return {
-                "decrypted_raw": clear,
-                "aik_spki_der": normalized,
-                "aik_spki_source_der": candidate,
-                "aik_spki_was_normalized": was_normalized,
-                "aik_spki_wrapper": wrapper_name,
-                "aik_public_key": public_key,
-            }
-        except Exception:
-            continue
-    raise ValueError(
-        "V2_AIK_INFO decrypted content is not a complete DER SubjectPublicKeyInfo"
-    )
+    if not aik_info_raw:
+        raise ValueError("v2 aik_info_raw is empty")
+    return _decrypt_cms_enveloped_data(aik_info_raw, ket_cert_der, ket_private_key)
 
 
 def extract_microsoft_key_attestation_attributes_from_csr_der(csr_der: bytes) -> Optional[dict]:
@@ -984,59 +737,26 @@ def extract_microsoft_key_attestation_attributes_from_csr_der(csr_der: bytes) ->
         OID_MS_ENROLL_KSP_NAME,
         OID_MS_ENROLL_ATTESTATION_STATEMENT,
         OID_MS_ENROLL_ATTESTATION_STATEMENT_LEGACY,
-        OID_MS_ENROLL_V2_CONTAINER_NAME,
-        OID_MS_ENROLL_V2_AIK_INFO,
-        OID_MS_ENROLL_V2_ATTESTATION_STATEMENT,
+        OID_ENROLL_V2_AIK_INFO,
+        OID_ENROLL_V2_ATTESTATION_STATEMENT,
+        OID_ENROLL_V2_CONTAINER_NAME,
     }
 
-    def _extract_single_attribute_value(values_field, *, oid: str):
-        """Return the sole value from a PKCS#10 ``Attribute.values`` SET.
-
-        ``asn1crypto.csr.CRIAttribute`` knows the schema of a few standard
-        attributes only.  Microsoft key-attestation OIDs are therefore exposed
-        as a generic :class:`asn1crypto.core.Any` containing the complete DER
-        ``SET OF AttributeValue``.  Asking ``Any.parsed`` to decode that SET
-        produces an untyped ``core.Set`` which cannot be iterated reliably and
-        caused valid Windows V1 requests to be rejected.
-
-        Parse the outer SET explicitly as ``SET OF ANY`` and retain the strict
-        one-value rule required by MS-WCCE.  Known attributes that are already
-        represented as a typed SET continue to use their native container.
-        """
-
-        class _AnyAttributeValueSet(a_core.SetOf):
-            _child_spec = a_core.Any
-
-        if isinstance(values_field, a_core.Any):
-            encoded_values = values_field.dump()
+    def _extract_first_attribute_value(values_field):
+        try:
+            return values_field[0]
+        except Exception:
+            pass
+        parsed = getattr(values_field, "parsed", None)
+        if parsed is not None:
             try:
-                values = _AnyAttributeValueSet.load(encoded_values)
-            except Exception as exc:
-                raise ValueError(
-                    f"Microsoft key-attestation attribute {oid} has an invalid "
-                    "SET OF values encoding"
-                ) from exc
-            if values.dump() != encoded_values:
-                raise ValueError(
-                    f"Microsoft key-attestation attribute {oid} has a "
-                    "non-canonical values encoding"
-                )
-            items = list(values)
-        else:
-            try:
-                items = list(values_field)
-            except Exception as exc:
-                raise ValueError(
-                    f"Microsoft key-attestation attribute {oid} has no "
-                    "decodable values SET"
-                ) from exc
-
-        if len(items) != 1:
-            raise ValueError(
-                f"Microsoft key-attestation attribute {oid} must contain "
-                "exactly one value"
-            )
-        return items[0]
+                return parsed[0]
+            except Exception:
+                pass
+        try:
+            return list(values_field)[0]
+        except Exception:
+            return values_field
 
     def _raw_bytes(value_obj):
         try:
@@ -1067,13 +787,11 @@ def extract_microsoft_key_attestation_attributes_from_csr_der(csr_der: bytes) ->
         "attestation_blob_raw": None,
         "ksp_name": None,
         "ksp_name_raw": None,
-        "v2_container_name": None,
-        "v2_container_name_raw": None,
         "v2_aik_info_raw": None,
         "v2_attestation_statement_raw": None,
+        "v2_container_name": None,
         "found": False,
     }
-    seen_interesting: set[str] = set()
     for attr in req["certification_request_info"]["attributes"]:
         try:
             oid = attr["type"].dotted
@@ -1081,12 +799,7 @@ def extract_microsoft_key_attestation_attributes_from_csr_der(csr_der: bytes) ->
             continue
         if oid not in interesting:
             continue
-        if oid in seen_interesting:
-            raise ValueError(
-                f"Duplicate Microsoft key-attestation attribute in CSR: {oid}"
-            )
-        seen_interesting.add(oid)
-        value_obj = _extract_single_attribute_value(attr["values"], oid=oid)
+        value_obj = _extract_first_attribute_value(attr["values"])
         raw = _raw_bytes(value_obj)
         if raw is None:
             continue
@@ -1107,16 +820,15 @@ def extract_microsoft_key_attestation_attributes_from_csr_der(csr_der: bytes) ->
         elif oid == OID_MS_ENROLL_KSP_NAME:
             result["ksp_name_raw"] = raw
             result["ksp_name"] = _decode_any_string(value_obj)
-        elif oid == OID_MS_ENROLL_V2_CONTAINER_NAME:
-            result["v2_container_name_raw"] = raw
-            result["v2_container_name"] = _decode_any_string(value_obj)
-        elif oid == OID_MS_ENROLL_V2_AIK_INFO:
+        elif oid == OID_ENROLL_V2_AIK_INFO:
             result["v2_aik_info_raw"] = raw
-        elif oid == OID_MS_ENROLL_V2_ATTESTATION_STATEMENT:
+        elif oid == OID_ENROLL_V2_ATTESTATION_STATEMENT:
             try:
                 result["v2_attestation_statement_raw"] = a_core.OctetString.load(raw).native
             except Exception:
                 result["v2_attestation_statement_raw"] = raw
+        elif oid == OID_ENROLL_V2_CONTAINER_NAME:
+            result["v2_container_name"] = _decode_any_string(value_obj)
         result["found"] = True
     return result if result["found"] else None
 
@@ -1133,43 +845,10 @@ def extract_tpm_bundle_from_pkcs10_der(csr_der: bytes) -> Optional[TPMAttestatio
         ms_aik_info_raw=ms_attrs.get("aik_info_raw"),
         ms_ksp_name=ms_attrs.get("ksp_name"),
         ms_ksp_name_raw=ms_attrs.get("ksp_name_raw"),
-        ms_v2_container_name=ms_attrs.get("v2_container_name"),
-        ms_v2_container_name_raw=ms_attrs.get("v2_container_name_raw"),
         ms_v2_aik_info_raw=ms_attrs.get("v2_aik_info_raw"),
         ms_v2_attestation_statement_raw=ms_attrs.get("v2_attestation_statement_raw"),
+        ms_v2_container_name=ms_attrs.get("v2_container_name"),
     )
-
-
-def classify_microsoft_v2_key_attestation_bundle(bundle: TPMAttestationBundle | None) -> str:
-    """Return ``complete``, ``partial`` or ``absent`` for the MS-WCCE 55 V2 set.
-
-    A V2 authority-and-subject request is selected only when EK_INFO and every
-    V2 request attribute are present. A partial set is rejected by the caller
-    instead of silently downgrading to the relayable V1 protocol.
-    """
-    if bundle is None:
-        return "absent"
-    values = {
-        "ek_info": getattr(bundle, "ms_ek_info_raw", None),
-        # Accept the documented .21.33 KAST and the .21.24 KAST emitted by
-        # Windows CertEnroll.  This prevents a fully populated optional V2
-        # request from being mislabeled as a partial V2 request merely because
-        # the template does not require V2.
-        "attestation_statement": select_microsoft_key_attestation_statement(bundle),
-        "v2_aik_info": getattr(bundle, "ms_v2_aik_info_raw", None),
-        "v2_attestation_statement": getattr(bundle, "ms_v2_attestation_statement_raw", None),
-        "ksp_name": getattr(bundle, "ms_ksp_name", None),
-        "v2_container_name": getattr(bundle, "ms_v2_container_name", None),
-    }
-    present = {name for name, value in values.items() if value not in (None, "", b"")}
-    v2_specific = {
-        "v2_aik_info",
-        "v2_attestation_statement",
-        "v2_container_name",
-    }
-    if not (present & v2_specific):
-        return "absent"
-    return "complete" if len(present) == len(values) else "partial"
 
 
 def extract_tpm_bundle_from_cmc(p7_der: bytes) -> Optional[TPMAttestationBundle]:
@@ -1189,17 +868,17 @@ def try_extract_first_cert_from_blob(blob: bytes) -> Optional[bytes]:
     return certs[0] if certs else None
 
 
-def extract_public_key_from_decrypted_hardware_key_info(
-    decrypted_hardware_key_info: bytes,
+def extract_ek_pub_from_decrypted_ek_info(
+    decrypted_ek_info: bytes,
     *,
     embedded_certificates_der=None,
-    leaf_cert_der: Optional[bytes] = None,
+    ek_cert_der: Optional[bytes] = None,
 ):
     class _AnySequence(a_core.SequenceOf):
         _child_spec = a_core.Any
 
     try:
-        seq = _AnySequence.load(decrypted_hardware_key_info)
+        seq = _AnySequence.load(decrypted_ek_info)
         if seq:
             first_der = seq[0].dump()
             try:
@@ -1209,31 +888,17 @@ def extract_public_key_from_decrypted_hardware_key_info(
     except Exception:
         pass
 
-    cert_der = leaf_cert_der
+    cert_der = ek_cert_der
     if cert_der is None and embedded_certificates_der:
         for item in embedded_certificates_der:
             if item:
                 cert_der = item
                 break
     if cert_der is None:
-        cert_der = try_extract_first_cert_from_blob(decrypted_hardware_key_info)
+        cert_der = try_extract_first_cert_from_blob(decrypted_ek_info)
     if cert_der is None:
-        raise ValueError("Could not locate a SubjectPublicKeyInfo or certificate inside decrypted hardware key info")
+        raise ValueError("Could not locate an EK SubjectPublicKeyInfo or certificate inside decrypted EK_INFO")
     return x509.load_der_x509_certificate(cert_der).public_key()
-
-
-def extract_ek_pub_from_decrypted_ek_info(
-    decrypted_ek_info: bytes,
-    *,
-    embedded_certificates_der=None,
-    ek_cert_der: Optional[bytes] = None,
-):
-    """Backward-compatible EK-specific wrapper."""
-    return extract_public_key_from_decrypted_hardware_key_info(
-        decrypted_ek_info,
-        embedded_certificates_der=embedded_certificates_der,
-        leaf_cert_der=ek_cert_der,
-    )
 
 
 def _unwrap_first_set_value_der(blob: bytes) -> bytes:
@@ -1365,7 +1030,7 @@ def build_encryption_algorithm_attr_value(algorithm_oid: str) -> bytes:
 def build_ms_challenge_wrapper_value(
     *,
     encryption_algorithm_oid: str,
-    aik_info_hash: bytes | None,
+    aik_info_hash: Optional[bytes],
     ksp_name: str,
     tach_blob: bytes,
     inner_body_part_id: int = 1,
@@ -1412,170 +1077,11 @@ def build_ms_challenge_wrapper_value(
     ).dump()
 
 
-def build_microsoft_v2_challenge_crypt_attributes(
-    *,
-    wrapped_hmac_key: bytes,
-    nonce: bytes,
-    container_name: str,
-    ek_algorithm: str,
-    ek_parameter: str | int,
-) -> bytes:
-    """Build the DER ``CRYPT_ATTRIBUTES`` challenge defined by MS-WCCE 55.0."""
-    wrapped_hmac_key = bytes(wrapped_hmac_key)
-    nonce = bytes(nonce)
-    if not wrapped_hmac_key:
-        raise ValueError("V2 wrapped HMAC key is empty")
-    if len(nonce) != 32:
-        raise ValueError("V2 challenge nonce must be exactly 32 bytes")
-    if not isinstance(container_name, str) or not container_name.strip():
-        raise ValueError("V2 AIK container name is required")
-    if not isinstance(ek_algorithm, str) or not ek_algorithm.strip():
-        raise ValueError("V2 EK algorithm identifier is required")
-    ek_parameter_text = str(ek_parameter).strip()
-    if not ek_parameter_text or not ek_parameter_text.isdecimal():
-        raise ValueError("V2 EK parameter must be a decimal key size")
-
-    attrs = MsWrappedAttrs(
-        [
-            MsWrappedAttr(
-                {
-                    "oid": a_core.ObjectIdentifier(OID_ENROLL_ATTESTATION_CHALLENGE),
-                    "values": [
-                        _as_any_from_der(a_core.OctetString(wrapped_hmac_key).dump())
-                    ],
-                }
-            ),
-            MsWrappedAttr(
-                {
-                    "oid": a_core.ObjectIdentifier(OID_VERISIGN_SENDER_NONCE),
-                    "values": [_as_any_from_der(a_core.OctetString(nonce).dump())],
-                }
-            ),
-            MsWrappedAttr(
-                {
-                    "oid": a_core.ObjectIdentifier(OID_MS_ENROLL_V2_CONTAINER_NAME),
-                    "values": [
-                        _as_any_from_der(a_core.BMPString(container_name).dump())
-                    ],
-                }
-            ),
-            MsWrappedAttr(
-                {
-                    "oid": a_core.ObjectIdentifier(OID_MS_ENROLL_V2_EK_ALGORITHM),
-                    "values": [_as_any_from_der(a_core.BMPString(ek_algorithm).dump())],
-                }
-            ),
-            MsWrappedAttr(
-                {
-                    "oid": a_core.ObjectIdentifier(OID_MS_ENROLL_V2_EK_PARAMETER),
-                    "values": [
-                        _as_any_from_der(a_core.BMPString(ek_parameter_text).dump())
-                    ],
-                }
-            ),
-        ]
-    )
-    return attrs.dump()
-
-
-def parse_microsoft_v2_challenge_crypt_attributes(der: bytes) -> dict[str, bytes | str]:
-    """Strict parser used by tests and diagnostics for the V2 CA challenge."""
-    raw = bytes(der)
-    attrs = MsWrappedAttrs.load(raw)
-    if attrs.dump() != raw:
-        raise ValueError("V2 challenge CRYPT_ATTRIBUTES is non-canonical")
-    values: dict[str, bytes | str] = {}
-    for attr in attrs:
-        oid = attr["oid"].dotted
-        attr_values = list(attr["values"])
-        if len(attr_values) != 1 or oid in values:
-            raise ValueError(f"V2 challenge attribute {oid} must occur exactly once")
-        value_der = attr_values[0].dump()
-        if oid in {OID_ENROLL_ATTESTATION_CHALLENGE, OID_VERISIGN_SENDER_NONCE}:
-            values[oid] = bytes(a_core.OctetString.load(value_der).native)
-        elif oid in {
-            OID_MS_ENROLL_V2_CONTAINER_NAME,
-            OID_MS_ENROLL_V2_EK_ALGORITHM,
-            OID_MS_ENROLL_V2_EK_PARAMETER,
-        }:
-            values[oid] = str(a_core.BMPString.load(value_der).native)
-        else:
-            raise ValueError(f"Unexpected V2 challenge attribute {oid}")
-    required = {
-        OID_ENROLL_ATTESTATION_CHALLENGE,
-        OID_VERISIGN_SENDER_NONCE,
-        OID_MS_ENROLL_V2_CONTAINER_NAME,
-        OID_MS_ENROLL_V2_EK_ALGORITHM,
-        OID_MS_ENROLL_V2_EK_PARAMETER,
-    }
-    if set(values) != required:
-        missing = ", ".join(sorted(required - set(values)))
-        raise ValueError(f"V2 challenge is missing required attributes: {missing}")
-    if len(values[OID_VERISIGN_SENDER_NONCE]) != 32:
-        raise ValueError("V2 challenge SenderNonce is not 32 bytes")
-    return values
-
-
-def build_and_sign_microsoft_v2_attestation_challenge(
-    *,
-    request_id: int,
-    ca_exchange_chain_der,
-    encryption_algorithm_oid: str,
-    aik_info_hash: bytes | None,
-    signer_cert_pem,
-    signer_key_obj,
-    signer_chain_pems,
-    wrapped_hmac_key: bytes,
-    nonce: bytes,
-    container_name: str,
-    ek_algorithm: str,
-    ek_parameter: str | int,
-    ksp_name: str = "Microsoft Platform Crypto Provider",
-) -> dict:
-    """Build the CMC full PKI response for the MS-WCCE 55.0 V2 challenge."""
-    challenge_attributes_der = build_microsoft_v2_challenge_crypt_attributes(
-        wrapped_hmac_key=wrapped_hmac_key,
-        nonce=nonce,
-        container_name=container_name,
-        ek_algorithm=ek_algorithm,
-        ek_parameter=ek_parameter,
-    )
-    control_seq = build_adcs_like_control_sequence(
-        request_id=int(request_id),
-        encryption_algorithm_oid=encryption_algorithm_oid,
-        aik_info_hash=aik_info_hash,
-        tach_blob=challenge_attributes_der,
-        ksp_name=ksp_name,
-    )
-    response_body_der = build_cmc_pki_response(
-        control_sequence=control_seq,
-        cms_sequence=build_cmc_cms_sequence(
-            ca_exchange_chain_der=ca_exchange_chain_der
-        ),
-    )
-    return {
-        "request_id": int(request_id),
-        "effective_request_id": int(request_id),
-        "response_body_der": response_body_der,
-        "content_info_der": response_body_der,
-        "challenge_attributes_der": challenge_attributes_der,
-        "wrapped_hmac_key": bytes(wrapped_hmac_key),
-        "nonce": bytes(nonce),
-        "signed_pkcs7_der": _sign_cmc_pki_response_python(
-            pki_response_der=response_body_der,
-            signer_cert_pem=signer_cert_pem,
-            signer_key_obj=signer_key_obj,
-            extra_chain_pems=signer_chain_pems,
-            extra_certs_der=ca_exchange_chain_der,
-        ),
-    }
-
-
 def build_adcs_like_control_sequence(
     *,
     request_id: int,
     encryption_algorithm_oid: str,
-    aik_info_hash: bytes | None,
+    aik_info_hash: Optional[bytes],
     tach_blob: bytes,
     ksp_name: str = "Microsoft Platform Crypto Provider",
     pend_time=None,
@@ -1634,7 +1140,7 @@ def build_microsoft_attestation_challenge_pki_response(
     request_id: int,
     ca_exchange_chain_der,
     encryption_algorithm_oid: str,
-    aik_info_hash: bytes | None,
+    aik_info_hash: Optional[bytes],
     tach_blob: bytes,
     pend_time=None,
 ) -> dict:
@@ -1951,55 +1457,25 @@ def _iter_tpmt_public_candidates(blob: bytes):
             yield pub
 
 
-def validate_microsoft_key_attestation_binding(
-    attestation_blob_raw: bytes,
-    csr_public_key,
-    *,
-    aik_public_key=None,
-) -> dict:
-    """Validate that a Microsoft KAST statement binds the CSR key to TPM state.
+def validate_microsoft_key_attestation_binding(attestation_blob_raw: bytes, csr_public_key) -> dict:
+    """Validate that the Microsoft attestation statement binds the CSR key to TPM state.
 
-    Two interoperable Microsoft flows are accepted:
-
-    * EK/V1 (authority + subject): ``idBinding`` contains the AIK TPM public
-      area and its creation proof.
-    * AIK_INFO (subject-only): ``idBinding`` and ``aikOpaque`` are empty and
-      the caller supplies the AIK public key extracted from AIK_INFO. Local
-      certificate trust and EKU policy are evaluated later by the template emit_certificate() callback.
-
-    In both cases the AIK signature over ``keyAttest`` is verified and the
-    certified TPM object is required to be the public key in the CSR.
+    This complements the MakeCredential/ActivateCredential challenge. The
+    challenge proves EK<->AIK possession. This function proves the key requested
+    in the CSR is the key certified by the AIK inside the Microsoft
+    keyAttestation statement.
     """
     parsed_statement = _parse_microsoft_key_attestation_statement(attestation_blob_raw)
     if parsed_statement.get("platform") != 2:
         raise ValueError(f"Unsupported Microsoft attestation platform: {parsed_statement.get('platform')}")
+    if not parsed_statement.get("id_binding"):
+        raise ValueError("Microsoft attestation statement is missing idBinding")
     if not parsed_statement.get("key_attestation"):
         raise ValueError("Microsoft attestation statement is missing keyAttestation")
 
-    id_binding = parsed_statement.get("id_binding") or b""
-    subject_only = not id_binding
-
-    if subject_only:
-        if aik_public_key is None:
-            raise ValueError(
-                "Microsoft subject-only attestation requires an AIK public key from AIK_INFO"
-            )
-        if parsed_statement.get("aik_opaque"):
-            raise ValueError("Microsoft subject-only attestation requires an empty aikOpaque field")
-        aik_pub = None
-        aik_crypto_key = aik_public_key
-        aik_name = None
-        id_binding_info = {
-            "aik_name_b64": None,
-            "id_binding_creation_attest_type": None,
-            "id_binding_creation_name_b64": None,
-            "id_binding_creation_hash_b64": None,
-        }
-    else:
-        id_binding_info = _validate_microsoft_platform2_id_binding(id_binding)
-        aik_pub = id_binding_info["aik_public_key"]
-        aik_crypto_key = aik_pub.to_cryptography_public_key()
-        aik_name = id_binding_info["aik_name"]
+    id_binding_info = _validate_microsoft_platform2_id_binding(parsed_statement["id_binding"])
+    aik_pub = id_binding_info["aik_public_key"]
+    aik_name = id_binding_info["aik_name"]
 
     parsed_key = _parse_microsoft_key_attestation(parsed_statement["key_attestation"])
     key_attest_raw = parsed_key["key_attest"]
@@ -2008,13 +1484,7 @@ def validate_microsoft_key_attestation_binding(
     if not key_attest_raw or not signature_raw or not key_blob:
         raise ValueError("Microsoft keyAttestation is missing keyAttest, signature, or keyBlob")
 
-    if subject_only:
-        _verify_microsoft_key_attestation_signature_with_public_key(
-            key_attest_raw, signature_raw, aik_crypto_key
-        )
-    else:
-        _verify_microsoft_key_attestation_signature(key_attest_raw, signature_raw, aik_pub)
-
+    _verify_microsoft_key_attestation_signature(key_attest_raw, signature_raw, aik_pub)
     key_attest = parse_tpms_attest(key_attest_raw)
     if key_attest.magic != TPM2_GENERATED_VALUE:
         raise ValueError(f"Microsoft keyAttest has invalid TPMS_ATTEST magic: {key_attest.magic:#010x}")
@@ -2047,10 +1517,9 @@ def validate_microsoft_key_attestation_binding(
             require_sensitive_data_origin=True,
         )
         return {
-            "aik_public_key": aik_pub if aik_pub is not None else aik_crypto_key,
+            "aik_public_key": aik_pub,
             "aik_name": aik_name,
-            "aik_name_b64": id_binding_info.get("aik_name_b64"),
-            "subject_only_attestation": subject_only,
+            "aik_name_b64": id_binding_info["aik_name_b64"],
             "id_binding_creation_attest_type": id_binding_info.get("id_binding_creation_attest_type"),
             "id_binding_creation_name_b64": id_binding_info.get("id_binding_creation_name_b64"),
             "id_binding_creation_hash_b64": id_binding_info.get("id_binding_creation_hash_b64"),
@@ -2070,7 +1539,7 @@ def _make_tach_blob(
     secret: bytes,
     ek_pub,
     aik_name: bytes,
-    attestation_blob_raw: bytes | None = None,
+    attestation_blob_raw: Optional[bytes] = None,
     ek_name_alg: int = TPM2_ALG_SHA256,
     sym_bits: int = 128,
 ) -> bytes:
@@ -2135,10 +1604,12 @@ def _sign_cmc_pki_response_python(
         except Exception:
             pass
 
+    cms_digest_algorithm = _cms_digest_algorithm_for_ca_key(signer_key_obj)
+    digest_name = cms_digest_algorithm["algorithm"].native
     signed_attrs = a_cms.CMSAttributes(
         [
             a_cms.CMSAttribute({"type": "1.2.840.113549.1.9.3", "values": [a_cms.ContentType(OID_ID_CCT_PKI_RESPONSE)]}),
-            a_cms.CMSAttribute({"type": "1.2.840.113549.1.9.4", "values": [hashlib.sha256(pki_response_der).digest()]}),
+            a_cms.CMSAttribute({"type": "1.2.840.113549.1.9.4", "values": [hashlib.new(digest_name, pki_response_der).digest()]}),
         ]
     )
 
@@ -2161,7 +1632,7 @@ def _sign_cmc_pki_response_python(
                         )
                     }
                 ),
-                "digest_algorithm": a_cms.DigestAlgorithm({"algorithm": "sha256", "parameters": a_core.Null()}),
+                "digest_algorithm": _cms_digest_algorithm_for_ca_key(signer_key_obj),
                 "signed_attrs": signed_attrs,
                 "signature_algorithm": sig_alg_asn1,
                 "signature": signature,
@@ -2172,7 +1643,7 @@ def _sign_cmc_pki_response_python(
     signed_data = a_cms.SignedData(
         {
             "version": "v3",
-            "digest_algorithms": [a_cms.DigestAlgorithm({"algorithm": "sha256", "parameters": a_core.Null()})],
+            "digest_algorithms": [_cms_digest_algorithm_for_ca_key(signer_key_obj)],
             "encap_content_info": {"content_type": OID_ID_CCT_PKI_RESPONSE, "content": a_cms.ParsableOctetString(pki_response_der)},
             "certificates": OrderedCertificateSet(cert_choices),
             "signer_infos": signer_info,
@@ -2187,14 +1658,14 @@ def build_and_sign_microsoft_attestation_challenge(
     ek_pub,
     ca_exchange_chain_der,
     encryption_algorithm_oid: str,
-    aik_info_hash: bytes | None,
+    aik_info_hash: Optional[bytes],
     signer_cert_pem,
     signer_key_obj=None,
     signer_chain_pems=None,
-    secret: bytes | None = None,
-    aik_name: bytes | None = None,
-    aik_pub_raw: bytes | None = None,
-    attestation_blob_raw: bytes | None = None,
+    secret: Optional[bytes] = None,
+    aik_name: Optional[bytes] = None,
+    aik_pub_raw: Optional[bytes] = None,
+    attestation_blob_raw: Optional[bytes] = None,
 ) -> dict:
     if secret is None:
         secret = os.urandom(32)
@@ -2234,6 +1705,42 @@ def build_and_sign_microsoft_attestation_challenge(
     built["effective_request_id"] = int(request_id)
     built["secret"] = secret
     built["tach_blob"] = tach_blob
+    built["signed_pkcs7_der"] = _sign_cmc_pki_response_python(
+        pki_response_der=built["response_body_der"],
+        signer_cert_pem=signer_cert_pem,
+        signer_key_obj=signer_key_obj,
+        extra_chain_pems=signer_chain_pems,
+        extra_certs_der=ca_exchange_chain_der,
+    )
+    return built
+
+
+def build_and_sign_microsoft_v2_attestation_challenge(
+    *,
+    request_id: int,
+    challenge_der: bytes,
+    ca_exchange_chain_der,
+    encryption_algorithm_oid: str,
+    aik_info_hash: Optional[bytes],
+    signer_cert_pem,
+    signer_key_obj=None,
+    signer_chain_pems=None,
+) -> dict:
+    """Build and sign the CMC response carrying a Key Attestation V2 challenge.
+
+    ``challenge_der`` is the DER CRYPT_ATTRIBUTES built by
+    ``tpm_v2_attestation.create_v2_challenge``; it takes the place of the V1
+    "TACH" blob in the attestation challenge attribute of the CMC response.
+    """
+    built = build_microsoft_attestation_challenge_pki_response(
+        request_id=int(request_id),
+        ca_exchange_chain_der=ca_exchange_chain_der,
+        encryption_algorithm_oid=encryption_algorithm_oid,
+        aik_info_hash=aik_info_hash,
+        tach_blob=challenge_der,
+    )
+    built["request_id"] = int(request_id)
+    built["effective_request_id"] = int(request_id)
     built["signed_pkcs7_der"] = _sign_cmc_pki_response_python(
         pki_response_der=built["response_body_der"],
         signer_cert_pem=signer_cert_pem,

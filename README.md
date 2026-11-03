@@ -43,6 +43,22 @@ Each template is represented by an external module (e.g. `callbacks/user_templat
 - Provides **maximum flexibility**: template logic can depend on Active Directory attributes, group membership, external policies, or any business rule.  
 - Avoids locking the CA server into static, predefined templates.
 
+### Kerberos PAC information in callbacks
+When a client authenticates using **Kerberos**, callbacks can access the information extracted from the ticket's **Privilege Attribute Certificate (PAC)** through `flask.g`:
+
+```python
+from flask import g
+
+pac = g.get("pac_info", {})
+user_sid = pac.get("sid")
+user_groups = pac.get("groups")
+user_upn = pac.get("upn")
+```
+
+This allows callbacks to use PAC-provided identity and authorization information **without querying Active Directory (LDAP)**. With an appropriate **Kerberos service keytab**, the ADCS Python server can accept valid client Kerberos tickets and read their PAC data **without any direct network access to Active Directory domain controllers**. This is particularly useful when hosting the service in the cloud or in an isolated network.
+
+**Limitation:** only fields included in the ticket's PAC and successfully decoded are available. Other Active Directory attributes require a separate directory lookup. PAC fields may be absent, so callbacks should handle missing values.
+
 ### ⚠️ Security responsibility
 This design shifts most of the **security checks** to the callback author.  
 In practice:
@@ -65,7 +81,7 @@ Requirements
 
 - Linux server (Debian/Ubuntu) (not ad server)
 - Root access
-- A functional Active Directory domain
+- A working Kerberos infrastructure for Kerberos authentication (the server needs a service keytab; direct LDAP access to Active Directory is optional when using only PAC data)
 
 Install dependencies
 ---------------------------------------------------------
@@ -73,23 +89,26 @@ Install dependencies
 ```
 apt-get update
 apt-get install -y \
-       samba \
-       samba-dsdb-modules \
+       git \
+       acl \
        msktutil \
        nginx \
+       krb5-user \
+       gunicorn \
        python3-textual \
        python3-flask \
        python3-asn1crypto \
-       python3-kerberos \
-       krb5-user \
-       git \
+       python3-gssapi \
        python3-defusedxml \
        python3-pyasn1 \
        python3-waitress \
-       python3-yaml \
-       python3-samba \
+       python3-gunicorn \
+       python3-ruamel.yaml \
        python3-cryptography \
-       python3-pkcs11
+       python3-pkcs11 \
+       python3-itsdangerous \
+       python3-ldap3 \
+       python3-dnspython
 ```
 
 Retrieve the project
@@ -97,10 +116,37 @@ Retrieve the project
 
 ```
 cd /opt
-git clone https://github.com/tranquilit/adcs_python.git
+git clone --recurse-submodules https://github.com/tranquilit/adcs_python.git
 cd adcs_python
 ```   
 
+
+Service account and storage permissions
+---------------------------------------------------------
+
+Create the service account and prepare the storage
+
+```bash
+adduser --system --group --home /var/lib/adcs --no-create-home --shell /usr/sbin/nologin adcs
+
+# Create directories with inherited adcs group
+install -d -o root -g adcs -m 2775 \
+    /var/lib/adcs \
+    /var/lib/adcs/pki \
+    /var/lib/adcs/pki/certs \
+    /var/lib/adcs/pki/crl \
+    /var/lib/adcs/pki/newcerts
+
+# Allow adcs to read/write and inherit permissions
+setfacl -m g:adcs:rwx -m d:g:adcs:rwx /var/lib/adcs
+setfacl -m u:adcs:rwx -m d:u:adcs:rwx /var/lib/adcs/pki/certs /var/lib/adcs/pki/crl /var/lib/adcs/pki/newcerts
+
+# Allow Nginx to traverse parent directories
+setfacl -m u:www-data:--x /var/lib/adcs /var/lib/adcs/pki
+
+# Allow Nginx to read public certificates and CRLs, including future files
+setfacl -m u:www-data:r-x -m d:u:www-data:r-x /var/lib/adcs/pki/certs /var/lib/adcs/pki/crl
+```
 
 Initial configuration
 ---------------------------------------------------------
@@ -114,65 +160,53 @@ cp -f /opt/adcs_python/adcs.yaml.template /etc/adcs/adcs.yaml
 
 - Edit ``adcs.yaml`` if needed.
 
+```bash
+chown root:adcs /etc/adcs /etc/adcs/adcs.yaml
+chmod 750 /etc/adcs
+chmod 640 /etc/adcs/adcs.yaml
+```
+
 Copy template exemple, and edit if needed:
 
 ```
 cp -r /opt/adcs_python/callbacks /etc/adcs/callbacks
 ```
 
+
 Create a local CA (for testing)
 ---------------------------------------------------------
+
+To run the tools from any directory, create symbolic links (as root, assuming
+the project was cloned into `/opt/adcs_python`):
+
+```bash
+ln -s /opt/adcs_python/adcs-tool /usr/bin/adcs-tool
+ln -s /opt/adcs_python/adcs-gui /usr/bin/adcs-gui
+```
  
-By default, `./manageca.py --create-ca` generates an RSA CA:
+By default, `adcs-tool ca create` generates an RSA CA:
 
 ```
-./manageca.py --create-ca --cn "CA Root Test" --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
-./manageca.py --create-ket-cert --ca-id "CA Root Test" >> /etc/adcs/adcs.yaml
-./manageca.py --create-ca --signer-ca-id "CA Root Test" --cn "CA Inter Test" --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
-./manageca.py --create-ket-cert --ca-id "CA Inter Test" >> /etc/adcs/adcs.yaml
-./manageca.py --issue-cert --signer-ca-id "CA Inter Test" --cn testadcs.mydomain.lan --san testadcs.mydomain.lan --crt-path /etc/nginx/crt.pem --key-path /etc/nginx/key.pem
+adcs-tool ca create --cn "CA Root Test" --aia-crl-base-url "http://testadcs.mydomain.lan"
+adcs-tool ket create --ca-id "CA Root Test"
+adcs-tool ca create --signer-ca-id "CA Root Test" --cn "CA Inter Test" --aia-crl-base-url "http://testadcs.mydomain.lan"
+adcs-tool ket create --ca-id "CA Inter Test"
+adcs-tool certificate issue --signer-ca-id "CA Inter Test" --cn testadcs.mydomain.lan --san testadcs.mydomain.lan --crt-path /etc/nginx/crt.pem --key-path /etc/nginx/key.pem
 ```
 
 To generate an ECC CA instead, use `--key-type ec` and select the curve with `--ec-curve`:
 
 ```
-./manageca.py --create-ca --cn "CA Root ECC Test" --key-type ec --ec-curve secp384r1 --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
+adcs-tool ca create --cn "CA Root ECC Test" --key-type ec --ec-curve secp384r1 --aia-crl-base-url "http://testadcs.mydomain.lan"
 ```
 
 Supported ECC curves are `secp256r1`, `secp384r1`, and `secp521r1`. Aliases such as `prime256v1`, `p-256`, `p-384`, and `p-521` are also accepted.
 
-
-Create a CA certificate from an existing CSR public key
----------------------------------------------------------
-
-`./manageca.py --create-ca` can also create a CA certificate from an existing CSR with `--csr-path`.
-This is useful when the future CA private key is generated and kept outside this tool, for example in an HSM.
-
-Only the public key is read from the CSR. The CSR subject, SANs, attributes, and requested extensions are ignored.
-The CA certificate subject is still built from the `--cn` value and the CA extensions are still generated by `manageca.py`.
-
-Example:
+Or ML-DSA (require cryptography 49.0.0) :
 
 ```
-# Generate or export a CSR for the future CA key.
-# The private key may be local, in an HSM, or managed by another component.
-openssl req -new \
-  -key subca.key \
-  -out subca.csr.pem \
-  -subj "/CN=Ignored CSR Subject"
-
-# Issue the new CA certificate with the public key from the CSR.
-# The certificate subject below is "CA Inter HSM Test", not the CSR subject.
-./manageca.py --create-ca \
-  --signer-ca-id "CA Root Test" \
-  --cn "CA Inter HSM Test" \
-  --csr-path subca.csr.pem \
-  --aia-crl-base-url "http://testadcs.mydomain.lan" >> /etc/adcs/adcs.yaml
+adcs-tool ca create --cn "CA Root MLDSA"  --key-type mldsa --mldsa-variant ml-dsa-87 --aia-crl-base-url "http://testadcs.mydomain.lan"
 ```
-
-When `--csr-path` is used, `--signer-ca-id` is required because the CA certificate is signed by an existing parent CA.
-No private key is generated or written for the new CA, and no initial CRL is created for it because the new CA private key is not available to `manageca.py`.
-
 
 > A **KET certificate** (**Key Exchange Token**) is a special certificate used to protect the **exchange of encrypted enrollment data** between the client and the server in Microsoft ADCS workflows, for example for **TPM attestation**.
 
@@ -192,11 +226,6 @@ cp -f /opt/adcs_python/nginx-conf.conf.template /etc/nginx/sites-available/defau
 openssl dhparam -out /etc/ssl/certs/dhparam.pem 4096
 ```
 
-Change the `ssl_client_certificate` and the `ssl_crl` :
-```
-vi /etc/nginx/sites-available/default
-```
-
 Restart Nginx: 
 
 ```
@@ -207,9 +236,9 @@ Nginx is responsible for handling SSL/TLS authentication and securely exposing t
 
 Using a different Nginx configuration, or modifying the provided one without fully understanding the security implications, may compromise the authentication flow and weaken the overall security of the service.
 
-Join the Active Directory domain
----------------------------------------------------------
 
+Create Keytab
+---------------------------------------------------------
 
 - Edit ``/etc/krb5.conf`` for your domain.
 
@@ -224,43 +253,17 @@ default_tkt_enctypes = aes256-cts-hmac-sha1-96 aes128-cts-hmac-sha1-96
 default_tgs_enctypes = aes256-cts-hmac-sha1-96 aes128-cts-hmac-sha1-96
 ```
 
-- Edit ``/etc/samba/smb.conf`` for your domain.
-
-```
-[global]
-  workgroup = MYDOMAIN
-  security = ADS
-  realm = MYDOMAIN.LAN
-  winbind separator = +
-  idmap config *:backend = tdb
-  idmap config *:range = 700001-800000
-  idmap config MYDOMAIN:backend  = rid
-  idmap config MYDOMAIN:range  = 10000-700000
-  winbind use default domain = yes
-  kerberos method = secrets and keytab
-```
-
-Join : 
+Create Keytab : 
 ```
 kinit <user>@MYDOMAIN.LAN
-net ads join --use-kerberos=required
+msktutil --server dc01.mydomain.lan --create --hostname srvadcs.mydomain.lan --service HTTP/srvadcs.mydomain.lan --keytab /etc/krb5.keytab --no-reverse-lookups --enctypes 0x18
 ```
 
-Manage SPN 
----------------------------------------------------------
+Allow the service account to read the keytab (rotation remains in the root cron):
 
-- In Active Directory, register the HTTP SPN for the machine account:
-
-```
-samba-tool spn add "HTTP/testadcs.mydomain.lan" "testadcs$" -H ldap://srvads.mydomain.lan:389 -P
-```
-
-Note that the URL must be in **lowercase**.
-
-- Generate the keytab:
-
-```
-net ads keytab create
+```bash
+chown root:adcs /etc/krb5.keytab
+chmod 640 /etc/krb5.keytab
 ```
 
 Checking if http is present in the keytab :
@@ -271,14 +274,34 @@ klist -k -K /etc/krb5.keytab |grep HTTP
 
 - Add the machine FQDN and IP address to ``/etc/hosts``   **important**.
 
+### Automatic keytab rotation (recommended)
+
+For security, configure a daily cron job to keep the machine account password and
+`/etc/krb5.keytab` up to date. Create `/etc/cron.d/msktutil-keytab` with:
+
+```cron
+30 23 * * * root msktutil --auto-update --keytab /etc/krb5.keytab --enctypes 0x18 --no-reverse-lookups
+```
+
+This checks the keytab every day at **23:30**. `msktutil --auto-update` only
+rotates the machine account password and refreshes the keytab when an update
+is needed (normally after **30 days**); it does **not** change the password
+every day. The machine account must be allowed to change its own password in
+Active Directory.
+
+
 Start the ADCS Python server
 ---------------------------------------------------------
 
-```
-cd /opt/adcs_python && python3 app.py
+Install and start the supplied Gunicorn systemd unit (as root):
+
+```bash
+cp /opt/adcs_python/adcs.service /etc/systemd/system/adcs.service
+systemctl daemon-reload
+systemctl enable --now adcs
+systemctl status adcs
 ```
 
-- (Optional) Create a **systemd** service to start ADCS automatically.
 
 Test on a Windows client
 ---------------------------------------------------------
@@ -303,7 +326,7 @@ Regenerate and re-sign the CRL
 
 ```bash
 cd /opt/adcs_python
-./manageca.py --resign-all-crl
+adcs-tool crl resign-all
 ```
 
 Add cron 
@@ -315,19 +338,19 @@ Rotate adcs Certificate When Expiring Soon
 
 ```bash
 cd /opt/adcs_python
-./manageca.py --rotate-if-expiring --signer-ca-id "CA Inter Test" --crt-path /etc/nginx/crt.pem  --key-path /etc/nginx/key.pem --threshold-days 30 --valid-days 365
+adcs-tool certificate rotate --signer-ca-id "CA Inter Test" --crt-path /etc/nginx/crt.pem  --key-path /etc/nginx/key.pem --threshold-days 30 --valid-days 365
 ```
 
 - `--signer-ca-id` is the CA identifier (e.g., `"CA Inter Test"`).
 
-Re-sign / Re-issue a Certificate (GUI)
------------------------------------------------------------------
 
-Launch the admin GUI, then select the target certificate to re-sign/re-issue:
+Manage the certification authority and certificates with (adcs-gui)
+---------------------------------------------------------------------
+
+Launch the admin GUI:
 
 ```bash
-cd /opt/adcs_python
-./manageca.py
+adcs-gui
 ```  
 ![Demo TERMINAL UI](demo/ui_terminal.png "DEMO TERMINAL UI")
 
@@ -338,7 +361,7 @@ cd /opt/adcs_python
 You can submit a CSR directly from the command line without using the API interface:
 
 ```bash
-/opt/adcs_python/manageca.py --submit-csr --signer-ca-id 'ca_inter_test' --username 'srvads$@MYDOMAIN.LAN' --template-name 'dc' --csr-path srvads.csr
+/opt/adcs_python/adcs-tool csr submit --signer-ca-id 'ca_inter_test' --username 'srvads$@MYDOMAIN.LAN' --template-name 'dc' --csr-path srvads.csr
 ```
 
 🔐 TPM Attestation
@@ -421,7 +444,187 @@ The server validates the TPM attestation proof, while the callback
 enforces the **trust policy** (manufacturer, device, business rules).
 
 
+### Key Attestation V2 (EK-wrapped restricted HMAC key)
+
+Two protocols run on top of the same `szOID_ENROLL_EK_INFO` flow:
+
+-   **V1**: the server sends a TPM2 `MakeCredential` challenge, the client answers with `ActivateCredential`.
+-   **V2**: the server generates a random HMAC key and wraps it to the EK public key (TPM 2.0 duplication outer wrapper, imported by the client with `TPM2_Import` under its EK). The client then certifies a fresh V2 AIK with that restricted HMAC key (`TPM2_Certify`, qualifying data = server nonce). Only the TPM that owns the EK can do it, so a valid answer proves that the V2 AIK, and therefore the key being enrolled, lives in the TPM that owns the EK. Microsoft presents V2 as the fix for the credential relay weakness of V1.
+
+The server picks V2 automatically when the request carries all the V2 attributes (`szOID_ENROLL_EK_INFO`, `szOID_ENROLL_V2_AIK_INFO`, `szOID_ENROLL_V2_ATTESTATION_STATEMENT`, `szOID_ENROLL_V2_CONTAINER_NAME` and the KSP name), which Windows sends once it has the CVE-2026-6726 update. Any other request keeps using V1.
+
+To refuse V1 on a template, set the Microsoft `CT_FLAG_REQUIRE_V2_ATTESTATION` flag:
+
+```python
+"require_v2_attestation": True,
+```
+
+A request without the V2 attributes is then rejected (`CERTSRV_E_KEY_ATTESTATION`, `0x8009481A`). Microsoft defines this flag as applicable only together with `attest_required`, so set both; without `attest_required` the flag is ignored and a warning is logged.
+
+**The trust decision stays in the callback, exactly like V1.** V2 only proves the AIK / EK relationship; `emit_certificate` still receives `ek_cert`, `ek_pub` and `ek_public_key_identity_sha256` and must validate them (manufacturer chain, EKPub inventory, ...). V2 adds a few informative fields to `tpm_result`:
+
+-   `attestation_flow`: `"v1"` or `"v2"`
+-   `v2_attestation_verified`: `True` once a V2 challenge response was verified
+-   `tpm_firmware_version`, `aik_name_b64`: taken from the verified `TPM2_Certify` structure (V2 only)
+
+MS-WCCE requires the CA to add the non-critical `szOID_CERTSRV_V2_ATTESTATION_VERIFIED` extension (`1.3.6.1.4.1.311.21.49`) to certificates issued after a V2 attestation. Call the helper from `emit_certificate`, after your EK checks (the example callbacks already do it):
+
+```python
+from tpm_support import apply_tpm_attestation_extensions
+
+builder = apply_tpm_attestation_extensions(builder, tpm_result)
+```
+
+Implementation notes:
+
+-   A V2 challenge can be answered **once**: the pending state is consumed whatever the outcome, and it expires like a V1 challenge.
+-   The V2 challenge is bound to the authenticated requester (MS-WCCE 3.2.2.6.2.1.2.8 step 3): only the caller who sent the original request can answer it. Only a fingerprint of the caller is stored, and a mismatch does not consume the challenge.
+-   The pending state (HMAC key, nonce, V2 AIK public key) is encrypted to the KET certificate and bound to the request id; the HMAC key is never written in clear.
+-   The wrapped key uses the `BKWT` container documented by Microsoft (header + `TPM2B_ENCRYPTED_SECRET` + `TPM2B_PRIVATE` + `TPM2B_PUBLIC`). The EK name algorithm and AES size are derived from the EK public key (RSA 2048 / P-256: SHA-256 + AES-128, RSA 3072 / P-384: SHA-384 + AES-256).
+-   The layout of the attestation claim returned by the client is CSP specific. Several layouts are accepted, but acceptance always depends on the same strict checks: HMAC computed with the server-held key, nonce, TPM Name of the AIK, and AIK public key equal to `szOID_ENROLL_V2_AIK_INFO`. At `DEBUG` level a rejected claim is dumped (`tpm_v2_claim_dump`); it only contains public data.
+
+Unit tests live in `tests/` (`python -m unittest discover -s tests -t .`).
+
 ![TPM Attestation Flow](demo/tpm_attestation_flow.png "TPM attestation Flow")
+
+ADCS CLI
+==========
+
+* `adcs-tool`: non-interactive command-line administration.
+
+
+```bash
+adcs-tool ca list
+adcs-tool ca list --json
+adcs-tool ca show ca_inter_test
+adcs-tool ca show ca_inter_test --json
+adcs-tool callback list
+adcs-tool callback list --json
+adcs-tool config show --json  # secrets are redacted
+```
+
+List certificates from any CA, applying the same 30-day expiration and
+revocation filters as the UI:
+
+```bash
+adcs-tool certificate list --ca ca_inter_test
+adcs-tool certificate list --ca ca_inter_test --search example.org --status expiring
+adcs-tool certificate list --ca ca_inter_test --filter --status expired --revocation revoked
+adcs-tool certificate list --ca ca_inter_test --revocation revoked --limit 0
+adcs-tool certificate list --ca ca_inter_test --order-by "expiration_date ASC, serial DESC" --limit 200
+adcs-tool certificate list --ca ca_inter_test --order-by "revoked DESC, not_after ASC" --json
+adcs-tool certificate list --help  # complete list of permitted ORDER BY fields
+# --filter is optional for certificate list; status/revocation/search work without it.
+```
+
+Valid statuses are `any`, `expired`, `expiring` (within the next 30 days),
+`valid` (more than 30 days). Revocation values are `any`, `revoked` and
+`not_revoked`. `--limit` defaults to **1000** (overridden by positive
+`ADCS_MAX_ROWS`); **0** means unlimited. Sort expressions accept whitelisted
+field names only, and each field may specify `ASC` or `DESC`, separated by
+commas. The help always lists available fields. `--json` is available for
+scripting.
+
+View and manage a particular certificate, using its **serial**:
+
+```bash
+adcs-tool certificate show --ca ca_inter_test --serial 1234 --json
+adcs-tool certificate revoke --ca ca_inter_test --serial 1234
+adcs-tool certificate revoke --ca ca_inter_test --serial 1234 --dry-run
+adcs-tool certificate unrevoke --ca ca_inter_test --serial 1234
+adcs-tool certificate unrevoke --ca ca_inter_test --serial 1234 --dry-run
+adcs-tool certificate delete --ca ca_inter_test --serial 1234
+adcs-tool certificate delete --ca ca_inter_test --serial 1234 --dry-run
+adcs-tool crl resign --ca ca_inter_test
+adcs-tool crl resign-all
+```
+
+Filtered bulk revocation and unrevocation use the same SQLite-backed filtering,
+search, ordering, and limit options as `certificate list` and `certificate delete`.
+Both display a **dry-run preview by default**; `--yes` is required to update
+CRLs. Existing CA certificates and entries already in the requested revocation
+state are skipped. `--serial` continues to perform an individual operation.
+`--dry-run` and `--yes` cannot be combined.
+
+```bash
+# Preview revoking valid, currently unrevoked certificates matching "radius"
+adcs-tool certificate revoke --ca ca_inter_test --filter --status valid --revocation not_revoked --search radius --order-by "not_after ASC" --limit 100
+# Execute after reviewing the preview
+adcs-tool certificate revoke --ca ca_inter_test --filter --status valid --revocation not_revoked --search radius --order-by "not_after ASC" --limit 100 --yes
+# Preview removing revocation for revoked certificates matching "radius"
+adcs-tool certificate unrevoke --ca ca_inter_test --filter --revocation revoked --search radius --dry-run
+# Execute
+adcs-tool certificate unrevoke --ca ca_inter_test --filter --revocation revoked --search radius --yes
+```
+
+Bulk certificate cleanup uses the same SQLite-backed filters as the listing
+command. By default, bulk deletion is a **dry run**, showing a table of
+certificates selected without moving files:
+
+```bash
+# Expired OR revoked certificates (including expired non-revoked)
+adcs-tool certificate delete --ca ca_inter_test --eligible
+# Only certificates BOTH expired AND revoked
+adcs-tool certificate delete --ca ca_inter_test --filter --status expired --revocation revoked
+# Optional search, sorting and limit
+adcs-tool certificate delete --ca ca_inter_test --filter --status expired --search example.org --order-by "not_after ASC" --limit 100
+# Execute the operation after reviewing the preview
+adcs-tool certificate delete --ca ca_inter_test --eligible --dry-run
+adcs-tool certificate delete --ca ca_inter_test --eligible --yes
+```
+
+`--eligible` selects the union (expired **or** revoked); `--filter` combines
+`--status`, `--revocation` and `--search` with AND. The bulk operation skips
+CA certificates and skips certificates that are neither expired nor revoked,
+even when the requested filters match them. `--limit 0` selects all matching
+rows. `--yes` is required for bulk changes, and failed files are reported.
+Single-certificate `--serial` deletion retains its existing behaviour.
+
+**Safety:** `certificate delete` refuses to remove a currently valid,
+non-revoked certificate. Deletion moves the certificate and corresponding
+private key into `.trash` as in the GUI; revocation is determined from the
+current CRL, not a stale SQLite flag.
+
+New certificate issuance and the other previously available non-interactive
+operations are available as `ca create`, `certificate issue`, `ket create`,
+`csr submit` and `certificate rotate`. See each subcommand's `--help` for
+parameters. `ca create` and `ket create` update `adcs.yaml` directly.
+For a custom configuration file, pass
+`--confadcs /path/to/adcs.yaml` before the command or after the command family (for example, `adcs-tool --confadcs /etc/adcs/adcs.yaml ca list`).
+
+Optional: Create a CA certificate from an existing CSR public key
+-------------------------------------------------------------------
+
+**Optional advanced workflow — not required for installation or initial setup.**
+Skip this section if `adcs-tool ca create` generates and manages the CA private key for you.
+
+`adcs-tool ca create` can also create a CA certificate from an existing CSR with `--csr-path`.
+This is useful when the future CA private key is generated and kept outside this tool, for example in an HSM.
+
+Only the public key is read from the CSR. The CSR subject, SANs, attributes, and requested extensions are ignored.
+The CA certificate subject is still built from the `--cn` value and the CA extensions are still generated by `adcs-tool`.
+
+Example:
+
+```
+# Generate or export a CSR for the future CA key.
+# The private key may be local, in an HSM, or managed by another component.
+openssl req -new \
+  -key subca.key \
+  -out subca.csr.pem \
+  -subj "/CN=Ignored CSR Subject"
+
+# Issue the new CA certificate with the public key from the CSR.
+# The certificate subject below is "CA Inter HSM Test", not the CSR subject.
+adcs-tool ca create \
+  --signer-ca-id "CA Root Test" \
+  --cn "CA Inter HSM Test" \
+  --csr-path subca.csr.pem \
+  --aia-crl-base-url "http://testadcs.mydomain.lan"
+```
+
+When `--csr-path` is used, `--signer-ca-id` is required because the CA certificate is signed by an existing parent CA.
+No private key is generated or written for the new CA, and no initial CRL is created for it because the new CA private key is not available to `adcs-tool`.
 
 
 Desired enhancements for the project.
@@ -432,6 +635,16 @@ Desired enhancements for the project.
 
 Frequently Asked Questions (FAQ)
 ==========================================
+
+Is an Active Directory connection required to read user attributes with Kerberos authentication?
+-----------------------------------------------------------------------------------------------------
+
+**No.** When Kerberos authentication is used, **the ADCS Python server can operate without any direct network connectivity to Active Directory**, including when deployed in the cloud or on an isolated network. No LDAP connection or network access to a domain controller is required from the ADCS Python server.
+
+A valid **Kerberos service keytab** is sufficient on the server side to accept and process Kerberos authentication, as long as clients can obtain valid Kerberos tickets. The server extracts identity information from the ticket's **Privilege Attribute Certificate (PAC)** and makes it available to callbacks via `g.get("pac_info", {})`.
+
+**Limitation:** only information actually included in the PAC and successfully decoded is available (for example, SID, UPN, and group membership, when present). Retrieving other Active Directory attributes requires a separate directory query. A functioning Kerberos ticket-issuing infrastructure (typically an Active Directory domain controller acting as a KDC) is still required for clients to obtain their tickets; it simply does **not** need to be reachable from the ADCS Python server.
+
 
 Is it possible to issue certificates to machines or users from multiple Active Directory domains?
 -------------------------------------------------------------------------------------------------------------------------------------
@@ -504,3 +717,46 @@ To stay as close as possible to actual ADCS behavior, it is recommended to:
 
 **Summary:**  
 Yes, this project can be used as a stateless gateway in front of another PKI, as long as the client does not explicitly require a signed CMC response (`CR_IN_FULLRESPONSE`).
+
+`--dry-run` on `certificate revoke`, `certificate unrevoke`, and `certificate delete` previews the action without changing certificates, private keys or CRLs. For bulk deletion, a preview is already the default unless `--yes` is passed; `--dry-run` and `--yes` cannot be combined. Cache indexing may still be refreshed during inspection.
+
+### Bash Tab completion
+
+To enable interactive Tab completion in the current Bash session from the project directory:
+
+```bash
+source adcs-tool.bash-completion
+```
+
+To enable it for every Bash session, install the completion file (as root, on systems with `bash-completion`):
+
+```bash
+install -Dm644 adcs-tool.bash-completion /usr/share/bash-completion/completions/adcs-tool
+```
+
+If invoking the command as `adcs-tool`, load the script with `source` in your shell profile if the automatic completion loader does not load it.
+
+Tab completes command groups, subcommands, options, enumerated values (`--status`, `--revocation`, `--key-type`), sorting fields for `--order-by`, filesystem paths and `--ca` identifiers from `adcs.yaml`. The CA config path defaults to `/etc/adcs/adcs.yaml` and can be changed via `--confadcs`. Completion reads configuration only: it never performs certificate operations or changes SQLite. Bash completion requires Bash; other shells are not configured by this script.
+
+
+### Accessible CLI output (screen readers)
+
+Read-only commands (`ca list/show`, `callback list`, `config show`,
+`certificate list/show`) and certificate revoke/unrevoke/delete previews support
+`--format table|accessible|json`. `table` is the default and preserves the
+column display; `accessible` renders one labelled field per line; `json`
+provides machine-readable output. The existing `--json` flag remains available
+for read-only commands and takes precedence over `--format`.
+
+```bash
+adcs-tool certificate list --ca ca-auth --format accessible
+adcs-tool certificate show --ca ca-auth --serial 0x1234 --format accessible
+adcs-tool certificate revoke --ca ca-auth --filter --status expired --dry-run --format accessible
+adcs-tool ca list --format json
+export ADCS_OUTPUT_FORMAT=accessible  # optional default for supported commands
+```
+
+The environment setting can be overridden by `--format`. An invalid environment
+value falls back to `table`. The CA creation command deliberately retains its
+original stdout format for existing redirections. Screen-reader behaviour
+should be validated with the actual terminal and assistive technology.

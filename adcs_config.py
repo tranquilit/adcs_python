@@ -2,17 +2,13 @@
 # -*- coding: utf-8 -*-
 
 import base64
-import yaml
+from ruamel.yaml import YAML
+yaml = YAML(typ="safe")
 import os
 import inspect
-from datetime import datetime, timezone
 from typing import Tuple
 
 from asn1crypto import x509 as a_x509, core as a_core
-from cryptography import x509 as cx509
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.x509.oid import ObjectIdentifier
 
 from callback_loader import load_func
 from flags_catalog import FLAG_CATALOG  # canonical table alias -> bitmask
@@ -338,147 +334,7 @@ def _load_ca_key(ca: dict):
     )
 
 
-
-def _assert_key_matches_certificate(private_key, certificate_der: bytes, *, label: str) -> None:
-    cert = cx509.load_der_x509_certificate(certificate_der)
-    cert_spki = cert.public_key().public_bytes(
-        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
-    )
-    key_spki = private_key.public_key().public_bytes(
-        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
-    )
-    if cert_spki != key_spki:
-        raise ValueError(f"{label} private key does not match its certificate")
-
-
-def _assert_ca_exchange_certificate_role(certificate_der: bytes) -> None:
-    """Validate the CA exchange certificate required by MS-WCCE key attestation."""
-    cert = cx509.load_der_x509_certificate(certificate_der)
-    now = datetime.now(timezone.utc)
-    not_before = (
-        cert.not_valid_before_utc
-        if hasattr(cert, "not_valid_before_utc")
-        else cert.not_valid_before.replace(tzinfo=timezone.utc)
-    )
-    not_after = (
-        cert.not_valid_after_utc
-        if hasattr(cert, "not_valid_after_utc")
-        else cert.not_valid_after.replace(tzinfo=timezone.utc)
-    )
-    if now < not_before or now > not_after:
-        raise ValueError("CA exchange certificate is not currently valid")
-    if not isinstance(cert.public_key(), rsa.RSAPublicKey):
-        raise ValueError("CA exchange certificate must contain an RSA public key")
-    try:
-        basic = cert.extensions.get_extension_for_class(cx509.BasicConstraints).value
-        if basic.ca:
-            raise ValueError("CA exchange certificate must not be a CA certificate")
-    except cx509.ExtensionNotFound:
-        pass
-    try:
-        usage = cert.extensions.get_extension_for_class(cx509.KeyUsage).value
-    except cx509.ExtensionNotFound as exc:
-        raise ValueError(
-            "CA exchange certificate must contain KeyUsage keyEncipherment"
-        ) from exc
-    if not usage.key_encipherment:
-        raise ValueError(
-            "CA exchange certificate KeyUsage must permit keyEncipherment"
-        )
-    try:
-        eku = cert.extensions.get_extension_for_class(cx509.ExtendedKeyUsage).value
-    except cx509.ExtensionNotFound as exc:
-        raise ValueError(
-            "CA exchange certificate must contain the CA Exchange EKU"
-        ) from exc
-    allowed = {
-        "1.3.6.1.4.1.311.21.5",  # szOID_KP_CA_EXCHANGE
-    }
-    if not any(oid.dotted_string in allowed for oid in eku):
-        raise ValueError(
-            "CA exchange certificate must contain the CA Exchange EKU"
-        )
-    try:
-        app_policy_ext = cert.extensions.get_extension_for_oid(
-            ObjectIdentifier("1.3.6.1.4.1.311.21.10")
-        ).value
-    except cx509.ExtensionNotFound as exc:
-        raise ValueError(
-            "CA exchange certificate must contain the CA Exchange Application Policy"
-        ) from exc
-    if not isinstance(app_policy_ext, cx509.UnrecognizedExtension):
-        raise ValueError("CA exchange Application Policies extension has an unexpected type")
-    try:
-        policies = PolicyInfos.load(app_policy_ext.value)
-        policy_oids = {
-            item["policyIdentifier"].dotted for item in policies
-        }
-    except Exception as exc:
-        raise ValueError("CA exchange Application Policies extension is malformed") from exc
-    if "1.3.6.1.4.1.311.21.5" not in policy_oids:
-        raise ValueError(
-            "CA exchange certificate must contain the CA Exchange Application Policy"
-        )
-
-
-
-def _configure_ca_exchange_materials(ca: dict) -> None:
-    """Validate the optional CA Exchange/KET certificate and private key.
-
-    MS-WCCE key attestation uses the CA Exchange certificate for both the
-    legacy V1 flow and the CMC Restricted-HMAC V2 flow.  The retired SCEP
-    198/41 bootstrap and its RA signing/encryption material are deliberately
-    not supported.
-    """
-    if "restricted_hmac_attestation" in ca:
-        raise ValueError(
-            "restricted_hmac_attestation has been removed. Configure TPM trust "
-            "and firmware policy inside the template emit_certificate() callback."
-        )
-
-    deprecated_ra_keys = (
-        "ra_signing_cert_pem",
-        "ra_signing_key_pem",
-        "ra_encryption_cert_pem",
-        "ra_encryption_key_pem",
-        "allow_ca_as_ra_signing",
-        "allow_ket_as_ra_encryption",
-    )
-    configured_ra_keys = [name for name in deprecated_ra_keys if ca.get(name) is not None]
-    if configured_ra_keys:
-        raise ValueError(
-            "The SCEP 198/41 RA configuration has been removed: "
-            + ", ".join(configured_ra_keys)
-        )
-
-    ket_cert_pem = ca.get("__ket_certificate_pem")
-    ket_key_pem = ca.get("__ket_key_pem")
-    if not ket_cert_pem and not ket_key_pem:
-        return
-    if not ket_cert_pem or not ket_key_pem:
-        raise ValueError(
-            f"CA {ca.get('id')} must configure both ket_cert_pem and ket_key_pem"
-        )
-
-    try:
-        ket_cert = cx509.load_pem_x509_certificate(ket_cert_pem.encode("utf-8"))
-        ket_cert_der = ket_cert.public_bytes(serialization.Encoding.DER)
-        ket_private_key = serialization.load_pem_private_key(
-            ket_key_pem.encode("utf-8"), password=None
-        )
-    except Exception as exc:
-        raise ValueError("Invalid CA exchange certificate or private key") from exc
-
-    _assert_key_matches_certificate(
-        ket_private_key,
-        ket_cert_der,
-        label="CA exchange",
-    )
-    _assert_ca_exchange_certificate_role(ket_cert_der)
-    ca["__ket_certificate_der"] = ket_cert_der
-    ca["__ket_key_obj"] = ket_private_key
-
-def load_yaml_conf(path="adcs.yaml"):
+def load_yaml_conf(path="adcs.yaml", bypass_read_only=False):
     """
     Load adcs.yaml, read global config and CAs, and record
     ONLY template declarations (callbacks) without building them.
@@ -488,17 +344,32 @@ def load_yaml_conf(path="adcs.yaml"):
     #from cryptography.hazmat.primitives import serialization
 
     with open(path, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
+        cfg = yaml.load(f)
 
     conf = {}
     gbl = cfg.get("global", {})
     
     policy_provider = gbl.get("policy_provider", {})
     storage_paths_global = gbl.get("storage_paths", {}) or {}
+    logging_cfg = gbl.get("logging", {}) or {}
     conf["path_list_request_id"] = gbl.get("path_list_request_id", "/var/lib/adcs/list_request_id")
     conf["next_update_hours_crl"] = gbl.get("next_update_hours_crl", 8)
     conf["tpm_pending_dir"] = gbl.get("tpm_pending_dir", "/var/lib/adcs/tpm-pending")
     conf["tpm_pending_challenge_max_age_seconds"] = int(gbl.get("tpm_pending_challenge_max_age_seconds",300,))
+
+    # The application owns log verbosity and serialization only. Routing,
+    # persistence and rotation are delegated to systemd/journald/rsyslog.
+    log_format = str(logging_cfg.get("format", "json")).strip().lower()
+    if log_format not in {"json", "text"}:
+        raise ValueError("global.logging.format must be 'json' or 'text'")
+    include_stack_trace = logging_cfg.get("include_stack_trace", True)
+    if not isinstance(include_stack_trace, bool):
+        raise ValueError("global.logging.include_stack_trace must be true or false")
+    conf["logging"] = {
+        "level": str(logging_cfg.get("level", "INFO")).upper(),
+        "format": log_format,
+        "include_stack_trace": include_stack_trace,
+    }
 
     conf["policyid"] = policy_provider.get("policy_id")
     conf["policyfriendlyname"] = policy_provider.get("policyfriendlyname","CEP policy")
@@ -512,6 +383,9 @@ def load_yaml_conf(path="adcs.yaml"):
     conf['auth_kerberos'] = True
     conf['auth_tls'] = False
     conf['auth_username_password'] = False
+    conf['kerberos_hostname'] = None
+    conf['kerberos_cbt_mode'] = 'off'  # off | monitor | enforce
+    conf['kerberos_cbt_cert_path'] = "/etc/nginx/crt.pem"
 
     for adecl in (cfg.get("auth") or []):
 
@@ -524,12 +398,41 @@ def load_yaml_conf(path="adcs.yaml"):
         if adecl.get("username_password") is not None:
             conf['auth_username_password'] = bool(adecl["username_password"])
 
+        if 'kerberos_hostname' in adecl:
+            hostname = adecl['kerberos_hostname']
+            if not isinstance(hostname, str) or not hostname.strip():
+                raise ValueError("auth.kerberos_hostname must be a non-empty DNS name")
+            hostname = hostname.strip().lower()
+            if any(c in hostname for c in ('/', ':', '@', ' ', '\t', '\n')):
+                raise ValueError("auth.kerberos_hostname must be a hostname (no scheme, port, or realm)")
+            conf['kerberos_hostname'] = hostname
+
+        if 'kerberos_cbt_mode' in adecl:
+            mode = adecl['kerberos_cbt_mode']
+            if not isinstance(mode, str) or mode.strip().lower() not in {'off', 'monitor', 'enforce'}:
+                raise ValueError("auth.kerberos_cbt_mode must be off, monitor, or enforce")
+            conf['kerberos_cbt_mode'] = mode.strip().lower()
+
+        if 'kerberos_cbt_cert_path' in adecl:
+            conf['kerberos_cbt_cert_path'] = adecl['kerberos_cbt_cert_path']
+
         cb = adecl.get("callback") or {}
         cb_path = cb.get("path")
         if not cb_path :
             continue
         cb_func = cb.get("func",'check_auth')
         conf["auth_callbacks"] = {"path": cb_path, "func": cb_func}
+
+    # Fail startup if the configured TLS endpoint cannot be bound reliably.
+    # Never derive CBT values from HTTP headers; they are client controlled.
+    if conf['kerberos_cbt_mode'] != 'off':
+        if not conf['auth_kerberos']:
+            raise ValueError("Kerberos CBT enabled but Kerberos authentication disabled")
+        cert_path = conf['kerberos_cbt_cert_path']
+        if not isinstance(cert_path, str) or not os.path.isabs(cert_path):
+            raise ValueError("auth.kerberos_cbt_cert_path must be an absolute certificate path")
+        from kerberos_cbt import tls_server_end_point_application_data
+        conf['kerberos_cbt_app_data'] = tls_server_end_point_application_data(cert_path)
 
     # Global fallbacks for storage
     conf["path_cert_fallback"] = storage_paths_global.get("cert_dir", "/tmp/certs")
@@ -589,7 +492,12 @@ def load_yaml_conf(path="adcs.yaml"):
         ca["__certificate_der"] = base64.b64decode(cert_b64)
 
         # CA private key: PEM (legacy) or HSM (new)
-        ca["__key_obj"] = _load_ca_key(ca)
+        try:
+            ca["__key_obj"] = _load_ca_key(ca)
+        except Exception:
+            if not bypass_read_only:
+                raise
+            ca["__key_obj"] = None
 
         ces_path = ca.get("urls", {}).get("ces_path")
         if not ces_path:
@@ -598,8 +506,11 @@ def load_yaml_conf(path="adcs.yaml"):
             ca["__ces_path"] = ces_path
 
         sp = ca.get("storage_paths", {}) or {}
-        ca["__path_cert"] = sp.get("cert_dir", conf["path_cert_fallback"])
+        ca["__path_cert"] = sp.get("cert_dir") or sp.get("certs_dir") or conf["path_cert_fallback"]
         ca["__path_csr"]  = sp.get("csr_dir",  conf["path_csr_fallback"])
+        # Inherit an explicitly configured global private directory only when
+        # the CA does not override it, as also reported by `adcs-tool ca show`.
+        ca["__path_private"] = sp.get("private_dir") or storage_paths_global.get("private_dir")
 
         refid = next_ca_refid
         next_ca_refid += 1
@@ -614,25 +525,27 @@ def load_yaml_conf(path="adcs.yaml"):
         if ca.get("default"):
             default_ca = ca
 
-        if ca.get('ket_cert_pem'):
-            ket_cert_path = ca.get('ket_cert_pem')
-            if not os.path.isfile(ket_cert_path):
-                raise ValueError(f"KET certificate file not found: {ket_cert_path}")
-            with open(ket_cert_path, "r", encoding="utf-8") as f:
-                ket_cert_pem = f.read()
-            cert_b64 = _pem_to_inner_b64(ket_cert_pem)
-            ca["__ket_certificate_pem"] = ket_cert_pem
-            ca["__ket_certificate_b64"] = cert_b64
+        try:
+            if ca.get('ket_cert_pem'):
+                ket_cert_path = ca.get('ket_cert_pem')
+                if not os.path.isfile(ket_cert_path):
+                    raise ValueError(f"KET certificate file not found: {ket_cert_path}")
+                with open(ket_cert_path, "r", encoding="utf-8") as f:
+                    ket_cert_pem = f.read()
+                cert_b64 = _pem_to_inner_b64(ket_cert_pem)
+                ca["__ket_certificate_pem"] = ket_cert_pem
+                ca["__ket_certificate_b64"] = cert_b64
 
-        if ca.get('ket_key_pem'):
-            ket_key_path = ca.get('ket_key_pem')
-            if not os.path.isfile(ket_key_path):
-                raise ValueError(f"KET private key file not found: {ket_key_path}")
-            with open(ket_key_path, "r", encoding="utf-8") as f:
-                ket_key_pem = f.read()
-            ca["__ket_key_pem"] = ket_key_pem
-
-        _configure_ca_exchange_materials(ca)
+            if ca.get('ket_key_pem'):
+                ket_key_path = ca.get('ket_key_pem')
+                if not os.path.isfile(ket_key_path):
+                    raise ValueError(f"KET private key file not found: {ket_key_path}")
+                with open(ket_key_path, "r", encoding="utf-8") as f:
+                    ket_key_pem = f.read()
+                ca["__ket_key_pem"] = ket_key_pem
+        except Exception:
+            if not bypass_read_only:
+                raise
     
     if conf["cas_list"]:
         conf["default_ca"] = default_ca or conf["cas_list"][0]
@@ -642,44 +555,80 @@ def load_yaml_conf(path="adcs.yaml"):
     for tdecl in cfg.get("templates", []) or []:
         cb = (tdecl.get("callback") or {})
         cb_path   = cb.get("path")
-        cb_define = cb.get("define", "define_template")
-        cb_issue = cb.get("issue", "emit_certificate")
+        cb_define = cb.get("define",'define_template')
+        cb_issue  = cb.get("issue",'emit_certificate')
         if not (cb_path and cb_define and cb_issue):
             raise ValueError("Each template must define callback.path / callback.define / callback.issue")
+
+        cb_auth_methods = cb.get("auth_methods")
+        if cb_auth_methods is None:
+            cb_auth_methods = ["kerberos", "username_password", "tls"]
+        elif not isinstance(cb_auth_methods, list) or not all(
+            isinstance(method, str) and method.strip()
+            for method in cb_auth_methods
+        ):
+            raise ValueError("callback.auth_methods must be a list of non-empty strings")
+        else:
+            cb_auth_methods = [method.strip() for method in cb_auth_methods]
 
         conf["__template_decls__"].append({
             "path": cb_path,
             "define": cb_define,
             "issue": cb_issue,
             "params": cb.get("params"),
+            "auth_methods": cb_auth_methods,
         })
     return conf
 
 
 
 
-def _callback_accepts_params(func) -> bool:
-    """Return True if a callback can receive the optional `params` kwarg."""
+def _callback_accepts_kwarg(func, name: str) -> bool:
+    """Return True if a callback can receive the named keyword argument."""
     try:
         sig = inspect.signature(func)
     except (TypeError, ValueError):
         return False
     return (
-        "params" in sig.parameters
+        name in sig.parameters
         or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
     )
 
-def _call_callback_with_params(func, *, params=None, **kwargs):
-    """Call a callback, passing `params` only when its signature supports it.
 
-    This keeps existing callbacks compatible while allowing new callbacks to
-    declare `params=None` and receive the YAML object from `callback.params`.
+def _callback_accepts_params(func) -> bool:
+    """Backward-compatible helper for callers checking the optional `params` kwarg."""
+    return _callback_accepts_kwarg(func, "params")
+
+
+def _ignore_legacy_tls_template(func, request, auth_method) -> bool:
+    """Return True when a legacy callback must not expose its template over TLS.
+
+    Older callbacks do not know about ``auth_method`` and therefore cannot
+    apply the TLS-specific filtering introduced with that argument. Preserve
+    their historical behavior, but do not expose such a template when nginx
+    has not explicitly confirmed the client certificate.
+    """
+    if auth_method != "tls" or _callback_accepts_kwarg(func, "auth_method"):
+        return False
+
+    headers = getattr(request, "headers", None)
+    return headers is None or headers.get("X-Ssl-Authenticated") != "SUCCESS"
+
+
+def _call_callback_with_params(func, *, params=None, **kwargs):
+    """Call a callback while preserving compatibility with older signatures.
+
+    `params` is only added when supported. `auth_method` is likewise removed
+    when present in the call but absent from the callback signature. Callbacks
+    accepting ``**kwargs`` continue to receive both optional values.
     """
     if _callback_accepts_params(func):
         kwargs["params"] = params
+
+    if "auth_method" in kwargs and not _callback_accepts_kwarg(func, "auth_method"):
+        kwargs.pop("auth_method")
+
     return func(**kwargs)
-
-
 
 # ---------------- Per-request build (CEP/CES): templates + OIDs (stateless) -----
 
@@ -688,6 +637,7 @@ def build_templates_for_policy_response(
     *,
     username=None,
     request,
+    auth_method=None,
     **kwargs
 ) -> Tuple[list[dict], list[dict]]:
     """
@@ -731,6 +681,9 @@ def build_templates_for_policy_response(
     # Build each template via its "define" callback
     for cb in conf.get("__template_decls__") or []:
 
+        if auth_method not in (None, "cli") and auth_method not in cb.get("auth_methods", ["kerberos", "username_password", "tls"]):
+            continue
+
         if cb["path"].startswith('/'):
             cb_path = cb["path"]
         else:
@@ -740,12 +693,20 @@ def build_templates_for_policy_response(
             )
 
         define_template = load_func(cb_path, cb["define"])
+
+        # Backward compatibility: callbacks predating `auth_method` cannot
+        # distinguish a valid TLS client-certificate request themselves. If
+        # nginx did not mark the certificate as SUCCESS, ignore this template.
+        if _ignore_legacy_tls_template(define_template, request, auth_method):
+            continue
+
         tpl = _call_callback_with_params(
             define_template,
             params=cb.get("params"),
             app_conf=conf,                 # conf remains read-only
             username=username,
             request=request,
+            auth_method=auth_method,
             **kwargs
         )
         if not tpl:
@@ -776,7 +737,9 @@ def build_templates_for_policy_response(
                 cand = conf["cas_by_id"].get(item) or conf["cas_by_display_name"].get(item)
             if cand is None:
                 raise ValueError(f"Template '{tpl.get('common_name','?')}' references unknown CA '{item}'")
+
             resolved.append(cand["__refid"])
+
         tpl["__ca_refids"] = resolved
 
         # Register the template OID in the **local** registry
@@ -821,11 +784,7 @@ def build_templates_for_policy_response(
         _materialize_required_extensions_static_in_place(tpl)
 
         # Remember emission callback (for CES)
-        tpl["__callback"] = {
-            "path": cb_path,
-            "issue": cb["issue"],
-            "params": cb.get("params"),
-        }
+        tpl["__callback"] = {"path": cb["path"], "issue": cb["issue"], "params": cb.get("params")}
 
         templates_list.append(tpl)
 

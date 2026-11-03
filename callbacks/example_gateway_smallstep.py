@@ -1,11 +1,12 @@
-from typing import Optional, Dict, Any
+from utils import ldap_text
+from typing import Iterable, Optional, Dict, Any
 from cryptography import x509 as cx509
 from cryptography.hazmat.primitives import serialization as crypto_serialization
-from utils import search_user, is_directly_issued_by_cert_in_folder, _cert_has_template_oid
-from utils_crt import is_certificate_revoked_by_crl
+from utils import search_user_ldap3, is_client_certificate_valid_for_ca_reference
 import requests
+import json
+import base64
 import subprocess
-from urllib.parse import unquote
 
 template_oid           = "1.3.6.1.4.1.311.21.8.999.3"
 template_name          = "adcswebcomputer"
@@ -14,7 +15,7 @@ template_minor_version = 3
 
 auto_enroll            = True
 
-def define_template(*, app_conf, username=None, request=None, params=None):
+def define_template(*, app_conf, username=None, request=None, params=None, auth_method=None):
     validity_seconds = 31536000       # 1 year
     renewal_seconds = 3628800         # 42 days
     auto_enroll = True
@@ -24,11 +25,17 @@ def define_template(*, app_conf, username=None, request=None, params=None):
     XSslClientSha1 = request.headers.get('X-Ssl-Client-Sha1', None)
     XSslAuthenticated = request.headers.get('X-Ssl-Authenticated', None)
     XSslClientDn = request.headers.get('X-Ssl-Client-Dn', None)
+    XSslClientCert = request.headers.get('X-Ssl-Client-Cert', None)
 
-    if username :
-       username = username
-    else:
-       username = XSslClientDn.split('=',1)[1]
+    if auth_method == "tls":
+        if not is_client_certificate_valid_for_ca_reference(
+            XSslClientCert,
+            (params or {}).get("ca_references", []),
+            template_oid=template_oid,
+        ):
+            return None
+        username = XSslClientDn.split('=', 1)[1]
+
 
     return {
         "common_name": template_name,
@@ -46,6 +53,7 @@ def define_template(*, app_conf, username=None, request=None, params=None):
         "permissions": {"enroll": True, "auto_enroll": auto_enroll},
 
         "flags": {
+            "hash_algorithm": "sha256",
             "private_key_flags": {
                 "exportable_key": True,
 
@@ -59,8 +67,8 @@ def define_template(*, app_conf, username=None, request=None, params=None):
                 # TPM Key Attestation (AD CS)
                 "attest_preferred": False,                      # Prefer key attestation if client can
                 "attest_required": False,                       # Require key attestation
-                "require_v2_attestation": False,               # Require MS-WCCE 55 Restricted-HMAC V2 (0x8000)
                 "attestation_without_policy": False,            # Attest but do not add issuance policy
+                "require_v2_attestation": False,                # Require Key Attestation V2 (refuse the relay-prone V1 protocol)
 
                 # EK trust model (AD CS)
                 "ek_trust_on_use": False,                       # EK trust on first use / credentials
@@ -187,9 +195,9 @@ def define_template(*, app_conf, username=None, request=None, params=None):
     }
 
 
-# =======================================
-# 2) Certificate issuance and TPM policy
-# =======================================
+# ======================
+# 2) Certificate issuance
+# ======================
 def emit_certificate(
     *,
     csr_der: Optional[bytes],
@@ -204,6 +212,7 @@ def emit_certificate(
     body_part_id = None,
     p7_der=None,
     tpm_result=None,
+    auth_method=None,
     params=None
 ) -> Dict[str, Any]:
 
@@ -213,25 +222,18 @@ def emit_certificate(
     XSslClientDn = request.headers.get('X-Ssl-Client-Dn', None)
     XSslClientCert = request.headers.get('X-Ssl-Client-Cert', None)
 
-    if username:
-        username = username
-    else:
-        client_cert = cx509.load_pem_x509_certificate(unquote(XSslClientCert).encode("utf-8"))
-        if not is_directly_issued_by_cert_in_folder(client_cert, ca['pem']['certificate_path_pem'])[0]:
+    if auth_method == "tls":
+        if not is_client_certificate_valid_for_ca_reference(
+            XSslClientCert,
+            (params or {}).get("ca_references", []),
+            template_oid=template_oid,
+        ):
             return {
                 "status": "denied",
                 "status_text": "denied",
             }
-        if is_certificate_revoked_by_crl(client_cert, ca.get("crl", {}).get("path_crl")):
-            return {
-                "status": "denied",
-                "status_text": "denied",
-            }
-        if not _cert_has_template_oid(client_cert, template_oid):
-            return {
-                "status": "denied",
-                "status_text": "denied",
-            }
+
+
         username = XSslClientDn.split('=', 1)[1]
 
     ca_url="https://ca.mydomain.lan"
@@ -246,11 +248,13 @@ def emit_certificate(
 
 
     TEMPLATE_OID = [u for u in template['__all_required_extensions'] if u['oid'] == "1.3.6.1.4.1.311.21.7"][0]['value_b64']
-    samdbr, sam_entry = search_user(username)
+    entry = search_user_ldap3(userauth=username)
+    if not entry:
+        return {"status": "denied", "status_text": "denied"}
 
-    #MS_SID = samdbr.schema_format_value("objectSID", sam_entry["objectSID"][0]).decode('utf-8')
-
-    cn = sam_entry["sAMAccountName"][0].decode("utf-8", "ignore")
+    cn = ldap_text(entry, "sAMAccountName")
+    if not cn:
+        return {"status": "denied", "status_text": "denied"}
 
     sans=[]
 

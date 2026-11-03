@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+"""Launch the optional Textual admin interface."""
+from adcs_gui import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())

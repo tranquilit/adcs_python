@@ -1,5 +1,11 @@
 global:
 
+
+  logging:
+    level: INFO
+    format: json
+    include_stack_trace: true
+
   #30 days
   next_update_hours_crl: 720
 
@@ -12,28 +18,46 @@ global:
 templates:
   - callback:
       path: "/etc/adcs/callbacks/user_template.py"
+      auth_methods:
+        - kerberos
+        - username_password
       params:
         ca_references:
           - ca_inter_test
 
   - callback:
       path: "/etc/adcs/callbacks/computer_template.py"
+      auth_methods:
+        - kerberos
       params:
         ca_references:
           - ca_inter_test
 
   - callback:
       path: "/etc/adcs/callbacks/dc_template.py"
+      auth_methods:
+        - kerberos
       params:
         ca_references:
           - ca_inter_test
 
   - callback:
       path: "/etc/adcs/callbacks/smartcard_auth.py"
+      auth_methods:
+        - kerberos
+        - username_password
       params:
         ca_references:
           - ca_inter_test
 
+#  - callback:
+#      path: "/etc/adcs/callbacks/sanweb.py"
+#      params:
+#        ca_references:
+#          - ca-web
+#      auth_methods:
+#        - tls
+#        - token
 
 auth:
   - kerberos: true
@@ -41,6 +65,7 @@ auth:
   - username_password: true
   - callback:
       path: "/etc/adcs/callbacks/auth_basic_template.py"
+#      path: "/etc/adcs/callbacks/auth_token_password.py"
 
 ################Example########################
 ##cas:

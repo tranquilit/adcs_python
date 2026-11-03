@@ -1,0 +1,3 @@
+[submodule "vendor/py-mspack-decoder"]
+	path = vendor/py-mspack-decoder
+	url = https://github.com/tranquilit/py-mspack-decoder.git

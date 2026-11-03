@@ -1,0 +1,26 @@
+[Unit]
+Description=ADCS Python (Gunicorn)
+After=network.target
+
+[Service]
+Type=simple
+User=adcs
+Group=adcs
+WorkingDirectory=/opt/adcs_python
+Environment=HOME=/opt/adcs_python
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=KRB5_KTNAME=FILE:/etc/krb5.keytab
+
+ExecStart=/usr/bin/gunicorn \
+    --bind 127.0.0.1:8080 \
+    --worker-class gthread \
+    --workers 3 \
+    --threads 4 \
+    --timeout 180 \
+    wsgi:application
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
