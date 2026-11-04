@@ -823,6 +823,23 @@ def _hmac_signature_candidates(signature: bytes) -> list[tuple[int, bytes]]:
     return out
 
 
+def _verify_certify_hmac_digest(*, hmac_key: bytes, attest_raw: bytes,
+                                hash_alg: int, signature_digest: bytes) -> bool:
+    """Verify TPM_ALG_HMAC on Hash(TPMS_ATTEST), not raw attestation bytes.
+
+    TPM2_Certify signs the attestation digest with the hash algorithm selected
+    by the signature scheme. The imported restricted HMAC key applies HMAC to
+    that digest. Signature lengths are checked by compare_digest.
+    """
+    try:
+        algorithm = tpm_mod._tpm_alg_to_hash(hash_alg)
+        digest_to_sign = hashlib.new(algorithm, attest_raw).digest()
+        expected = hmac.new(hmac_key, digest_to_sign, algorithm).digest()
+    except (ValueError, TypeError, TPMAttestationError):
+        return False
+    return hmac.compare_digest(expected, signature_digest)
+
+
 def _layouts_from_kads(blob: bytes, label: str) -> list[dict]:
     try:
         parsed = tpm_mod._parse_microsoft_key_attestation(blob)
@@ -911,21 +928,24 @@ def _candidate_layouts(claim: bytes, _depth: int = 0) -> list[dict]:
 def _verify_claim_layout(layout: dict, *, hmac_key: bytes, nonce: bytes, expected_aik_spki_der: bytes) -> dict:
     attest_raw = layout["attest"]
 
-    # 1. Authenticity: only a TPM that imported the EK-wrapped key can compute this.
+    # 1. Authenticity: TPM2_Certify signs a digest, not the raw TPMS_ATTEST.
+    # As with the restricted-HMAC verifier in tpm_restricted_hmac.py,
+    # TPM_ALG_HMAC verifies HMAC(key, Hash(TPMS_ATTEST)).
     hmac_hash_alg = None
     for signature in layout["signatures"]:
         for hash_alg, digest in _hmac_signature_candidates(signature):
-            try:
-                expected = hmac.new(hmac_key, attest_raw, tpm_mod._tpm_alg_to_hash(hash_alg)).digest()
-            except Exception:
-                continue
-            if hmac.compare_digest(expected, digest):
+            if _verify_certify_hmac_digest(
+                hmac_key=hmac_key,
+                attest_raw=attest_raw,
+                hash_alg=hash_alg,
+                signature_digest=digest,
+            ):
                 hmac_hash_alg = hash_alg
                 break
         if hmac_hash_alg is not None:
             break
     if hmac_hash_alg is None:
-        raise V2AttestationError("HMAC over TPMS_ATTEST does not verify with the server-held key")
+        raise V2AttestationError("TPM2_Certify HMAC over Hash(TPMS_ATTEST) does not verify with the server-held key")
 
     # 2. The attested structure is a fresh TPM2_Certify bound to our nonce.
     attest = tpm_mod.parse_tpms_attest(attest_raw)
