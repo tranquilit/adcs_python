@@ -760,3 +760,24 @@ The environment setting can be overridden by `--format`. An invalid environment
 value falls back to `table`. The CA creation command deliberately retains its
 original stdout format for existing redirections. Screen-reader behaviour
 should be validated with the actual terminal and assistive technology.
+
+### Test natif TPM V2 (`TPM2_Import` sous EK)
+
+Pour distinguer une erreur de duplication TPM d'une incompatibilité du blob
+PCP sous Windows, consulter [`TPMV2-TEST-IMPORT-EK.md`](TPMV2-TEST-IMPORT-EK.md).
+Le test autonome n'affecte pas le flux de production.
+
+### Test direct TPM V2 sur Windows (sans Linux)
+
+Pour relancer une inscription depuis `tools` et enregistrer automatiquement les
+operations NCrypt (`IMPORT KEY`, `DECRYPT`) ou tester directement un blob capture
+par le serveur, consulter [`TPMV2-TEST-DIRECT-WINDOWS.md`](TPMV2-TEST-DIRECT-WINDOWS.md).
+
+```powershell
+.\tools\test-tpmv2-windows.ps1 -Mode Enroll -Template adcswebcomputer
+```
+
+La capture exacte du DER V2 et du blob PCP dans le chemin CES est disponible
+uniquement si `ADCS_TPM_V2_DEBUG_DIR` est defini. Cette capture est facultative
+et ne modifie pas les RequestID (128 bits). Le format du blob Windows reste
+experimental et le test ne constitue pas une correction confirmee de 0x80090029.

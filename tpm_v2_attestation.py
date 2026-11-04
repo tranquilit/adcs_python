@@ -441,7 +441,9 @@ def parse_wrapped_key_blob(blob: bytes) -> dict:
 # Optional server-side diagnosis (off by default)
 # --------------------------------------------------------------------------- #
 
-def _dump_wrapped_blob_if_requested(blob: bytes, container_name: str) -> None:
+def _dump_wrapped_blob_if_requested(
+    blob: bytes, container_name: str, *, challenge_der: bytes
+) -> None:
     """Write a complete wrapped blob for a controlled interoperability test.
 
     This is OFF unless ADCS_TPM_V2_DEBUG_DIR is configured.  A challenge is
@@ -468,11 +470,23 @@ def _dump_wrapped_blob_if_requested(blob: bytes, container_name: str) -> None:
     with os.fdopen(os.open(path, flags, 0o600), "wb") as output:
         output.write(blob)
 
+    # Capture the exact ASN.1 CRYPT_ATTRIBUTES passed to the CMC builder.
+    # The DER includes the encrypted challenge and the public nonce, never
+    # the plaintext HMAC key or encrypted internal server state.
+    challenge_filename = f"tpmv2-{token}.der"
+    challenge_path = os.path.join(debug_dir, challenge_filename)
+    with os.fdopen(os.open(challenge_path, flags, 0o600), "wb") as output:
+        output.write(challenge_der)
+
     # Metadata intentionally excludes the secret, nonce, and the key bytes.
     meta = {
         "blob_filename": filename,
         "sha256": hashlib.sha256(blob).hexdigest(),
         "blob_size": len(blob),
+        "challenge_filename": challenge_filename,
+        "challenge_sha256": hashlib.sha256(challenge_der).hexdigest(),
+        "challenge_size": len(challenge_der),
+        "container_sha256": hashlib.sha256(container_name.encode("utf-8")).hexdigest(),
         "container_prefix_ok": container_name.startswith("V2AIK-"),
         "wrapped_key_format": "PCP_KEY_BLOB_WIN8 (experimental)",
     }
@@ -549,16 +563,19 @@ def create_v2_challenge(*, ek_pub, aik_spki_der: bytes, container_name: str) -> 
             or parsed["private"] != wrapped.duplicate
             or parsed["encrypted_secret"] != wrapped.in_sym_seed):
         raise V2AttestationError("TPM V2 blob did not round-trip canonically")
-    _dump_wrapped_blob_if_requested(blob, container_name)
     ek_algorithm, ek_parameter = ek_challenge_algorithm_attributes(ek_pub)
+    challenge_der = build_v2_challenge_attributes(
+        wrapped_key_blob=blob,
+        nonce=nonce,
+        container_name=container_name,
+        ek_algorithm=ek_algorithm,
+        ek_parameter=ek_parameter,
+    )
+    _dump_wrapped_blob_if_requested(
+        blob, container_name, challenge_der=challenge_der
+    )
     return V2Challenge(
-        challenge_der=build_v2_challenge_attributes(
-            wrapped_key_blob=blob,
-            nonce=nonce,
-            container_name=container_name,
-            ek_algorithm=ek_algorithm,
-            ek_parameter=ek_parameter,
-        ),
+        challenge_der=challenge_der,
         server_state=pack_server_state(hmac_key, nonce, aik_spki_der),
         nonce=nonce,
         wrapped_key_blob=blob,
