@@ -27,12 +27,14 @@ Interoperability notes (things Microsoft documents as CSP specific or leaves
 open; each one is isolated in a small function/constant so it is easy to adapt
 after a real Windows exchange):
 
-* The TPM 2.0 wrapped key is carried as a PCP_KEY_BLOB_WIN8 opaque key blob,
-  following the publicly documented Microsoft PCP BCRYPT_OPAQUE_KEY_BLOB
-  layout (52-byte little-endian header and TPM2B_PUBLIC, TPM2B_PRIVATE,
-  TPM2B_ENCRYPTED_SECRET in that order). The format specifically used by
-  Microsoft's V2 challenge client remains provider-specific and must be
-  validated with a Windows interoperability test.
+* The challenge can carry the three TPM2_Import inputs as canonical
+  length-prefixed TPM2B_PUBLIC, TPM2B_PRIVATE and TPM2B_ENCRYPTED_SECRET.
+  This removes the previous (incorrect) assumption that an EK duplication
+  and a PCP_KEY_BLOB_WIN8 backup/restore key are interchangeable.
+  The on-wire encoding inside the Microsoft provider-specific V2 challenge
+  is not publicly specified: the TCG direct encoding is an interoperability
+  hypothesis, not a proven Windows implementation. The historical PCP
+  encoding remains available as an explicitly selected fallback for A/B tests.
 * The V2 challenge is a DER CRYPT_ATTRIBUTES, encoded as SET OF Attribute
   (PKCS_ATTRIBUTES).  Switch ``CRYPT_ATTRIBUTES_OUTER_TAG`` to 0x30 if a client
   ever turns out to expect SEQUENCE OF.
@@ -98,7 +100,26 @@ RESTRICTED_HMAC_OBJECT_ATTRIBUTES = (
 WRAPPED_KEY_MAGIC_INT = 0x4D504350
 WRAPPED_KEY_MAGIC = struct.pack("<I", WRAPPED_KEY_MAGIC_INT)
 WRAPPED_KEY_PLATFORM_TPM20 = 2
-WRAPPED_KEY_HEADER_SIZE = 52  # 13 little-endian UINT32 values
+WRAPPED_KEY_HEADER_SIZE = 52  # historical PCP, 13 little-endian UINT32 values
+
+# The MS-WCCE challenge requires a wrapped HMAC key (OCTET STRING), but does
+# not specify a PCP opaque backup blob. Default to a canonical concatenation
+# of the three TPM2_Import inputs. The legacy PCP mode remains explicit, and
+# must not be mistaken for a TPM2_Import-compliant key wrapper.
+CHALLENGE_FORMAT_ENV = "ADCS_TPM_V2_CHALLENGE_FORMAT"
+CHALLENGE_FORMAT_TCG = "tcg-import"
+CHALLENGE_FORMAT_PCP = "pcp-legacy"
+SUPPORTED_CHALLENGE_FORMATS = frozenset((CHALLENGE_FORMAT_TCG, CHALLENGE_FORMAT_PCP))
+
+
+def challenge_format_from_environment() -> str:
+    value = os.environ.get(CHALLENGE_FORMAT_ENV, CHALLENGE_FORMAT_TCG).strip().lower()
+    if value not in SUPPORTED_CHALLENGE_FORMATS:
+        raise V2AttestationError(
+            f"Unsupported {CHALLENGE_FORMAT_ENV}={value!r}; expected one of "
+            f"{', '.join(sorted(SUPPORTED_CHALLENGE_FORMATS))}"
+        )
+    return value
 
 # PKCS_ATTRIBUTES: "Attributes ::= SET OF Attribute".
 CRYPT_ATTRIBUTES_OUTER_TAG = 0x31
@@ -374,65 +395,113 @@ def wrap_restricted_hmac_key_to_ek(
     )
 
 
-def build_wrapped_key_blob(wrapped: WrappedHmacKey) -> bytes:
-    """Build a PCP_KEY_BLOB_WIN8 TPM 2.0 opaque import blob.
+def _check_tpm2b(blob: bytes, label: str) -> bytes:
+    """Validate a complete big-endian TPM2B and return its contents."""
+    if len(blob) < 3:
+        raise V2AttestationError(f"{label}: missing TPM2B body")
+    payload_size = struct.unpack_from(">H", blob, 0)[0]
+    if payload_size == 0 or payload_size != len(blob) - 2:
+        raise V2AttestationError(f"{label}: invalid TPM2B size")
+    return blob[2:]
 
-    This is the documented Microsoft Platform Crypto Provider key-blob
-    layout. Data regions follow the header's declared order, not the order
-    used by the previous proprietary BKWT guess.
+
+def build_wrapped_key_blob(
+    wrapped: WrappedHmacKey, *, challenge_format: Optional[str] = None
+) -> bytes:
+    """Encode an EK-wrapped restricted HMAC key in the chosen wire format.
+
+    ``tcg-import`` (default): exact TPM2_Import inputs as three canonical
+    TPM2B structures, concatenated in public, private, encrypted-secret order.
+    This is an *experimental Windows transport layout*, not a statement that
+    MS-WCCE mandates this concatenation.
+
+    ``pcp-legacy``: the previous PCP_KEY_BLOB_WIN8 construction, retained only
+    for controlled comparison. It MUST NOT be treated as an authoritative
+    representation of an EK-bound TPM2_Import duplication.
     """
+    fmt = challenge_format or challenge_format_from_environment()
+    if fmt not in SUPPORTED_CHALLENGE_FORMATS:
+        raise V2AttestationError(f"Unknown TPM V2 challenge format {fmt!r}")
     public = _tpm2b(wrapped.public)
     private = _tpm2b(wrapped.duplicate)
     encrypted_secret = _tpm2b(wrapped.in_sym_seed)
+    for label, area in (
+        ("public", public), ("private", private), ("encrypted_secret", encrypted_secret)
+    ):
+        _check_tpm2b(area, label)
+
+    if fmt == CHALLENGE_FORMAT_TCG:
+        return public + private + encrypted_secret
+
+    # Legacy PCP encoding: not a documented transport for a V2 EK duplication.
     header = struct.pack(
         "<13I",
         WRAPPED_KEY_MAGIC_INT,
         WRAPPED_KEY_HEADER_SIZE,
         WRAPPED_KEY_PLATFORM_TPM20,
-        0,  # flags: no authorization value
-        len(public),           # cbPublic
-        len(private),          # cbPrivate
+        0,  # flags
+        len(public),
+        len(private),
         0,  # cbMigrationPublic
         0,  # cbMigrationPrivate
         0,  # cbPolicyDigestList
         0,  # cbPCRBinding
         0,  # cbPCRDigest
-        len(encrypted_secret), # cbEncryptedSecret
+        len(encrypted_secret),  # historical misuse of cbEncryptedSecret
         0,  # cbTpm12HostageBlob
     )
-    assert len(header) == WRAPPED_KEY_HEADER_SIZE
     return header + public + private + encrypted_secret
 
 
-def parse_wrapped_key_blob(blob: bytes) -> dict:
-    """Strictly parse the PCP_KEY_BLOB_WIN8 subset produced above."""
+def parse_wrapped_key_blob(blob: bytes, *, challenge_format: Optional[str] = None) -> dict:
+    """Parse either explicitly selected format; never interpret PCP as TCG."""
+    if challenge_format is None:
+        fmt = (CHALLENGE_FORMAT_PCP if blob.startswith(WRAPPED_KEY_MAGIC)
+               else CHALLENGE_FORMAT_TCG)
+    else:
+        fmt = challenge_format
+    if fmt not in SUPPORTED_CHALLENGE_FORMATS:
+        raise V2AttestationError(f"Unknown TPM V2 challenge format {fmt!r}")
+
+    if fmt == CHALLENGE_FORMAT_TCG:
+        result = {}
+        offset = 0
+        for label in ("public", "private", "encrypted_secret"):
+            if offset + 2 > len(blob):
+                raise V2AttestationError(f"Missing {label} section")
+            size = struct.unpack_from(">H", blob, offset)[0]
+            end = offset + 2 + size
+            if size == 0 or end > len(blob):
+                raise V2AttestationError(f"Invalid {label} TPM2B section")
+            result[label] = _check_tpm2b(blob[offset:end], label)
+            offset = end
+        if offset != len(blob):
+            raise V2AttestationError("Trailing data in TCG import challenge")
+        return result
+
     if len(blob) < WRAPPED_KEY_HEADER_SIZE:
-        raise V2AttestationError("Truncated PCP_KEY_BLOB_WIN8 header")
+        raise V2AttestationError("Truncated legacy PCP header")
     (
         magic, header_size, platform, flags, cb_public, cb_private,
         cb_migration_public, cb_migration_private, cb_policy,
         cb_pcr_binding, cb_pcr_digest, cb_secret, cb_hostage,
     ) = struct.unpack_from("<13I", blob, 0)
     if magic != WRAPPED_KEY_MAGIC_INT or platform != WRAPPED_KEY_PLATFORM_TPM20:
-        raise V2AttestationError("Invalid PCP magic or TPM platform")
+        raise V2AttestationError("Invalid legacy PCP magic or TPM platform")
     if header_size != WRAPPED_KEY_HEADER_SIZE or flags != 0:
-        raise V2AttestationError("Unsupported PCP header size or flags")
+        raise V2AttestationError("Unsupported legacy PCP header or flags")
     if any((cb_migration_public, cb_migration_private, cb_policy,
             cb_pcr_binding, cb_pcr_digest, cb_hostage)):
-        raise V2AttestationError("Unexpected optional PCP key blob sections")
+        raise V2AttestationError("Unexpected legacy PCP optional sections")
     if not cb_public or not cb_private or not cb_secret:
-        raise V2AttestationError("Missing PCP key blob section")
+        raise V2AttestationError("Missing legacy PCP section")
     if header_size + cb_public + cb_private + cb_secret != len(blob):
-        raise V2AttestationError("PCP section sizes do not match the blob length")
-
+        raise V2AttestationError("Legacy PCP section sizes do not match blob")
     result = {}
     offset = header_size
     for label, length in (("public", cb_public), ("private", cb_private),
                           ("encrypted_secret", cb_secret)):
-        area = blob[offset:offset + length]
-        if len(area) < 2 or struct.unpack_from(">H", area)[0] != len(area) - 2:
-            raise V2AttestationError(f"Noncanonical {label} TPM2B section")
-        result[label] = area[2:]
+        result[label] = _check_tpm2b(blob[offset:offset + length], label)
         offset += length
     return result
 
@@ -488,7 +557,10 @@ def _dump_wrapped_blob_if_requested(
         "challenge_size": len(challenge_der),
         "container_sha256": hashlib.sha256(container_name.encode("utf-8")).hexdigest(),
         "container_prefix_ok": container_name.startswith("V2AIK-"),
-        "wrapped_key_format": "PCP_KEY_BLOB_WIN8 (experimental)",
+        "wrapped_key_format": (
+            CHALLENGE_FORMAT_PCP if blob.startswith(WRAPPED_KEY_MAGIC)
+            else CHALLENGE_FORMAT_TCG
+        ),
     }
     meta_path = os.path.join(debug_dir, f"tpmv2-{token}.json")
     with os.fdopen(os.open(meta_path, flags, 0o600), "w", encoding="utf-8") as output:
@@ -548,6 +620,7 @@ class V2Challenge:
     server_state: bytes   # plaintext server state; encrypt before persisting
     nonce: bytes
     wrapped_key_blob: bytes
+    wrapped_key_format: str
 
 
 def create_v2_challenge(*, ek_pub, aik_spki_der: bytes, container_name: str) -> V2Challenge:
@@ -555,10 +628,11 @@ def create_v2_challenge(*, ek_pub, aik_spki_der: bytes, container_name: str) -> 
     hmac_key = os.urandom(HMAC_KEY_SIZE)
     nonce = os.urandom(NONCE_SIZE)
     wrapped = wrap_restricted_hmac_key_to_ek(ek_pub, hmac_key)
-    blob = build_wrapped_key_blob(wrapped)
+    selected_format = challenge_format_from_environment()
+    blob = build_wrapped_key_blob(wrapped, challenge_format=selected_format)
     # Fail on a malformed locally-generated envelope rather than send it to
     # Windows, where it would produce an opaque NTE_NOT_SUPPORTED error.
-    parsed = parse_wrapped_key_blob(blob)
+    parsed = parse_wrapped_key_blob(blob, challenge_format=selected_format)
     if (parsed["public"] != wrapped.public
             or parsed["private"] != wrapped.duplicate
             or parsed["encrypted_secret"] != wrapped.in_sym_seed):
@@ -579,6 +653,7 @@ def create_v2_challenge(*, ek_pub, aik_spki_der: bytes, container_name: str) -> 
         server_state=pack_server_state(hmac_key, nonce, aik_spki_der),
         nonce=nonce,
         wrapped_key_blob=blob,
+        wrapped_key_format=selected_format,
     )
 
 

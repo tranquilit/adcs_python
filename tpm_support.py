@@ -806,6 +806,8 @@ def create_microsoft_v2_challenge_response(
         "TPM Key Attestation V2 challenge created", outcome="unknown",
         enrollment_request_id=int(safe_request_id), container_name=container_name,
         ek_cert_present=bool(ek_cert_der),
+        wrapped_key_format=challenge.wrapped_key_format,
+        wrapped_key_size=len(challenge.wrapped_key_blob),
     )
 
     return {
