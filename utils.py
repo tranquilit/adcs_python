@@ -2051,6 +2051,10 @@ def build_get_policies_response(
     set_xsi_nil(pol_not_changed, True)
 
     policies = ET.SubElement(response, ET.QName(NS_EP['ep'], 'policies'))
+    # MS-XCEP PolicyCollection requires at least one <policy>. An empty
+    # collection must be represented as xsi:nil="true", not <policies />.
+    if not templates:
+        set_xsi_nil(policies, True)
 
     # --- templates -> policies/policy ---
     ca_allowed_refids = set()
@@ -2243,6 +2247,10 @@ def build_get_policies_response(
             text(ET.SubElement(e, ET.QName(NS_EP['ep'], 'value')), ext["value_b64"])
 
     ep_cas = ET.SubElement(gpr, ET.QName(NS_EP['ep'], 'cAs'))
+    # With no policies there are no issuers to advertise. CACollection also
+    # requires at least one <cA>, so use nil when the collection is empty.
+    if not templates or not cas:
+        set_xsi_nil(ep_cas, True)
 
     AUTH_MAP = {
         "anonymous": 1,
@@ -2259,7 +2267,7 @@ def build_get_policies_response(
     
     priority = 1 
     
-    for ca in cas:
+    for ca in (cas if templates else []):
         ca_el = ET.SubElement(ep_cas, ET.QName(NS_EP['ep'], 'cA'))
         uris = ET.SubElement(ca_el, ET.QName(NS_EP['ep'], 'uris'))
     
@@ -2293,6 +2301,9 @@ def build_get_policies_response(
 
     # --- oIDs ---
     ep_oids = ET.SubElement(gpr, ET.QName(NS_EP['ep'], 'oIDs'))
+    # OIDCollection also has minOccurs=1 on <oID>.
+    if not oids:
+        set_xsi_nil(ep_oids, True)
     for o in oids:
         oe = ET.SubElement(ep_oids, ET.QName(NS_EP['ep'], 'oID'))
         text(ET.SubElement(oe, ET.QName(NS_EP['ep'], 'value')), o["value"])
